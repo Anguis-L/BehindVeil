@@ -1,0 +1,80 @@
+{
+  "session": {
+    "provider": "openai-compat",
+    "model": "deepseek-chat",
+    "temperature": 0.9,
+    "maxHistoryMessages": 20,
+    "worldBookBudgetTokens": 1200,
+    "scanDepth": 8
+  },
+  "kpCard": {
+    "spec": "chara_card_v3",
+    "data": {
+      "name": "守秘人",
+      "description": "你是守秘人：负责叙事、扮演 NPC，数值一律以状态板为准。",
+      "scenario": "深夜书房：一桩失踪案",
+      "first_mes": "灯亮了。",
+      "mes_example": "",
+      "extensions": { "aidle": { "rulebook": "coc7" } }
+    }
+  },
+  "messages": [
+    {
+      "seq": 1,
+      "ts": "2026-09-25T00:00:00.000Z",
+      "sessionId": "ses_1",
+      "type": "ic",
+      "senderId": "member_1",
+      "content": "我推开书房的门，检查书桌抽屉。"
+    },
+    {
+      "seq": 2,
+      "ts": "2026-09-25T00:00:05.000Z",
+      "sessionId": "ses_1",
+      "type": "ooc",
+      "senderId": "member_2",
+      "content": "我这边先去楼下看看。",
+      "visibility": "all"
+    },
+    {
+      "seq": 3,
+      "ts": "2026-09-25T00:00:09.000Z",
+      "sessionId": "ses_1",
+      "type": "system",
+      "subtype": "ai_directive_result",
+      "content": "侦查检定：42 / 60，普通成功。"
+    }
+  ],
+  "stateBoard": {
+    "version": 4,
+    "pcs": {
+      "member_1": {
+        "sheet": {
+          "playerName": "张三",
+          "occupation": "记者",
+          "str": 50,
+          "con": 60,
+          "siz": 55,
+          "dex": 70,
+          "app": 45,
+          "int": 80,
+          "pow": 65,
+          "edu": 75,
+          "luck": 60,
+          "hp": 11,
+          "mp": 13,
+          "san": 65,
+          "db": "0",
+          "build": "0",
+          "skills": { "侦查": 60, "图书馆使用": 50 }
+        },
+        "conditions": ["轻伤"]
+      }
+    },
+    "scene": { "name": "书房·二楼", "time": "1924-03-12 深夜", "publicDesc": "窗外雨声不断" },
+    "facts": ["门从内侧反锁", "书桌上有一封未拆的信"],
+    "updatedAt": "2026-09-25T00:00:09.000Z"
+  },
+  "worldBook": { "entries": [] },
+  "pcRoster": "张三（记者）、李四（医生）"
+}

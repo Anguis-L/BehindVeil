@@ -6,7 +6,8 @@ const COVERAGE_MIN = Number(process.env.COVERAGE_MIN ?? 85);
 
 export default defineConfig({
   test: {
-    projects: ['packages/*'],
+    // 跨包集成载体：tests/（黄金用例、架构约束、崩溃夹具），见 tests/vitest.config.ts
+    projects: ['packages/*', 'tests'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov', 'json-summary'],

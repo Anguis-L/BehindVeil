@@ -1,0 +1,1511 @@
+openapi: 3.1.0
+
+# =============================================================================
+# BehindVeil · 管理面 REST API 契约（OpenAPI 3.1）
+#
+# 生成依据（单一事实来源）：
+#   - packages/shared/src/*.ts      Zod Schema（domain.ts / message.ts / dice.ts / errors.ts）
+#   - packages/server/src/index.ts  已实现路由（M0）
+#   - 00.development/AI_KP_TDD_技术设计文档_v1.md §3 数据模型 / §4 通信协议 / §8 安全 / §11 错误码
+#   - 00.development/AI_KP_施工文档_v1.md  决议 D-03（管理面走 REST）、T-M1-02 / T-M5-09 / T-M5-05
+#
+# 状态标注（x-status）说明——本文件是"契约先行"产物，不等于已实现：
+#   implemented = 代码里已存在（当前仅 /healthz）
+#   planned     = 设计文档已明确要求，路径/语义来自文档，尚未开工
+#   proposed    = 设计文档只说了"走 REST"但没定路径/字段，此处为补全提案，待拍板
+#
+# 房内实时交互（消息、掷骰、AI 叙事、状态板）不走 REST，走 Socket.IO，
+# 见同目录 socketio-asyncapi.yaml。
+# =============================================================================
+
+info:
+  title: BehindVeil 管理面 API
+  version: 0.0.0
+  summary: 自托管 TRPG 平台的房间/会话/卡库/模组管理接口
+  description: |
+    BehindVeil 是一个自托管的多人在线文字跑团平台：AI 扮演守秘人（KP）负责叙事，
+    **服务端用 CSPRNG 掷骰并按规则书判定**——叙事交给 LLM，规则交给代码。
+
+    本文件只描述**管理面 HTTP REST**（建房、房间列表、重置邀请码、房间配置、卡库、模组）。
+    房内实时交互走 Socket.IO，见 `socketio-asyncapi.yaml`。
+
+    ## 实现状态（重要）
+
+    项目当前处于 M0 里程碑，**只有 `GET /healthz` 真实存在**。
+    其余接口是按设计文档（TDD §4 + 施工文档决议 D-03）先行固化的契约，用于前后端并行开发，
+    标注见每个操作的 `x-status`。接口行为以代码落地为准，落地后请回写本文件。
+
+    ## 错误模型
+
+    业务错误统一使用 `AppError` 载荷（错误码表见 TDD §11）：
+
+    | 错误码 | 场景 | 用户侧提示 |
+    |---|---|---|
+    | E-LLM-01 | provider 超时/5xx | KP 沉吟中…（重试） |
+    | E-LLM-02 | 流中断 | 生成中断，已保留已生成部分 |
+    | E-DICE-01 | 骰式非法 | 骰式无法解析 |
+    | E-AI-01 | AI 指令解析失败 | （玩家无感，KP 端告警） |
+    | E-ST-01 | 状态板版本冲突 | 数据已更新，请刷新 |
+    | E-ROOM-01 | 邀请码无效/满员 | 邀请码无效或房间已满 |
+
+    框架级未捕获异常走 `INTERNAL`（HTTP ≥ 500 时不回传原始 message，防止 key 泄露，NFR-03）。
+
+    ## 鉴权现状与开放问题
+
+    v1 定位为单进程自托管（2C2G 小主机 / 树莓派 / Tailscale 组网），
+    设计文档**没有**为管理面 REST 定义账号体系或令牌机制。当前假设：
+    管理面靠网络边界保护（只监听 127.0.0.1，或反代 + TLS + IP 白名单）。
+
+    待拍板（落地 M1 前需补 ADR）：
+    1. 建房者如何取得 Host 身份？建房走 REST、进房走 Socket，两者之间没有身份关联字段。
+    2. PATCH /rooms/{id}/settings 的调用方权限如何校验？
+    3. 模组卸载冲突（D-09）尚无专属错误码，本文暂用 409 + E-ROOM-01。
+  contact:
+    name: BehindVeil
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: http://127.0.0.1:8787
+    description: '本地默认（config.yaml：host=127.0.0.1、port=8787）'
+  - url: http://{host}:{port}
+    description: 自建部署（公网部署务必配合反向代理 + TLS）
+    variables:
+      host:
+        default: 127.0.0.1
+      port:
+        default: '8787'
+
+tags:
+  - name: 系统
+    description: 健康检查与存活探测
+  - name: 房间
+    description: 建房 / 列表 / 邀请码 / 配置（T-M1-02，决议 D-03）
+    x-milestone: M1
+  - name: 会话
+    description: 一房多会话（连载团）查询（T-M1-07）
+    x-milestone: M1
+  - name: 卡库
+    description: chara_card_v3 角色卡导入导出（T-M5-09，FR-08）
+    x-milestone: M5
+  - name: 模组
+    description: 模组包加载 / 卸载（T-M5-05，FR-10，决议 D-09）
+    x-milestone: M5
+
+x-extension-vocabulary:
+  x-status: implemented | planned | proposed
+  x-milestone: '对应里程碑 M0–M6'
+  x-source: 设计文档出处（任务卡 ID 或 TDD 章节）
+
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      tags: [系统]
+      summary: 健康检查
+      description: |
+        返回服务存活状态、服务名与协议版本。
+        **不依赖** 存储恢复与 LLM 配置，仅表示 HTTP 层可响应。
+      x-status: implemented
+      x-milestone: M0
+      x-source: packages/server/src/index.ts
+      responses:
+        '200':
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              examples:
+                ok:
+                  summary: 正常响应
+                  value:
+                    ok: true
+                    name: BehindVeil-server
+                    protocol: 0.0.0
+
+  /rooms:
+    post:
+      operationId: createRoom
+      tags: [房间]
+      summary: 创建房间（建房者即 Host）
+      description: |
+        创建一个房间并返回 6 位邀请码。建房者即 Host，**v1 不可转让**（决议 D-02）。
+
+        ⚠️ 开放问题：本接口无调用者身份，建房者如何绑定到后续 Socket 连接的 Host 角色
+        尚未定义，见 info 描述中的开放问题 1。
+      x-status: planned
+      x-milestone: M1
+      x-source: T-M1-02 / FR-01 / D-02
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRoomRequest'
+            examples:
+              default:
+                summary: 最小建房
+                value:
+                  name: 疯狂山脉·第一夜
+              full:
+                summary: 指定人数上限与默认会话设置
+                value:
+                  name: 疯狂山脉·第一夜
+                  memberLimit: 6
+                  defaultSessionSettings:
+                    provider: openai-compat
+                    model: deepseek-chat
+                    temperature: 0.8
+                    maxHistoryMessages: 40
+                    worldBookBudgetTokens: 2000
+                    scanDepth: 4
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Room'
+              examples:
+                created:
+                  value:
+                    id: V1StGXR8_Z5j
+                    name: 疯狂山脉·第一夜
+                    createdAt: '2026-09-25T10:15:30.000Z'
+                    inviteCode: A7K2Q9
+                    activeSessionId: null
+                    memberLimit: 6
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+    get:
+      operationId: listRooms
+      tags: [房间]
+      summary: 房间列表
+      description: |
+        列出本机全部房间（自托管单机，无分页与租户隔离）。
+        供自建部署的"房间选择页"使用；`inviteCode` 属于敏感信息（等同房间钥匙），
+        列表是否返回该字段待拍板——本文暂按返回处理。
+      x-status: planned
+      x-milestone: M1
+      x-source: T-M1-02 / FR-01
+      responses:
+        '200':
+          description: 房间数组（无房间时为空数组）
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Room'
+              examples:
+                two:
+                  value:
+                    - id: V1StGXR8_Z5j
+                      name: 疯狂山脉·第一夜
+                      createdAt: '2026-09-25T10:15:30.000Z'
+                      inviteCode: A7K2Q9
+                      activeSessionId: s_01J9Z8Y7X6
+                      memberLimit: 6
+                    - id: mK3pQr7tL2wX
+                      name: 黑夜之子·第二章
+                      createdAt: '2026-09-24T20:00:00.000Z'
+                      inviteCode: 4BQXZT
+                      activeSessionId: null
+                      memberLimit: 8
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    get:
+      operationId: getRoom
+      tags: [房间]
+      summary: 查询单个房间
+      description: |
+        设计文档未列出该路径，此处为补全提案（`GET /rooms` 已能取到全部字段）。
+        若前端需要"进房前校验房间是否存在/是否满员"，本接口比拉全量列表更合适。
+      x-status: proposed
+      x-milestone: M1
+      x-source: 提案（TDD §3.1 Room）
+      responses:
+        '200':
+          description: 房间详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Room'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/invite-reset:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    post:
+      operationId: resetInviteCode
+      tags: [房间]
+      summary: 重置邀请码
+      description: |
+        Host 专用。生成新的 6 位邀请码并使旧码失效（TDD §8：房间入侵对策）。
+        已进房成员不受影响，仅影响后续加入。
+      x-status: planned
+      x-milestone: M1
+      x-source: T-M1-02 / TDD §8
+      responses:
+        '200':
+          description: 返回新邀请码
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InviteCode'
+              examples:
+                reset:
+                  value:
+                    inviteCode: 9ZP4RT
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/settings:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    patch:
+      operationId: updateRoomSettings
+      tags: [房间]
+      summary: 修改房间配置
+      description: |
+        Host 专用，局部更新（未传字段保持不变）。
+        可改：房间名、成员上限、本房默认会话设置（provider / model / temperature /
+        历史裁剪窗 / 世界书预算 / 扫描深度）。
+
+        注意：`defaultSessionSettings` 只影响**之后新建**的会话，
+        不改写已存在 Session 的 settings（会话级设置随 Session 快照固化）。
+      x-status: planned
+      x-milestone: M1
+      x-source: T-M1-02
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoomSettingsPatch'
+            examples:
+              rename:
+                summary: 只改房间名
+                value:
+                  name: 疯狂山脉·第二夜
+              llm:
+                summary: 换模型 + 收紧世界书预算
+                value:
+                  defaultSessionSettings:
+                    provider: ollama
+                    model: qwen2.5:14b
+                    temperature: 0.9
+                    maxHistoryMessages: 40
+                    worldBookBudgetTokens: 1200
+                    scanDepth: 3
+      responses:
+        '200':
+          description: 更新后的房间对象
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Room'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/sessions:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    get:
+      operationId: listSessions
+      tags: [会话]
+      summary: 列出房间的全部会话
+      description: |
+        一房多会话（连载团，FR-11）。`activeSessionId` 指向当前活跃会话；
+        历史会话 `endedAt` 非空，消息流按 sessionId 隔离。
+      x-status: proposed
+      x-milestone: M1
+      x-source: T-M1-07 / FR-11 / TDD §3.1
+      responses:
+        '200':
+          description: 会话数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Session'
+              examples:
+                two:
+                  value:
+                    - id: s_01J9Z8Y7X6
+                      roomId: V1StGXR8_Z5j
+                      moduleRef: mountains-of-madness@1.0.0
+                      startedAt: '2026-09-25T10:20:00.000Z'
+                      endedAt: null
+                      stateBoardVersion: 12
+                      synopsis: 考察队在南极营地发现异常冰层样本…
+                      settings:
+                        provider: openai-compat
+                        model: deepseek-chat
+                        temperature: 0.8
+                        maxHistoryMessages: 40
+                        worldBookBudgetTokens: 2000
+                        scanDepth: 4
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/messages:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+      - name: beforeSeq
+        in: query
+        description: 向前分页游标，返回 seq < beforeSeq 的消息
+        required: false
+        schema:
+          type: integer
+          format: int64
+          minimum: 0
+      - name: limit
+        in: query
+        description: 单页条数
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 200
+          default: 50
+      - name: sessionId
+        in: query
+        description: 指定会话；缺省取房间当前活跃会话
+        required: false
+        schema:
+          type: string
+    get:
+      operationId: listMessages
+      tags: [会话]
+      summary: 历史消息拉取
+      description: |
+        进房时取最近 N 条 + `beforeSeq` 向前翻页（T-M1-09）。
+        设计文档写的是 "`gateway/http/` 或 socket 事件"，**通道未定**，此处按 REST 提案给出。
+        与 Socket 补发（`lastSeq`）的边界：断线重连走 Socket 补缺口，本接口用于主动翻历史。
+      x-status: proposed
+      x-milestone: M1
+      x-source: T-M1-09 / FR-02 / TDD §3.2
+      responses:
+        '200':
+          description: 消息数组，按 seq 降序（最新在前）
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+              examples:
+                mixed:
+                  summary: IC / 骰子 / 叙事三类混合
+                  value:
+                    - seq: 42
+                      ts: '2026-09-25T10:31:02.000Z'
+                      sessionId: s_01J9Z8Y7X6
+                      type: narration
+                      streaming: false
+                      content: 你翻开书桌抽屉，指尖触到一张泛黄的剪报——
+                    - seq: 41
+                      ts: '2026-09-25T10:31:00.000Z'
+                      sessionId: s_01J9Z8Y7X6
+                      type: dice
+                      hidden: false
+                      roll:
+                        expr: 1d100<=60
+                        rolls: [[37]]
+                        kept: [37]
+                        total: 37
+                        check:
+                          rulebook: coc7
+                          kind: skill
+                          target: 60
+                          difficulty: normal
+                          outcome: success
+                          grade: hard
+                        audit:
+                          seq: '000913'
+                          ts: '2026-09-25T10:31:00.000Z'
+                          rollId: 01J9ZB3Q7R
+                    - seq: 40
+                      ts: '2026-09-25T10:30:48.000Z'
+                      sessionId: s_01J9Z8Y7X6
+                      type: ic
+                      senderId: m_alice
+                      content: 我翻查书桌的抽屉。
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /cards:
+    get:
+      operationId: listCards
+      tags: [卡库]
+      summary: 列出卡库角色卡
+      description: |
+        `data/cards/` 下的角色卡索引（ccv3，PNG 内嵌或 JSON，FR-08）。
+        只返回摘要，不返回角色卡全文（`character_book` 可能很大）。
+      x-status: proposed
+      x-milestone: M5
+      x-source: T-M5-09 / FR-08 / TDD §3.3
+      responses:
+        '200':
+          description: 卡片摘要数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CardSummary'
+              examples:
+                two:
+                  value:
+                    - id: c_kp_mountain
+                      name: 守秘人·疯狂山脉
+                      spec: chara_card_v3
+                      rulebook: coc7
+                      kind: kp
+                      source: json
+                      updatedAt: '2026-09-24T18:00:00.000Z'
+                    - id: c_pc_alice
+                      name: 爱丽丝·温特沃斯
+                      spec: chara_card_v3
+                      rulebook: coc7
+                      kind: pc
+                      source: png
+                      updatedAt: '2026-09-24T18:05:00.000Z'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+    post:
+      operationId: uploadCard
+      tags: [卡库]
+      summary: 上传角色卡
+      description: |
+        导入 chara_card_v3 卡片：JSON 直接存，PNG 从 tEXt 块提取 `chara` 字段（ADR-06）。
+        卡内 `extensions.aidle.rulebook` 决定规则书；未携带扩展键的社区卡需在此指定默认规则书。
+      x-status: proposed
+      x-milestone: M5
+      x-source: T-M5-09 / FR-08 / ADR-06
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/UploadCardRequest'
+            examples:
+              png:
+                summary: 上传 PNG 卡（自动提取 chara 块）
+                value:
+                  file: '（二进制 PNG）'
+                  defaultRulebook: coc7
+      responses:
+        '201':
+          description: 导入成功，返回卡片摘要
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CardSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /cards/{cardId}:
+    parameters:
+      - name: cardId
+        in: path
+        required: true
+        description: 卡片 ID
+        schema:
+          type: string
+        example: c_kp_mountain
+    get:
+      operationId: getCard
+      tags: [卡库]
+      summary: 获取角色卡全文
+      description: 返回完整 CharacterCardV3（含 `character_book`），用于编辑/导出。
+      x-status: proposed
+      x-milestone: M5
+      x-source: T-M5-09 / TDD §3.3
+      responses:
+        '200':
+          description: 角色卡全文
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CharacterCardV3'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+    delete:
+      operationId: deleteCard
+      tags: [卡库]
+      summary: 删除角色卡
+      description: 从 `data/cards/` 移除。若有会话正在引用该卡的 KP 人格，行为待定（见开放问题 3）。
+      x-status: proposed
+      x-milestone: M5
+      x-source: T-M5-09
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /modules:
+    get:
+      operationId: listModules
+      tags: [模组]
+      summary: 列出已加载模组
+      description: |
+        `data/modules/<module-id>/` 下已加载的模组包（manifest + kp-card + worldbook + init-state，TDD §3.6）。
+      x-status: proposed
+      x-milestone: M5
+      x-source: T-M5-05 / FR-10 / TDD §3.6
+      responses:
+        '200':
+          description: 模组数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ModuleInfo'
+              examples:
+                one:
+                  value:
+                    - id: mountains-of-madness
+                      name: 疯狂山脉
+                      version: 1.0.0
+                      rulebook: coc7
+                      apiVersion: '1'
+                      activeSessions: 1
+        '500':
+          $ref: '#/components/responses/Internal'
+
+    post:
+      operationId: loadModule
+      tags: [模组]
+      summary: 加载模组包
+      description: |
+        校验 manifest（必须含 `id / version / apiVersion / entry`），再装载三件套。
+        校验失败即拒绝加载，不落盘。
+      x-status: proposed
+      x-milestone: M5
+      x-source: T-M5-05 / FR-10 / TDD §3.6
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 模组包（zip，解压后为 manifest.json + 三件套）
+              required: [file]
+          application/json:
+            schema:
+              type: object
+              properties:
+                dir:
+                  type: string
+                  description: 服务端本地已存在的模组目录路径（本机放置场景）
+                  example: data/modules/mountains-of-madness
+              required: [dir]
+      responses:
+        '201':
+          description: 加载成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModuleInfo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /modules/{moduleId}:
+    parameters:
+      - name: moduleId
+        in: path
+        required: true
+        description: 模组 ID（manifest.id）
+        schema:
+          type: string
+        example: mountains-of-madness
+    delete:
+      operationId: unloadModule
+      tags: [模组]
+      summary: 卸载模组
+      description: |
+        **卸载策略（决议 D-09）**：有活跃 Session 引用该模组时拒绝卸载，返回 409；
+        空闲时才允许卸载。
+
+        ⚠️ 该冲突目前没有专属错误码（TDD §11 仅 6 个码），本文暂用 409 + E-ROOM-01，
+        建议新增 E-MOD-01。
+      x-status: proposed
+      x-milestone: M5
+      x-source: T-M5-05 / FR-10 / D-09
+      responses:
+        '204':
+          description: 已卸载
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 存在引用该模组的活跃会话
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                inUse:
+                  value:
+                    code: E-ROOM-01
+                    message: 模组被 1 个活跃会话引用，无法卸载
+        '500':
+          $ref: '#/components/responses/Internal'
+
+# =============================================================================
+components:
+  parameters:
+    RoomId:
+      name: roomId
+      in: path
+      required: true
+      description: 房间 ID（nanoid(12)）
+      schema:
+        type: string
+      example: V1StGXR8_Z5j
+
+  responses:
+    BadRequest:
+      description: 请求体非法（Zod 校验失败）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          examples:
+            invalid:
+              value:
+                code: E-DICE-01
+                message: 骰式无法解析
+    Forbidden:
+      description: 非 Host 操作（权限不足）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          examples:
+            notHost:
+              value:
+                code: E-ROOM-01
+                message: 仅 Host 可执行该操作
+    NotFound:
+      description: 房间 / 卡片 / 模组不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          examples:
+            missing:
+              value:
+                code: E-ROOM-01
+                message: 房间不存在
+    Internal:
+      description: |
+        服务端未捕获异常。HTTP ≥ 500 时 message 固定为「内部错误，详情见服务端日志」，
+        原始堆栈经 redact 脱敏后只写服务端日志（NFR-03）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/InternalError'
+          examples:
+            internal:
+              value:
+                code: INTERNAL
+                message: 内部错误，详情见服务端日志
+
+  schemas:
+    # ---- 系统 ----
+
+    Health:
+      type: object
+      description: 健康检查响应（packages/server/src/index.ts）
+      properties:
+        ok:
+          type: boolean
+          const: true
+        name:
+          type: string
+          description: 服务名，固定 `BehindVeil-server`
+          examples: [BehindVeil-server]
+        protocol:
+          type: string
+          description: 前后端协议版本，握手时校验，不一致即拒绝连接
+          examples: ['0.0.0']
+      required: [ok, name, protocol]
+
+    # ---- 错误 ----
+
+    ErrorCode:
+      type: string
+      description: 业务错误码（TDD §11 / shared/errors.ts）
+      enum: [E-LLM-01, E-LLM-02, E-DICE-01, E-AI-01, E-ST-01, E-ROOM-01]
+      x-code-scenes:
+        E-LLM-01: provider 超时/5xx
+        E-LLM-02: 流中断
+        E-DICE-01: 骰式非法
+        E-AI-01: AI 指令解析失败
+        E-ST-01: 状态板版本冲突
+        E-ROOM-01: 邀请码无效/满员
+
+    AppError:
+      type: object
+      description: 业务错误统一载荷（Socket `error:app` 与 REST 错误响应共用）
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          description: 用户侧可直接展示的中文文案
+      required: [code, message]
+      examples:
+        - code: E-ROOM-01
+          message: 邀请码无效或房间已满
+
+    InternalError:
+      type: object
+      description: 框架级错误（Fastify error handler 出口，已脱敏）
+      properties:
+        code:
+          type: string
+          const: INTERNAL
+        message:
+          type: string
+      required: [code, message]
+
+    # ---- Room / Session ----
+
+    Room:
+      type: object
+      description: 房间（TDD §3.1 / shared/domain.ts RoomSchema）
+      properties:
+        id:
+          type: string
+          description: nanoid(12)，建房时生成
+          examples: [V1StGXR8_Z5j]
+        name:
+          type: string
+          examples: [疯狂山脉·第一夜]
+        createdAt:
+          type: string
+          format: date-time
+          description: ISO8601
+        inviteCode:
+          type: string
+          minLength: 6
+          maxLength: 6
+          description: 6 位邀请码，Host 可重置
+          examples: [A7K2Q9]
+        activeSessionId:
+          type: [string, 'null']
+          description: 当前活跃会话；无会话时为 null
+        memberLimit:
+          type: integer
+          minimum: 1
+          description: 成员上限（默认 8）
+          default: 8
+      required: [id, name, createdAt, inviteCode, activeSessionId, memberLimit]
+
+    CreateRoomRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+        memberLimit:
+          type: integer
+          minimum: 1
+          default: 8
+        defaultSessionSettings:
+          $ref: '#/components/schemas/SessionSettings'
+      required: [name]
+
+    RoomSettingsPatch:
+      type: object
+      description: 房间配置局部更新（未传字段不变）
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+        memberLimit:
+          type: integer
+          minimum: 1
+        defaultSessionSettings:
+          $ref: '#/components/schemas/SessionSettings'
+
+    InviteCode:
+      type: object
+      properties:
+        inviteCode:
+          type: string
+          minLength: 6
+          maxLength: 6
+          examples: [9ZP4RT]
+      required: [inviteCode]
+
+    SessionSettings:
+      type: object
+      description: |
+        会话级 LLM / 管线设置（TDD §3.1）。全字段必填——
+        裁剪窗 / 预算 / 扫描深度缺失会让管线行为失义。
+      properties:
+        provider:
+          type: string
+          description: 'LLM provider：openai-compat | ollama'
+          examples: [openai-compat]
+        model:
+          type: string
+          examples: [deepseek-chat]
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          default: 0.8
+        maxHistoryMessages:
+          type: integer
+          minimum: 1
+          description: 历史裁剪窗（默认 40）
+          default: 40
+        worldBookBudgetTokens:
+          type: integer
+          minimum: 0
+          description: 世界书 token 预算（默认 2000）
+          default: 2000
+        scanDepth:
+          type: integer
+          minimum: 1
+          description: 世界书扫描深度（最近 N 条消息，默认 4）
+          default: 4
+      required: [provider, model, temperature, maxHistoryMessages, worldBookBudgetTokens, scanDepth]
+
+    Session:
+      type: object
+      description: 会话（TDD §3.1 / shared/domain.ts SessionSchema）
+      properties:
+        id:
+          type: string
+          examples: [s_01J9Z8Y7X6]
+        roomId:
+          type: string
+        moduleRef:
+          type: string
+          description: 模组 id + version
+          examples: [mountains-of-madness@1.0.0]
+        startedAt:
+          type: string
+          format: date-time
+        endedAt:
+          type: [string, 'null']
+          description: 结束时间；活跃会话为 null
+        stateBoardVersion:
+          type: integer
+          minimum: 0
+          description: 状态板乐观锁版本号（E-ST-01 冲突检测依据）
+        settings:
+          $ref: '#/components/schemas/SessionSettings'
+        synopsis:
+          type: string
+          description: |
+            剧情梗概（决议 D-01）：历史裁剪后被裁掉的部分以梗概块替代。
+            v1 由 Host 手编 session.json 的该字段，载入时过 Schema 校验，无运行时编辑 UI。
+          default: ''
+      required: [id, roomId, moduleRef, startedAt, endedAt, stateBoardVersion, settings, synopsis]
+
+    # ---- Message（六类，TDD §3.2）----
+
+    BaseMsg:
+      type: object
+      description: 消息公共字段。消息不可变（append-only），seq 在 Session 内严格单调递增
+      properties:
+        seq:
+          type: integer
+          minimum: 0
+          description: 会话内严格递增序号
+        ts:
+          type: string
+          format: date-time
+        sessionId:
+          type: string
+      required: [seq, ts, sessionId]
+
+    IcMsg:
+      allOf:
+        - $ref: '#/components/schemas/BaseMsg'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: ic
+            senderId:
+              type: string
+              description: 成员 ID
+            content:
+              type: string
+              description: 入戏发言正文
+          required: [type, senderId, content]
+
+    OocMsg:
+      allOf:
+        - $ref: '#/components/schemas/BaseMsg'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: ooc
+            senderId:
+              type: string
+            content:
+              type: string
+            visibility:
+              type: string
+              enum: [all, host, whisper]
+              description: all=全员可见 / host=仅主持人 / whisper=私聊
+            targetId:
+              type: string
+              description: visibility=whisper 时的私聊对象成员 ID
+          required: [type, senderId, content, visibility]
+
+    SystemMsg:
+      allOf:
+        - $ref: '#/components/schemas/BaseMsg'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: system
+            subtype:
+              type: string
+              enum: [ai_directive_result, join, leave, notice]
+              description: ai_directive_result = 检定闭环回注的引擎结果
+            content:
+              type: string
+          required: [type, subtype, content]
+
+    DiceMsg:
+      allOf:
+        - $ref: '#/components/schemas/BaseMsg'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: dice
+            roll:
+              $ref: '#/components/schemas/RollResult'
+            hidden:
+              type: boolean
+              description: |
+                true = 暗骰（FR-14），结果仅广播给 Host（决议 D-10：仅 Host 可用）
+          required: [type, roll, hidden]
+
+    NarrationMsg:
+      allOf:
+        - $ref: '#/components/schemas/BaseMsg'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: narration
+            streaming:
+              type: boolean
+              description: false 后 content 即最终全文（narration:done 转正）
+            content:
+              type: string
+          required: [type, streaming, content]
+
+    SnapshotMsg:
+      allOf:
+        - $ref: '#/components/schemas/BaseMsg'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: state_snapshot
+            stateBoard:
+              $ref: '#/components/schemas/StateBoard'
+          required: [type, stateBoard]
+
+    Message:
+      description: 六类消息的判别联合（非法 type 在 Schema 层直接拒绝）
+      oneOf:
+        - $ref: '#/components/schemas/IcMsg'
+        - $ref: '#/components/schemas/OocMsg'
+        - $ref: '#/components/schemas/SystemMsg'
+        - $ref: '#/components/schemas/DiceMsg'
+        - $ref: '#/components/schemas/NarrationMsg'
+        - $ref: '#/components/schemas/SnapshotMsg'
+      discriminator:
+        propertyName: type
+        mapping:
+          ic: '#/components/schemas/IcMsg'
+          ooc: '#/components/schemas/OocMsg'
+          system: '#/components/schemas/SystemMsg'
+          dice: '#/components/schemas/DiceMsg'
+          narration: '#/components/schemas/NarrationMsg'
+          state_snapshot: '#/components/schemas/SnapshotMsg'
+
+    # ---- 骰子（TDD §3.5）----
+
+    RollCheck:
+      type: object
+      description: 规则书判定记录（由 RuleBook.adjudicate 填充）
+      properties:
+        rulebook:
+          type: string
+          enum: [coc7, dnd5e]
+          description: 规则书（v1 首发仅 COC7，dnd5e 二期）
+        kind:
+          type: string
+          enum: [skill, sanity, opposed, luck]
+        target:
+          type: number
+          description: 判定目标值（技能值 / SAN 值 / 幸运值，或骰式后缀里的 target）
+        difficulty:
+          type: string
+          enum: [normal, hard, extreme]
+        outcome:
+          type: string
+          enum: [critical, success, fail, fumble]
+          description: COC7 语义：大成功 / 成功 / 失败 / 大失败
+        grade:
+          type: string
+          enum: [normal, hard, extreme]
+          description: |
+            成功子等级。COC7 困难/极难成功时携带；critical / fail / fumble 恒为 normal。
+            outcome 四分类不足以表达 COC7 六档判定表，故用 outcome + grade 组合承载。
+      required: [rulebook, kind, target, difficulty, outcome]
+      examples:
+        - rulebook: coc7
+          kind: skill
+          target: 60
+          difficulty: normal
+          outcome: success
+          grade: hard
+
+    RollAudit:
+      type: object
+      description: |
+        审计字段（决议 D-04）。CSPRNG 无种子、不可重放，
+        「复现」= 由 expr + rolls 重算 total / kept / check 的一致性。
+      properties:
+        seq:
+          type: string
+          description: 审计流水号，全局唯一（data/logs/audit-dice.jsonl）
+          examples: ['000913']
+        ts:
+          type: string
+          format: date-time
+        rollId:
+          type: string
+          description: 本次掷骰标识
+          examples: [01J9ZB3Q7R]
+      required: [seq, ts, rollId]
+
+    RollResult:
+      type: object
+      description: |
+        掷骰结果。数值只由服务端 CSPRNG 产生（crypto.randomInt）；
+        rolls 保存每组原始骰值，total / kept / check 均可由 expr + rolls 重算复现。
+      properties:
+        expr:
+          type: string
+          description: 规范化表达式
+          examples: ['1d100', '3d6kh2', '2d6+3<=8']
+        rolls:
+          type: array
+          description: 每个骰组的原始骰值（命运骰取值 -1/0/1），审计重算的输入之一
+          items:
+            type: array
+            items:
+              type: number
+          examples: [[[37]], [[4, 2, 6]]]
+        kept:
+          type: array
+          description: 保留值（应用 kh/kl/dh/dl 后，按骰组顺序平铺）
+          items:
+            type: number
+          examples: [[37]]
+        total:
+          type: number
+          examples: [37]
+        check:
+          $ref: '#/components/schemas/RollCheck'
+        audit:
+          $ref: '#/components/schemas/RollAudit'
+      required: [expr, rolls, kept, total, audit]
+      examples:
+        - expr: 3d6kh2
+          rolls: [[4, 2, 6]]
+          kept: [6, 4]
+          total: 10
+          audit:
+            seq: '000914'
+            ts: '2026-09-25T10:33:10.000Z'
+            rollId: 01J9ZB7T4K
+
+    # ---- 角色卡 / 状态板 / 世界书 ----
+
+    PCSheet:
+      type: object
+      description: COC7 调查员速览（注入名册用，TDD §3.3）
+      properties:
+        playerName:
+          type: string
+        occupation:
+          type: string
+          description: 职业
+        str:
+          type: number
+        con:
+          type: number
+        siz:
+          type: number
+        dex:
+          type: number
+        app:
+          type: number
+        int:
+          type: number
+        pow:
+          type: number
+        edu:
+          type: number
+        luck:
+          type: number
+        hp:
+          type: number
+        mp:
+          type: number
+        san:
+          type: number
+        db:
+          type: string
+          description: 伤害加值
+          examples: ['0']
+        build:
+          type: string
+          description: 体格
+          examples: ['0']
+        skills:
+          type: object
+          additionalProperties:
+            type: number
+          description: 技能名 → 技能值
+          examples:
+            - 侦查: 60
+              图书馆使用: 50
+      required:
+        [
+          playerName,
+          occupation,
+          str,
+          con,
+          siz,
+          dex,
+          app,
+          int,
+          pow,
+          edu,
+          luck,
+          hp,
+          mp,
+          san,
+          db,
+          build,
+          skills,
+        ]
+      examples:
+        - playerName: 爱丽丝
+          occupation: 考古学家
+          str: 50
+          con: 60
+          siz: 55
+          dex: 70
+          app: 65
+          int: 80
+          pow: 60
+          edu: 85
+          luck: 50
+          hp: 11
+          mp: 12
+          san: 60
+          db: '0'
+          build: '0'
+          skills:
+            侦查: 60
+            图书馆使用: 50
+
+    StateBoardPc:
+      type: object
+      properties:
+        sheet:
+          $ref: '#/components/schemas/PCSheet'
+        conditions:
+          type: array
+          description: 状态标记
+          items:
+            type: string
+          examples: [['疯狂(临时)', '重伤']]
+      required: [sheet, conditions]
+
+    StateBoardScene:
+      type: object
+      properties:
+        name:
+          type: string
+        time:
+          type: string
+        publicDesc:
+          type: string
+          description: 场景公开描述（全员可见）
+      required: [name, time, publicDesc]
+
+    StateBoard:
+      type: object
+      description: |
+        PC 数值权威状态（TDD §3.7）。任何数值以状态板为准；
+        AI 叙事与状态板冲突时以状态板为准（S1 元指令 + S2 注入）。
+      properties:
+        version:
+          type: integer
+          minimum: 0
+          description: 乐观锁版本（写路径校验 expectedVersion，冲突报 E-ST-01）
+        pcs:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/StateBoardPc'
+          description: key = memberId
+        scene:
+          $ref: '#/components/schemas/StateBoardScene'
+        facts:
+          type: array
+          description: 已确立事实（Host 可维护，注入 prompt）
+          items:
+            type: string
+        updatedAt:
+          type: string
+          format: date-time
+      required: [version, pcs, scene, facts, updatedAt]
+
+    WorldBookEntry:
+      type: object
+      description: 世界书条目（字段语义与 SillyTavern 对齐，TDD §3.4）
+      properties:
+        uid:
+          type: integer
+        key:
+          type: array
+          description: 主关键词，支持 /regex/ 形式
+          items:
+            type: string
+          examples: [['南极', '/冰层.*异常/']]
+        keysecondary:
+          type: array
+          items:
+            type: string
+        selectiveLogic:
+          type: integer
+          enum: [0, 1, 2, 3]
+          description: 二级键逻辑 0=AND_ANY 1=NOT_ALL 2=NOT_ANY 3=AND_ALL
+        content:
+          type: string
+          description: 命中后注入 prompt 的正文
+        position:
+          type: string
+          enum: [before_char, after_char, at_depth]
+        depth:
+          type: integer
+          minimum: 0
+          description: position=at_depth 时生效
+        order:
+          type: integer
+          description: 同优先级排序
+        weight:
+          type: integer
+          description: 默认 100；预算不足时高权重保留（裁剪依据）
+          default: 100
+        constant:
+          type: boolean
+          description: true = 常驻注入
+        disabled:
+          type: boolean
+        extensions:
+          type: object
+          properties:
+            kpOnly:
+              type: boolean
+              description: |
+                模组真相条目：注入 prompt 让 AI 知道，
+                但不得出现在非 Host 可见输出（TDD §8）
+      required:
+        [
+          uid,
+          key,
+          keysecondary,
+          selectiveLogic,
+          content,
+          position,
+          order,
+          weight,
+          constant,
+          disabled,
+        ]
+
+    WorldBook:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorldBookEntry'
+      required: [entries]
+
+    AidleCardExtensions:
+      type: object
+      description: BehindVeil 私有扩展（ADR-06），挂在 ccv3 的 data.extensions.aidle 下
+      properties:
+        rulebook:
+          type: string
+          enum: [coc7, dnd5e]
+        pcSheet:
+          $ref: '#/components/schemas/PCSheet'
+      required: [rulebook]
+
+    CharacterCardV3:
+      type: object
+      description: chara_card_v3 角色卡（KP 卡 / 玩家卡同构，靠 extensions.aidle 区分）
+      properties:
+        spec:
+          type: string
+          const: chara_card_v3
+        data:
+          type: object
+          properties:
+            name:
+              type: string
+            description:
+              type: string
+              description: KP 卡：行为准则 + 判定规则
+            scenario:
+              type: string
+            first_mes:
+              type: string
+            mes_example:
+              type: string
+            character_book:
+              $ref: '#/components/schemas/WorldBook'
+            extensions:
+              type: object
+              description: ccv3 允许任意扩展键，社区卡字段原样保留
+              properties:
+                aidle:
+                  $ref: '#/components/schemas/AidleCardExtensions'
+          required: [name, description, scenario, first_mes, mes_example, extensions]
+      required: [spec, data]
+
+    CardSummary:
+      type: object
+      description: 卡库列表用摘要（不返回角色卡全文，character_book 可能很大）
+      properties:
+        id:
+          type: string
+          examples: [c_kp_mountain]
+        name:
+          type: string
+        spec:
+          type: string
+          const: chara_card_v3
+        rulebook:
+          type: string
+          enum: [coc7, dnd5e]
+        kind:
+          type: string
+          enum: [kp, pc]
+          description: KP 人格卡 / 玩家角色卡
+        source:
+          type: string
+          enum: [json, png]
+          description: 来源格式（FR-08 双格式）
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, name, spec, rulebook, kind, source, updatedAt]
+
+    UploadCardRequest:
+      type: object
+      properties:
+        file:
+          type: string
+          format: binary
+          description: ccv3 卡片文件（.json 或内嵌 chara 块的 .png）
+        defaultRulebook:
+          type: string
+          enum: [coc7, dnd5e]
+          description: 卡片未携带 extensions.aidle 时采用的默认规则书
+      required: [file]
+
+    ModuleInfo:
+      type: object
+      description: 模组包信息（TDD §3.6）
+      properties:
+        id:
+          type: string
+          examples: [mountains-of-madness]
+        name:
+          type: string
+        version:
+          type: string
+          examples: [1.0.0]
+        rulebook:
+          type: string
+          enum: [coc7, dnd5e]
+        apiVersion:
+          type: string
+          description: 模组格式版本，与服务端不匹配即拒绝加载
+          examples: ['1']
+        activeSessions:
+          type: integer
+          minimum: 0
+          description: 引用该模组的活跃会话数（> 0 时拒绝卸载，D-09）
+      required: [id, name, version, rulebook, apiVersion, activeSessions]

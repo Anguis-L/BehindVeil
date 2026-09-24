@@ -1,0 +1,31 @@
+{
+  "session": {
+    "provider": "ollama",
+    "model": "llama3",
+    "temperature": 0.7,
+    "maxHistoryMessages": 40,
+    "worldBookBudgetTokens": 2000,
+    "scanDepth": 4
+  },
+  "kpCard": {
+    "spec": "chara_card_v3",
+    "data": {
+      "name": "守秘人",
+      "description": "你是守秘人：负责叙事、扮演 NPC，数值一律以状态板为准。",
+      "scenario": "开场：深夜书房",
+      "first_mes": "灯亮了。",
+      "mes_example": "",
+      "extensions": { "aidle": { "rulebook": "coc7" } }
+    }
+  },
+  "messages": [],
+  "stateBoard": {
+    "version": 0,
+    "pcs": {},
+    "scene": { "name": "书房", "time": "1924-03-12 夜", "publicDesc": "" },
+    "facts": [],
+    "updatedAt": "2026-09-25T00:00:00.000Z"
+  },
+  "worldBook": { "entries": [] },
+  "pcRoster": ""
+}
