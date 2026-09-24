@@ -1,0 +1,8 @@
+packages:
+  - 'packages/*'
+
+# esbuild 的二进制由 optionalDependencies（@esbuild/<platform>）直接提供，
+# 其 postinstall 只是额外校验并可能回退到网络下载。
+# 关闭它可让安装在受限/离线环境（含 CI）中保持确定性，vite 仍通过 JS API 调用原生二进制。
+allowBuilds:
+  esbuild: false

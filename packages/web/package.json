@@ -1,0 +1,21 @@
+{
+  "name": "@behindveil/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "玩家端 / KP 控制台 SPA（骨架阶段为原生 TS，M0 起引入 Vue 3）",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@behindveil/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^6.3.6",
+    "vitest": "^3.2.4"
+  }
+}

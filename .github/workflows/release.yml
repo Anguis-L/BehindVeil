@@ -1,0 +1,94 @@
+name: Release
+
+# 打 v* 标签时自动构建发布包，供自托管用户下载部署。
+# 本项目定位为自托管，不做自动推送到服务器的部署方式。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: 构建自托管发布包
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # 发布前完整走一遍门禁，避免把有问题的版本打成包
+      - name: 质量门禁
+        run: |
+          pnpm format:check
+          pnpm lint
+          pnpm build
+          pnpm typecheck
+          pnpm test:coverage
+          pnpm check:licenses
+
+      - name: 组装发布包
+        id: pack
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          STAGE="build/staging"
+          rm -rf build && mkdir -p "$STAGE"
+
+          # 三个包的构建产物
+          mkdir -p "$STAGE/packages/shared" "$STAGE/packages/server" "$STAGE/packages/web"
+          cp -r packages/shared/dist "$STAGE/packages/shared/dist"
+          cp -r packages/server/dist "$STAGE/packages/server/dist"
+          cp -r packages/web/dist    "$STAGE/packages/web/dist"
+
+          # 包清单与工程配置（部署端据此安装依赖）
+          cp packages/shared/package.json "$STAGE/packages/shared/package.json"
+          cp packages/server/package.json "$STAGE/packages/server/package.json"
+          cp packages/web/package.json    "$STAGE/packages/web/package.json"
+          cp package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc .nvmrc README.md LICENSE "$STAGE/"
+
+          (cd build && zip -qr "../behindveil-${VERSION}.zip" staging)
+          sha256sum "behindveil-${VERSION}.zip" | tee "behindveil-${VERSION}.zip.sha256"
+
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            behindveil-${{ steps.pack.outputs.version }}.zip
+            behindveil-${{ steps.pack.outputs.version }}.zip.sha256
+          generate_release_notes: true
+          body: |
+            ## 部署步骤（自托管）
+
+            1. 下载 `behindveil-${{ steps.pack.outputs.version }}.zip` 并解压到服务器目录
+            2. 校验完整性：`sha256sum -c behindveil-${{ steps.pack.outputs.version }}.zip.sha256`
+            3. 安装依赖：解压目录内执行 `pnpm install --frozen-lockfile --prod`
+            4. 配置 LLM：通过环境变量注入（**切勿写入文件**）
+               - `AIDLE_LLM_KEY`：模型服务的 API Key
+               - 其余非敏感配置项见解压目录内的 `README.md`
+            5. 启动服务后访问对应端口即可；运行时数据写在 `data/` 目录，备份即复制该目录。
+
+            > 公网部署请务必配合反向代理 + TLS，或直接使用 Tailscale 组网（见 README 安全章节）。
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: behindveil-${{ steps.pack.outputs.version }}
+          path: behindveil-${{ steps.pack.outputs.version }}.zip
+          if-no-files-found: error

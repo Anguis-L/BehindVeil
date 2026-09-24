@@ -1,4 +1,7 @@
 # BehindVeil
+
+[![CI](https://github.com/Anguis-L/BehindVeil/actions/workflows/ci.yml/badge.svg)](https://github.com/Anguis-L/BehindVeil/actions/workflows/ci.yml)
+
 Behind the veil, the Keeper speaks.
 
 A self-hosted, open-source TRPG platform where an AI plays the Keeper. The AI narrates and requests checks; the server rolls the dice. Dice results come from a CSPRNG with an audit trail, so every roll is fair and reproducible. Narrative belongs to the LLM; rules belong to the code.
@@ -29,3 +32,25 @@ Node.js 22 · TypeScript（strict）· Fastify · Socket.IO · Vue 3 · Zod · V
 
 项目状态
 🚧 设计中，尚未发布。SDD（系统设计文档）与 TDD（技术设计文档）v1 已完成待评审，按 M0–M6 里程碑推进，每个里程碑设验收门禁，不通过不进入下一阶段。
+
+开发与质量门禁
+```bash
+pnpm install
+pnpm verify      # 格式 → lint → 构建 → 类型检查 → 测试覆盖率 → 许可证扫描
+```
+推送 `main` 或提交 PR 会自动运行 `.github/workflows/ci.yml`。两条硬性门禁：覆盖率 ≥ 85%（NFR-09）、依赖树出现 AGPL/GPL 即失败（NFR-08）。
+
+发布与部署（自托管）
+```bash
+git tag v0.1.0 && git push --tags    # 触发 .github/workflows/release.yml
+```
+自动生成 `behindveil-v0.1.0.zip` 与 SHA256 校验文件。部署时在服务器上：
+
+1. 解压，`sha256sum -c` 校验完整性
+2. `pnpm install --frozen-lockfile --prod` 安装依赖
+3. 用环境变量注入 LLM 配置（如 `AIDLE_LLM_KEY`），**不要写进文件**
+4. 启动服务，运行时数据全部落在 `data/`，备份即复制该目录
+
+公网部署务必配合反向代理 + TLS，或直接使用 Tailscale 组网。
+
+当前仓库为工程骨架，上述产物尚不包含可用的服务端进程；M0 落地后同一条流水线即可产出可运行版本。

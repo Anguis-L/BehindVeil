@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支上新的推送会取消尚未跑完的旧任务，避免排队浪费
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: 构建与质量门禁
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 读取 package.json 的 packageManager 字段，保证与本地 pnpm 版本一致
+      - name: 准备 pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 代码格式检查
+        run: pnpm format:check
+
+      - name: 静态检查（ESLint）
+        run: pnpm lint
+
+      - name: 构建全部包
+        run: pnpm build
+
+      - name: 类型检查
+        run: pnpm typecheck
+
+      - name: 单元测试与覆盖率门禁（NFR-09 ≥ 85%）
+        run: pnpm test:coverage
+
+      - name: 许可证门禁（NFR-08 拒收 AGPL/GPL）
+        run: pnpm check:licenses
+
+      - name: 构建产物冒烟
+        run: node -e "import('./packages/server/dist/index.js').then(m => console.log('server bundle ok:', m.serverInfo.name))"
+
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: ignore

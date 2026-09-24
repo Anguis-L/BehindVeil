@@ -1,0 +1,30 @@
+{
+  "name": "@behindveil/server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "服务端：Fastify + Socket.IO 网关、领域逻辑、prompt 管线、适配器",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@behindveil/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.11",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
