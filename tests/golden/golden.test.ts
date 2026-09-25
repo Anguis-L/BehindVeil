@@ -9,8 +9,8 @@ import { diffLines, loadGoldenCases, runGoldenCaseSync } from './runner.js';
 const cases = await loadGoldenCases();
 
 describe('黄金用例集', () => {
-  it('至少 3 条演示用例（M2 目标 ≥30）', () => {
-    expect(cases.length).toBeGreaterThanOrEqual(3);
+  it('用例集规模 ≥30（TC-NFR-09-002，测试文档 §6.3 编制清单）', () => {
+    expect(cases.length).toBeGreaterThanOrEqual(30);
   });
 
   it.each(cases)('用例 $name 通过', (goldenCase) => {

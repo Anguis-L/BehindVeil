@@ -1,0 +1,11 @@
+{
+  "traceDetails": {
+    "S5-history-trim": {
+      "total": 3,
+      "kept": 3,
+      "trimmed": 0,
+      "synopsisInjected": false
+    }
+  },
+  "notContains": ["【剧情梗概】"]
+}

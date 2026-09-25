@@ -1,0 +1,13 @@
+{
+  "traceDetails": {
+    "S3-worldbook-scan": {
+      "hitUids": [1, 2]
+    },
+    "S4-budget-cut": {
+      "includedUids": [1],
+      "droppedUids": [2]
+    }
+  },
+  "contains": ["AAAA"],
+  "notContains": ["BBBB"]
+}

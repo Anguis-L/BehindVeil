@@ -1,0 +1,12 @@
+{
+  "traceDetails": {
+    "S7-validate": {
+      "hardCap": 440,
+      "fallbackRounds": 1,
+      "finalHistoryLength": 3,
+      "overBudget": false
+    }
+  },
+  "contains": ["[4][IC]"],
+  "notContains": ["[3][IC]"]
+}

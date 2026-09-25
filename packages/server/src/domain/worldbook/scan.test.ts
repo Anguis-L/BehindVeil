@@ -128,6 +128,16 @@ describe('世界书扫描（TDD §5.2）', () => {
     expect(selfHits[0]?.entry.uid).toBe(3);
   });
 
+  it('TC-FR-07-011（扫描层）：kpOnly 恒命中，matchedKeys 为空', () => {
+    const hit = scanWorldBook(
+      ['与关键词无关的文本'],
+      book(entry({ key: [], extensions: { kpOnly: true } })),
+    );
+    expect(hit).toHaveLength(1);
+    expect(hit[0]?.matchedKeys).toEqual([]);
+    expect(hit[0]?.matchedSecondary).toEqual([]);
+  });
+
   it('多条文本拼接扫描：任一条命中即算（corpus = texts.join）', () => {
     const hits = scanWorldBook(['第一句无关', '第二句提到码头'], book(entry({ key: ['码头'] })));
     expect(hits).toHaveLength(1);

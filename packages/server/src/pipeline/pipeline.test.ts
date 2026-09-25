@@ -420,6 +420,30 @@ describe('S6 position 插入（TC-FR-07-015）', () => {
   });
 });
 
+describe('kpOnly 条目（TC-FR-07-011）', () => {
+  it('kpOnly 恒注入 prompt 且 trace 可见（模组真相：AI 知道但不应说）', () => {
+    const input = makeInput({
+      messages: [msg(1, '与关键词无关的文本')],
+      worldBook: {
+        entries: [
+          wbEntry({
+            uid: 7,
+            key: [],
+            content: '【模组真相】雕像后方有暗门。',
+            extensions: { kpOnly: true },
+          }),
+        ],
+      },
+    });
+    const trace = buildPrompt(input, tokenizer);
+
+    expect(trace.messages[0]?.content).toContain('【模组真相】雕像后方有暗门。');
+    expect(trace.stages[2]?.detail).toMatchObject({
+      hits: [{ uid: 7, matchedKeys: [], constant: false, kpOnly: true }],
+    });
+  });
+});
+
 describe('S7 硬顶回退（TC-FR-03-003）', () => {
   it('超硬顶：回退 S5 减半重裁至达标', () => {
     const messages = Array.from({ length: 8 }, (_, i) => msg(i + 1, `第${i + 1}条对话`));

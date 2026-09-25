@@ -1,0 +1,90 @@
+{
+  "session": {
+    "provider": "openai-compat",
+    "model": "deepseek-chat",
+    "temperature": 0.8,
+    "maxHistoryMessages": 40,
+    "worldBookBudgetTokens": 2000,
+    "scanDepth": 2,
+    "contextWindowTokens": 32768,
+    "outputReserveTokens": 2048
+  },
+  "kpCard": {
+    "spec": "chara_card_v3",
+    "data": {
+      "name": "守秘人",
+      "description": "测试KP",
+      "scenario": "",
+      "first_mes": "",
+      "mes_example": "",
+      "extensions": {}
+    }
+  },
+  "messages": [
+    {
+      "seq": 1,
+      "ts": "2026-09-25T00:00:00.000Z",
+      "sessionId": "ses_1",
+      "type": "ic",
+      "senderId": "member_1",
+      "content": "码头的旧仓库上了锁"
+    },
+    {
+      "seq": 2,
+      "ts": "2026-09-25T00:00:00.000Z",
+      "sessionId": "ses_1",
+      "type": "ic",
+      "senderId": "member_1",
+      "content": "众人换了话题"
+    },
+    {
+      "seq": 3,
+      "ts": "2026-09-25T00:00:00.000Z",
+      "sessionId": "ses_1",
+      "type": "ic",
+      "senderId": "member_1",
+      "content": "风平浪静"
+    }
+  ],
+  "stateBoard": {
+    "version": 0,
+    "pcs": {},
+    "scene": {
+      "name": "",
+      "time": "",
+      "publicDesc": ""
+    },
+    "facts": [],
+    "updatedAt": "2026-09-25T00:00:00.000Z"
+  },
+  "worldBook": {
+    "entries": [
+      {
+        "uid": 1,
+        "key": ["码头"],
+        "keysecondary": [],
+        "selectiveLogic": 0,
+        "content": "码头条目：超出扫描窗不应出现。",
+        "position": "after_char",
+        "order": 0,
+        "weight": 100,
+        "constant": false,
+        "disabled": false
+      },
+      {
+        "uid": 2,
+        "key": ["风平"],
+        "keysecondary": [],
+        "selectiveLogic": 0,
+        "content": "风平条目：窗口内应命中。",
+        "position": "after_char",
+        "order": 0,
+        "weight": 100,
+        "constant": false,
+        "disabled": false
+      }
+    ]
+  },
+  "pcRoster": "",
+  "synopsis": ""
+}

@@ -1,0 +1,75 @@
+{
+  "session": {
+    "provider": "openai-compat",
+    "model": "deepseek-chat",
+    "temperature": 0.8,
+    "maxHistoryMessages": 40,
+    "worldBookBudgetTokens": 2000,
+    "scanDepth": 8,
+    "contextWindowTokens": 32768,
+    "outputReserveTokens": 2048
+  },
+  "kpCard": {
+    "spec": "chara_card_v3",
+    "data": {
+      "name": "守秘人",
+      "description": "测试KP",
+      "scenario": "",
+      "first_mes": "",
+      "mes_example": "",
+      "extensions": {}
+    }
+  },
+  "messages": [
+    {
+      "seq": 1,
+      "ts": "2026-09-25T00:00:00.000Z",
+      "sessionId": "ses_1",
+      "type": "ic",
+      "senderId": "member_1",
+      "content": "张三检查自己的伤势"
+    }
+  ],
+  "stateBoard": {
+    "version": 5,
+    "pcs": {
+      "mem_1": {
+        "sheet": {
+          "playerName": "张三",
+          "occupation": "记者",
+          "str": 50,
+          "con": 60,
+          "siz": 55,
+          "dex": 70,
+          "app": 45,
+          "int": 80,
+          "pow": 65,
+          "edu": 75,
+          "luck": 60,
+          "hp": 11,
+          "mp": 13,
+          "san": 65,
+          "db": "0",
+          "build": "0",
+          "skills": {
+            "侦查": 60,
+            "图书馆使用": 50
+          }
+        },
+        "conditions": ["轻伤", "中毒"]
+      }
+    },
+    "scene": {
+      "name": "书房",
+      "time": "1924-03-12 深夜",
+      "publicDesc": "雨声不断"
+    },
+    "facts": ["门从内侧反锁", "桌上有未拆的信"],
+    "updatedAt": "2026-09-25T00:00:00.000Z"
+  },
+  "worldBook": {
+    "entries": []
+  },
+  "pcRoster": "",
+  "synopsis": ""
+}

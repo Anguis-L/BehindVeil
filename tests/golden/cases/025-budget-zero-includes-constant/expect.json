@@ -1,0 +1,11 @@
+{
+  "traceDetails": {
+    "S4-budget-cut": {
+      "budgetTokens": 0,
+      "includedUids": [],
+      "droppedUids": [1, 2],
+      "usedTokens": 0
+    }
+  },
+  "notContains": ["常驻内容预算为零也不注入", "命中内容预算为零也不注入"]
+}

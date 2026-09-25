@@ -1,0 +1,17 @@
+{
+  "traceDetails": {
+    "S3-worldbook-scan": {
+      "hitUids": [1],
+      "hits": [
+        {
+          "uid": 1,
+          "matchedKeys": [],
+          "matchedSecondary": [],
+          "constant": false,
+          "kpOnly": true
+        }
+      ]
+    }
+  },
+  "contains": ["模组真相：教团在地下室集会。"]
+}

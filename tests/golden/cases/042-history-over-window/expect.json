@@ -1,0 +1,12 @@
+{
+  "traceDetails": {
+    "S5-history-trim": {
+      "total": 4,
+      "kept": 2,
+      "trimmed": 2,
+      "synopsisInjected": true
+    }
+  },
+  "contains": ["【剧情梗概】\n此前：众人在码头集结。", "[4][IC] member_1: 第四句"],
+  "notContains": ["[1][IC]", "[2][IC]"]
+}

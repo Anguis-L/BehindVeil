@@ -1,0 +1,12 @@
+{
+  "traceDetails": {
+    "S5-history-trim": {
+      "total": 3,
+      "kept": 3,
+      "trimmed": 0,
+      "synopsisInjected": false
+    }
+  },
+  "contains": ["[3][IC] member_1: 最近的话"],
+  "notContains": ["【剧情梗概】"]
+}

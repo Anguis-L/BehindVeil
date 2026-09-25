@@ -1,0 +1,12 @@
+{
+  "traceDetails": {
+    "S4-budget-cut": {
+      "budgetTokens": 4,
+      "includedUids": [1, 3],
+      "droppedUids": [2],
+      "usedTokens": 3
+    }
+  },
+  "contains": ["AAAAAA", "CC"],
+  "notContains": ["BBBBBBBBBB"]
+}

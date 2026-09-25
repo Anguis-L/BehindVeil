@@ -1,0 +1,62 @@
+{
+  "session": {
+    "provider": "openai-compat",
+    "model": "deepseek-chat",
+    "temperature": 0.8,
+    "maxHistoryMessages": 40,
+    "worldBookBudgetTokens": 2000,
+    "scanDepth": 8,
+    "contextWindowTokens": 32768,
+    "outputReserveTokens": 2048
+  },
+  "kpCard": {
+    "spec": "chara_card_v3",
+    "data": {
+      "name": "守秘人",
+      "description": "测试KP",
+      "scenario": "",
+      "first_mes": "",
+      "mes_example": "",
+      "extensions": {}
+    }
+  },
+  "messages": [
+    {
+      "seq": 1,
+      "ts": "2026-09-25T00:00:00.000Z",
+      "sessionId": "ses_1",
+      "type": "ic",
+      "senderId": "member_1",
+      "content": "教堂的钟楼连着地窖"
+    }
+  ],
+  "stateBoard": {
+    "version": 0,
+    "pcs": {},
+    "scene": {
+      "name": "",
+      "time": "",
+      "publicDesc": ""
+    },
+    "facts": [],
+    "updatedAt": "2026-09-25T00:00:00.000Z"
+  },
+  "worldBook": {
+    "entries": [
+      {
+        "uid": 1,
+        "key": ["教堂"],
+        "keysecondary": ["钟楼", "地窖"],
+        "selectiveLogic": 3,
+        "content": "教堂全貌：钟楼与地窖的平面图。",
+        "position": "after_char",
+        "order": 0,
+        "weight": 100,
+        "constant": false,
+        "disabled": false
+      }
+    ]
+  },
+  "pcRoster": "",
+  "synopsis": ""
+}

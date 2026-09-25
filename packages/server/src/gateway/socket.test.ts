@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -599,6 +599,89 @@ describe('kp:previewPrompt（T-M2-05，FR-13）', () => {
       code: 'E-ROOM-01',
       message: '尚未开团，暂无 prompt 可预览',
     });
+    host.close();
+  });
+});
+
+describe('kpOnly 不泄露（TC-FR-07-012，TDD §8）', () => {
+  interface PromptPreviewPayload {
+    pipeline: {
+      stages: Array<{ name: string }>;
+      messages: Array<{ role: string; content: string }>;
+    };
+  }
+
+  function waitPreview(client: Socket, ms = 3000): Promise<PromptPreviewPayload> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        client.off('kp:promptPreview');
+        reject(new Error('等待 kp:promptPreview 超时'));
+      }, ms);
+      client.once('kp:promptPreview', (payload: PromptPreviewPayload) => {
+        clearTimeout(timer);
+        resolve(payload);
+      });
+    });
+  }
+
+  it('kpOnly 内容仅出现在 Host 预览；玩家的广播流与预览请求均不可见', async () => {
+    const { room, host } = await setupLiveRoom('kpOnly房');
+    // 房间级手编世界书写入 kpOnly 模组真相（key 为空 → 扫描层恒命中）
+    const SECRET = '模组真相：秘宝藏在座钟夹层。';
+    await mkdir(path.join(dataDir, 'rooms', room.id), { recursive: true });
+    await writeFile(
+      layout.worldbookFile(room.id),
+      JSON.stringify({
+        entries: [
+          {
+            uid: 1,
+            key: [],
+            keysecondary: [],
+            selectiveLogic: 0,
+            content: SECRET,
+            position: 'after_char',
+            order: 0,
+            weight: 100,
+            constant: false,
+            disabled: false,
+            extensions: { kpOnly: true },
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    // 玩家进房，记录其收到的所有广播事件（含 msg:broadcast 与系统事件）
+    const player = await connect();
+    await join(player, { inviteCode: room.inviteCode, name: '玩家' });
+    const received: Array<{ event: string; payload: unknown }> = [];
+    player.onAny((event: string, ...args: unknown[]) => {
+      received.push({ event, payload: args });
+    });
+
+    // Host 预览：kpOnly 内容对 Host 可见（FR-13 是其唯一出口）
+    const previewPromise = waitPreview(host);
+    host.emit('kp:previewPrompt', {});
+    const preview = await previewPromise;
+    expect(preview.pipeline.messages.map((m) => m.content).join('\n')).toContain(SECRET);
+
+    // 玩家视角：普通消息广播照常，但任何到达玩家的事件都不携带 kpOnly 内容
+    // （导出面 M5 落地时需按同一口径复验）
+    const broadcastPromise = waitBroadcast(player);
+    host.emit('msg:send', { type: 'ic', content: '日常发言' });
+    await broadcastPromise;
+    await sleep(300); // 留出潜在其他事件到达的时间窗
+    expect(JSON.stringify(received)).not.toContain(SECRET);
+
+    // 玩家主动请求预览 → E-ROOM-01 拒绝
+    const errorPromise = waitError(player);
+    player.emit('kp:previewPrompt', {});
+    expect(await errorPromise).toMatchObject({
+      code: 'E-ROOM-01',
+      message: '仅 Host 可预览 prompt',
+    });
+
+    player.close();
     host.close();
   });
 });

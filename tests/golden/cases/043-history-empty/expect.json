@@ -1,0 +1,12 @@
+{
+  "messageRoles": ["system", "user"],
+  "traceDetails": {
+    "S5-history-trim": {
+      "total": 0,
+      "kept": 0,
+      "trimmed": 0,
+      "synopsisInjected": false
+    }
+  },
+  "notContains": ["【对话历史】", "【剧情梗概】"]
+}

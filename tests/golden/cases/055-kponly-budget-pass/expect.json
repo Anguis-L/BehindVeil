@@ -1,0 +1,9 @@
+{
+  "traceDetails": {
+    "S4-budget-cut": {
+      "includedUids": [1, 2, 3],
+      "droppedUids": []
+    }
+  },
+  "contains": ["常驻设定：小镇每年起雾。", "模组真相：雾中栖息着东西。", "码头传闻：雾天有人失踪。"]
+}

@@ -1,0 +1,8 @@
+{
+  "traceDetails": {
+    "S2-state": {
+      "injected": false
+    }
+  },
+  "notContains": ["【状态板"]
+}

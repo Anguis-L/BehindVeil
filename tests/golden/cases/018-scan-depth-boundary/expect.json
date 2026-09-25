@@ -1,0 +1,10 @@
+{
+  "traceDetails": {
+    "S3-worldbook-scan": {
+      "scannedMessageCount": 2,
+      "hitUids": [2]
+    }
+  },
+  "contains": ["风平条目：窗口内应命中。"],
+  "notContains": ["超出扫描窗不应出现"]
+}
