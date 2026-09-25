@@ -13,18 +13,15 @@ import { z } from 'zod';
 export const MemberRoleSchema = z.enum(['host', 'player', 'observer']);
 export type MemberRole = z.infer<typeof MemberRoleSchema>;
 
-export const RoomSchema = z.object({
-  /** nanoid(12)，T-M1-01/M1 REST 建房时生成 */
+/** 房间成员（members.json，TDD §3.1/§6） */
+export const MemberSchema = z.object({
   id: z.string(),
   name: z.string(),
+  role: MemberRoleSchema,
   /** ISO8601 */
-  createdAt: z.string(),
-  /** 6 位邀请码，Host 可重置（TDD §8） */
-  inviteCode: z.string().length(6),
-  activeSessionId: z.string().nullable(),
-  memberLimit: z.number().int().positive(),
+  joinedAt: z.string(),
 });
-export type Room = z.infer<typeof RoomSchema>;
+export type Member = z.infer<typeof MemberSchema>;
 
 /** 会话级 LLM/管线设置（TDD §3.1 settings）。全字段必填：裁剪窗/预算/扫描深度缺失会让管线行为失义 */
 export const SessionSettingsSchema = z.object({
@@ -39,6 +36,24 @@ export const SessionSettingsSchema = z.object({
   scanDepth: z.number().int().positive(),
 });
 export type SessionSettings = z.infer<typeof SessionSettingsSchema>;
+
+export const RoomSchema = z.object({
+  /** nanoid(12)，T-M1-01/M1 REST 建房时生成 */
+  id: z.string(),
+  name: z.string(),
+  /** ISO8601 */
+  createdAt: z.string(),
+  /** 6 位邀请码，Host 可重置（TDD §8） */
+  inviteCode: z.string().length(6),
+  activeSessionId: z.string().nullable(),
+  memberLimit: z.number().int().positive(),
+  /**
+   * 本房默认会话设置（docs/openapi RoomSettingsPatch）：只影响之后新建的会话，
+   * 不改写已存在 Session 的 settings；缺省时由 session:start 显式给出。
+   */
+  defaultSessionSettings: SessionSettingsSchema.optional(),
+});
+export type Room = z.infer<typeof RoomSchema>;
 
 export const SessionSchema = z.object({
   id: z.string(),

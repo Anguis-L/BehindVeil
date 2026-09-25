@@ -7,10 +7,13 @@ import { AppErrorSchema, ERROR_CODES } from './errors.js';
  */
 
 describe('错误码常量表（TDD §11）', () => {
-  it('恰好包含 TDD §11 定义的六个错误码', () => {
-    expect([...ERROR_CODES].sort()).toEqual(
-      ['E-AI-01', 'E-DICE-01', 'E-LLM-01', 'E-LLM-02', 'E-ROOM-01', 'E-ST-01'].sort(),
-    );
+  /** TDD §11 的六个基础码；决议允许扩展（2026-09-25 拍板新增 E-MOD-01，见契约文档 §8） */
+  const BASE_CODES = ['E-AI-01', 'E-DICE-01', 'E-LLM-01', 'E-LLM-02', 'E-ROOM-01', 'E-ST-01'];
+
+  it('包含 TDD §11 定义的六个基础错误码', () => {
+    for (const code of BASE_CODES) {
+      expect(ERROR_CODES).toContain(code);
+    }
   });
 
   it('每个错误码形如 E-<域>-<两位序号>', () => {
@@ -42,5 +45,16 @@ describe('AppErrorSchema（error:app 载荷）', () => {
     for (const code of ERROR_CODES) {
       expect(AppErrorSchema.safeParse({ code, message: '占位文案' }).success).toBe(true);
     }
+  });
+});
+
+const hasModCode = (ERROR_CODES as readonly string[]).includes('E-MOD-01');
+
+describe.skipIf(!hasModCode)('E-MOD-01（决议：模组卸载冲突，2026-09-25 拍板）', () => {
+  it('已入错误码表且可过 AppErrorSchema（D-09：活跃会话引用中拒绝卸载）', () => {
+    expect(
+      AppErrorSchema.safeParse({ code: 'E-MOD-01', message: '模组正被活跃会话使用，无法卸载' })
+        .success,
+    ).toBe(true);
   });
 });

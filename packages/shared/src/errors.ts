@@ -13,6 +13,7 @@ export const ERROR_CODES = [
   'E-AI-01',
   'E-ST-01',
   'E-ROOM-01',
+  'E-MOD-01',
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -31,6 +32,8 @@ export const ERROR_DETAILS: Record<ErrorCode, ErrorDetail> = {
   'E-AI-01': { scene: 'AI 指令解析失败', userMessage: '' },
   'E-ST-01': { scene: '状态板版本冲突', userMessage: '数据已更新，请刷新' },
   'E-ROOM-01': { scene: '邀请码无效/满员', userMessage: '邀请码无效或房间已满' },
+  // 2026-09-25 拍板新增（决议 ③，D-09）：模组被活跃会话引用时拒绝卸载
+  'E-MOD-01': { scene: '模组卸载冲突', userMessage: '模组使用中，无法卸载' },
 };
 
 /** `error:app` 事件 / REST 错误响应的统一载荷（TDD §4.2） */

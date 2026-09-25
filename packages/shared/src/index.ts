@@ -15,3 +15,4 @@ export * from './errors.js';
 export * from './dice.js';
 export * from './domain.js';
 export * from './message.js';
+export * from './protocol.js';
