@@ -33,10 +33,9 @@ info:
 
     ## 握手
 
-    连接时校验三件事，任一不满足即拒绝连接：
-    1. 协议版本 `protocol` 与服务端 `PROTOCOL_VERSION` 一致（当前 `0.0.0`）
-    2. 邀请码有效且房间未满（否则 `E-ROOM-01`）
-    3. 成员数未超过 `memberLimit`
+    握手只校验协议版本：`protocol` 与服务端 `PROTOCOL_VERSION` 一致（当前 `0.0.0`），
+    不一致即拒绝连接（`protocol-mismatch`）。邀请码有效性与房间满员在 `room:join`
+    事件内校验（失败回 `E-ROOM-01`，不断连）。
 
     角色（决议 D-02）：建房者即 Host，**v1 不可转让**；加入方只能申请 player / observer。
     Host 可授予 observer 发言权（player+）。
@@ -61,6 +60,17 @@ channels:
     description: |
       客户端 → 服务端。携带邀请码与昵称申请加入（FR-01）。
       `wantRole` 只能填 player / observer——Host 由建房者持有，不可申请（D-02）。
+
+      进房凭据（2026-09-25 决议①）：建房者以 REST 建房响应**仅此一次**下发的
+      `hostToken` 证明 Host 身份；凭 `memberId` 重连的 Host 也必须重新出示
+      hostToken，否则按 wantRole 新建成员（防冒领）。
+
+      断线重连（T-M1-08）：携带原 `memberId` 复用身份；上报 `lastSeq`（客户端已收
+      最大 seq）后，服务端按升序补发缺口（不丢、不重、不乱序）。
+
+      ack 回包（实现见 `packages/shared/src/protocol.ts` RoomJoinPayload / 网关 JoinAck）：
+      `{ ok, roomId?, memberId?, role?, activeSessionId?, lastSeq?, members?, code?, message? }`，
+      其中 `members` 为房内名册快照（提案增量），`lastSeq` 为该活跃会话当前最大 seq。
     messages:
       join:
         $ref: '#/components/messages/RoomJoin'
@@ -81,6 +91,8 @@ channels:
     description: |
       客户端 → 服务端，player+ 权限（FR-02）。
       IC 走主消息流，OOC 走侧栏；`targetId` 仅在 OOC 私聊时有意义。
+      OOC 可见性（TDD §3.2）：`all` 全房可见；`host` 仅 Host 可见；
+      带 `targetId` 时一律按 whisper（目标 + Host + 发送者）定向投递，`visibility` 忽略。
 
       **AI 触发（D-07）**：玩家 IC 消息自动触发 AI 叙事（AI 忙时排队串行，不并发交错）。
     messages:
@@ -339,8 +351,23 @@ components:
             enum: [player, observer]
             description: 只能申请 player / observer；Host 不可申请（D-02）
             default: player
+          hostToken:
+            type: string
+            description: 建房响应仅此一次下发的 Host 凭据（决议①）；出示即以 Host 身份加入
+          memberId:
+            type: string
+            description: 断线重连时携带原成员 ID 复用身份；缺省则新建成员
+          lastSeq:
+            type: integer
+            minimum: 0
+            description: 断线重连时客户端已收最大 seq；服务端据此按升序补发缺口（T-M1-08）
         required: [inviteCode, name]
       examples:
+        - name: 建房者进房（Host）
+          payload:
+            inviteCode: A7K2Q9
+            name: KP
+            hostToken: 8fJ2mQ9zXvR1aB4cD6eF0gH3iK5lM7nP
         - name: 玩家加入
           payload:
             inviteCode: A7K2Q9
@@ -351,6 +378,12 @@ components:
             inviteCode: A7K2Q9
             name: 小明
             wantRole: observer
+        - name: 断线重连（补缺口）
+          payload:
+            inviteCode: A7K2Q9
+            name: 爱丽丝
+            memberId: m_8hK2mQ9zXv
+            lastSeq: 42
 
     SessionStart:
       name: sessionStart
@@ -392,7 +425,11 @@ components:
             description: 正文
           targetId:
             type: string
-            description: OOC 私聊对象成员 ID
+            description: OOC 私聊对象成员 ID；携带时按 whisper 定向投递（目标+Host+发送者）
+          visibility:
+            type: string
+            enum: [all, host]
+            description: OOC 可见性（缺省 all）；host = 仅 Host 可见；带 targetId 时本字段忽略
         required: [type, content]
       examples:
         - name: IC 发言（触发 AI）
@@ -404,6 +441,11 @@ components:
             type: ooc
             content: 这人看着不太对劲……
             targetId: m_bob
+        - name: OOC 仅 Host 可见
+          payload:
+            type: ooc
+            content: 我其实撒谎了……
+            visibility: host
 
     AiInvoke:
       name: aiInvoke
