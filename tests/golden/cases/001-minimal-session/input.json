@@ -31,10 +31,17 @@
   "stateBoard": {
     "version": 1,
     "pcs": {},
-    "scene": { "name": "书房", "time": "1924-03-12 夜", "publicDesc": "壁炉噼啪作响" },
+    "scene": {
+      "name": "书房",
+      "time": "1924-03-12 夜",
+      "publicDesc": "壁炉噼啪作响"
+    },
     "facts": [],
     "updatedAt": "2026-09-25T00:00:00.000Z"
   },
-  "worldBook": { "entries": [] },
-  "pcRoster": "张三（记者）"
+  "worldBook": {
+    "entries": []
+  },
+  "pcRoster": "张三（记者）",
+  "synopsis": ""
 }

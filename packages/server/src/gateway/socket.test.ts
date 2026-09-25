@@ -530,3 +530,75 @@ describe('断线清理与补发（T-M1-08）', () => {
     host.close();
   });
 });
+
+describe('kp:previewPrompt（T-M2-05，FR-13）', () => {
+  interface PromptPreviewPayload {
+    pipeline: {
+      stages: Array<{ name: string; tokenCount: number }>;
+      messages: Array<{ role: string; content: string }>;
+    };
+  }
+
+  function waitPreview(client: Socket, ms = 3000): Promise<PromptPreviewPayload> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        client.off('kp:promptPreview');
+        reject(new Error('等待 kp:promptPreview 超时'));
+      }, ms);
+      client.once('kp:promptPreview', (payload: PromptPreviewPayload) => {
+        clearTimeout(timer);
+        resolve(payload);
+      });
+    });
+  }
+
+  it('Host 请求 → 定向回 kp:promptPreview，携带七阶段 trace', async () => {
+    const { host } = await setupLiveRoom('预览房');
+    const previewPromise = waitPreview(host);
+    host.emit('kp:previewPrompt', {});
+
+    const payload = await previewPromise;
+    expect(payload.pipeline.stages.map((s) => s.name.slice(0, 2))).toEqual([
+      'S1',
+      'S2',
+      'S3',
+      'S4',
+      'S5',
+      'S6',
+      'S7',
+    ]);
+    expect(payload.pipeline.messages.length).toBeGreaterThan(0);
+    host.close();
+  });
+
+  it('非 Host 请求被拒（E-ROOM-01）', async () => {
+    const { room, host } = await setupLiveRoom('预览权限房');
+    const player = await connect();
+    await join(player, { inviteCode: room.inviteCode, name: '玩家' });
+    // host 收不到 player 触发的回包，只可能收到 error:app
+    const errorPromise = waitError(player);
+    player.emit('kp:previewPrompt', {});
+
+    expect(await errorPromise).toMatchObject({
+      code: 'E-ROOM-01',
+      message: '仅 Host 可预览 prompt',
+    });
+    player.close();
+    host.close();
+  });
+
+  it('未开团 → E-ROOM-01', async () => {
+    const room = await createRoom(layout, { name: '未开团预览房' });
+    const host = await connect();
+    await join(host, { inviteCode: room.inviteCode, hostToken: room.hostToken, name: 'KP' });
+
+    const errorPromise = waitError(host);
+    host.emit('kp:previewPrompt', {});
+
+    expect(await errorPromise).toMatchObject({
+      code: 'E-ROOM-01',
+      message: '尚未开团，暂无 prompt 可预览',
+    });
+    host.close();
+  });
+});

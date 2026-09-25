@@ -34,6 +34,12 @@ export const SessionSettingsSchema = z.object({
   worldBookBudgetTokens: z.number().int().nonnegative(),
   /** 世界书扫描深度（默认 4，由创建方填入） */
   scanDepth: z.number().int().positive(),
+  /**
+   * 模型上下文窗口与输出预留（S7 硬顶 = contextWindowTokens - outputReserveTokens，
+   * TDD §5.1 S7；硬顶须随黄金用例输入驱动回退，故进会话级设置。默认按 32K 级模型）。
+   */
+  contextWindowTokens: z.number().int().positive().default(32_768),
+  outputReserveTokens: z.number().int().positive().default(2_048),
 });
 export type SessionSettings = z.infer<typeof SessionSettingsSchema>;
 

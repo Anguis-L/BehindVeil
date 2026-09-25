@@ -26,6 +26,11 @@ export interface PipelineInput {
   worldBook: WorldBook;
   /** PC 名册文本（M3 前为手编/内存桩，T-M5-04 起由状态板名册生成） */
   pcRoster: string;
+  /**
+   * 剧情梗概（决议 D-01）：历史被裁部分以梗概块替代，v1 由 Host 手编 session.json
+   * 的 synopsis 字段维护（载入时过 Schema 校验）；AI 生成留二期。
+   */
+  synopsis: string;
 }
 
 export const PIPELINE_STAGES = [

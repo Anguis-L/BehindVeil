@@ -6,6 +6,7 @@ import {
   isClientEvent,
   type ClientEventName,
   type ErrorCode,
+  type KpPreviewPromptPayload,
   type Member,
   type MemberRole,
   type Message,
@@ -20,6 +21,7 @@ import { appendMessage, readMessagesAfter } from '../domain/session/messages.js'
 import { addMember, readMembers } from '../domain/session/members.js';
 import { findByInviteCode, readRoomFile } from '../domain/session/rooms.js';
 import { createSession } from '../domain/session/sessions.js';
+import { buildPreviewTrace } from '../observability/preview.js';
 import type { MsgSendPayload, RoomJoinPayload, SessionStartPayload } from '@behindveil/shared';
 
 /**
@@ -31,7 +33,8 @@ import type { MsgSendPayload, RoomJoinPayload, SessionStartPayload } from '@behi
  *   投递），保证落盘顺序与 seq 顺序一致（T-M1-05 注记）。
  * - OOC 可见性路由（T-M1-06）：all 走房间广播；host/whisper 走定向投递（绝不全房广播）。
  * - 出站自检：所有投递经 SERVER_EVENT_SCHEMAS 校验后才发出（双向 Zod，TC-FR-02-004）。
- * - M2+ 事件（dice:roll/state:update/state:snapshot/ai:invoke/kp:previewPrompt）：
+ * - KP prompt 预览（T-M2-05，FR-13）：kp:previewPrompt → host only → kp:promptPreview 定向回包。
+ * - M3+ 事件（dice:roll/state:update/state:snapshot/ai:invoke）：
  *   payload 校验通过后暂不处理（未到里程碑不提前实现），到点在 dispatch 落位。
  */
 
@@ -158,6 +161,9 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
         return;
       case 'session:start':
         await handleSessionStart(socket, payload as SessionStartPayload, ack);
+        return;
+      case 'kp:previewPrompt':
+        await handlePreviewPrompt(socket, payload as KpPreviewPromptPayload);
         return;
       default:
         return;
@@ -445,6 +451,28 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       }),
     );
     ack?.({ ok: true, session });
+  }
+
+  /** KP prompt 预览（T-M2-05，FR-13）：host only，trace 定向回请求 socket；seq 语义见 PreviewOptions */
+  async function handlePreviewPrompt(socket: Socket, data: KpPreviewPromptPayload): Promise<void> {
+    const me = presence.get(socket.id);
+    if (!me) {
+      emitError(socket, 'E-ROOM-01', '尚未加入房间');
+      return;
+    }
+    if (me.role !== 'host') {
+      emitError(socket, 'E-ROOM-01', '仅 Host 可预览 prompt');
+      return;
+    }
+    const room = await readRoomFile(layout, me.roomId);
+    if (!room?.activeSessionId) {
+      emitError(socket, 'E-ROOM-01', '尚未开团，暂无 prompt 可预览');
+      return;
+    }
+    const trace = await buildPreviewTrace(layout, me.roomId, room.activeSessionId, {
+      seq: data.seq,
+    });
+    emitChecked(socket, 'kp:promptPreview', { pipeline: trace });
   }
 
   async function handleDisconnect(socket: Socket): Promise<void> {

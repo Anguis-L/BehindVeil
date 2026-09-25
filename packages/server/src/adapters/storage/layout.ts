@@ -5,7 +5,7 @@ import { join } from 'node:path';
  *
  * data/
  * ├── config.yaml
- * ├── rooms/<roomId>/{room.json, members.json, sessions/<sessionId>/{session.json, messages.jsonl, state.json}}
+ * ├── rooms/<roomId>/{room.json, members.json, worldbook.json, sessions/<sessionId>/{session.json, messages.jsonl, state.json}}
  * ├── cards/                      # 角色卡库（M5）
  * ├── modules/<moduleId>/          # 模组包（M5）
  * └── logs/audit-dice.jsonl       # 全局骰子审计流水（M4）
@@ -21,6 +21,8 @@ export interface DataLayout {
   roomDir(roomId: string): string;
   roomFile(roomId: string): string;
   membersFile(roomId: string): string;
+  /** 房间级手编世界书（T-M2-06，决议 D-08：JSON 手编 + 载入校验，无编辑 UI） */
+  worldbookFile(roomId: string): string;
   sessionsDir(roomId: string): string;
   sessionDir(roomId: string, sessionId: string): string;
   sessionFile(roomId: string, sessionId: string): string;
@@ -41,6 +43,7 @@ export function createDataLayout(root: string): DataLayout {
     roomDir: (roomId) => join(roomsDir, roomId),
     roomFile: (roomId) => join(roomsDir, roomId, 'room.json'),
     membersFile: (roomId) => join(roomsDir, roomId, 'members.json'),
+    worldbookFile: (roomId) => join(roomsDir, roomId, 'worldbook.json'),
     sessionsDir: (roomId) => join(roomsDir, roomId, 'sessions'),
     sessionDir: (roomId, sessionId) => join(roomsDir, roomId, 'sessions', sessionId),
     sessionFile: (roomId, sessionId) =>

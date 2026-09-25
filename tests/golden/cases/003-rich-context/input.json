@@ -15,7 +15,11 @@
       "scenario": "深夜书房：一桩失踪案",
       "first_mes": "灯亮了。",
       "mes_example": "",
-      "extensions": { "aidle": { "rulebook": "coc7" } }
+      "extensions": {
+        "aidle": {
+          "rulebook": "coc7"
+        }
+      }
     }
   },
   "messages": [
@@ -66,15 +70,25 @@
           "san": 65,
           "db": "0",
           "build": "0",
-          "skills": { "侦查": 60, "图书馆使用": 50 }
+          "skills": {
+            "侦查": 60,
+            "图书馆使用": 50
+          }
         },
         "conditions": ["轻伤"]
       }
     },
-    "scene": { "name": "书房·二楼", "time": "1924-03-12 深夜", "publicDesc": "窗外雨声不断" },
+    "scene": {
+      "name": "书房·二楼",
+      "time": "1924-03-12 深夜",
+      "publicDesc": "窗外雨声不断"
+    },
     "facts": ["门从内侧反锁", "书桌上有一封未拆的信"],
     "updatedAt": "2026-09-25T00:00:09.000Z"
   },
-  "worldBook": { "entries": [] },
-  "pcRoster": "张三（记者）、李四（医生）"
+  "worldBook": {
+    "entries": []
+  },
+  "pcRoster": "张三（记者）、李四（医生）",
+  "synopsis": ""
 }

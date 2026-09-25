@@ -15,17 +15,28 @@
       "scenario": "开场：深夜书房",
       "first_mes": "灯亮了。",
       "mes_example": "",
-      "extensions": { "aidle": { "rulebook": "coc7" } }
+      "extensions": {
+        "aidle": {
+          "rulebook": "coc7"
+        }
+      }
     }
   },
   "messages": [],
   "stateBoard": {
     "version": 0,
     "pcs": {},
-    "scene": { "name": "书房", "time": "1924-03-12 夜", "publicDesc": "" },
+    "scene": {
+      "name": "书房",
+      "time": "1924-03-12 夜",
+      "publicDesc": ""
+    },
     "facts": [],
     "updatedAt": "2026-09-25T00:00:00.000Z"
   },
-  "worldBook": { "entries": [] },
-  "pcRoster": ""
+  "worldBook": {
+    "entries": []
+  },
+  "pcRoster": "",
+  "synopsis": ""
 }

@@ -34,6 +34,8 @@ const settings = {
   maxHistoryMessages: 40,
   worldBookBudgetTokens: 2000,
   scanDepth: 4,
+  contextWindowTokens: 32_768,
+  outputReserveTokens: 2_048,
 };
 
 /** 直接落一个非法 room.json（先建出目录），模拟损坏文件 */

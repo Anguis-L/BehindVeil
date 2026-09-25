@@ -119,6 +119,27 @@ describe('SessionSchema（TDD §3.1）', () => {
   it('endedAt 可为 null（进行中的团）', () => {
     expect(SessionSchema.safeParse({ ...session, endedAt: null }).success).toBe(true);
   });
+
+  it('settings 硬顶字段缺省时补默认（S7 = contextWindow - outputReserve）', () => {
+    const parsed = SessionSchema.parse({ ...session, settings: { ...session.settings } });
+    expect(parsed.settings.contextWindowTokens).toBe(32_768);
+    expect(parsed.settings.outputReserveTokens).toBe(2_048);
+  });
+
+  it('settings 硬顶字段必须为正整数', () => {
+    expect(
+      SessionSchema.safeParse({
+        ...session,
+        settings: { ...session.settings, contextWindowTokens: 0 },
+      }).success,
+    ).toBe(false);
+    expect(
+      SessionSchema.safeParse({
+        ...session,
+        settings: { ...session.settings, outputReserveTokens: -1 },
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe('StateBoardSchema（TDD §3.7）', () => {

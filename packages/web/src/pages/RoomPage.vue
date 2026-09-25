@@ -57,6 +57,44 @@ function senderName(msg: Message): string {
   if (msg.type !== 'ic' && msg.type !== 'ooc') return '';
   return store.memberNameMap.get(msg.senderId) ?? msg.senderId;
 }
+
+// ---- KP prompt 预览（T-M2-09，FR-13）----
+
+interface ScanDetail {
+  hitUids: number[];
+  hits: Array<{ uid: number; matchedKeys: string[]; matchedSecondary: string[]; kpOnly: boolean }>;
+}
+interface BudgetDetail {
+  includedUids: number[];
+  droppedUids: number[];
+}
+interface ValidateDetail {
+  totalTokens: number;
+  hardCap: number | null;
+  overBudget: boolean;
+}
+
+/** trace.detail 是 unknown（线上形状 z.unknown），按已知阶段形状窄化（配防御式默认） */
+function stageDetail<T>(name: string, fallback: T): T {
+  const detail = store.preview?.stages.find((s) => s.name === name)?.detail;
+  return (detail as T | undefined) ?? fallback;
+}
+
+const scanDetail = computed<ScanDetail>(() =>
+  stageDetail('S3-worldbook-scan', { hitUids: [], hits: [] }),
+);
+const budgetDetail = computed<BudgetDetail>(() =>
+  stageDetail('S4-budget-cut', { includedUids: [], droppedUids: [] }),
+);
+const validateDetail = computed<ValidateDetail>(() =>
+  stageDetail('S7-validate', { totalTokens: 0, hardCap: null, overBudget: false }),
+);
+
+function hitLabel(h: ScanDetail['hits'][number]): string {
+  const keys = h.matchedKeys.length > 0 ? h.matchedKeys.join('、') : '常驻';
+  const sec = h.matchedSecondary.length > 0 ? `（二级：${h.matchedSecondary.join('、')}）` : '';
+  return `#${h.uid}${h.kpOnly ? ' · KP' : ''} — ${keys}${sec}`;
+}
 </script>
 
 <template>
@@ -153,8 +191,60 @@ function senderName(msg: Message): string {
       </section>
 
       <aside class="bv-room__rail bv-room__rail--right">
-        <h2 class="bv-room__rail-title">侧栏</h2>
-        <p class="bv-room__rail-hint">KP 控制台 / 状态板随 M2–M5 里程碑开放。</p>
+        <h2 class="bv-room__rail-title">KP 控制台</h2>
+        <template v-if="store.role === 'host'">
+          <button
+            class="bv-room__send bv-room__preview-btn"
+            :disabled="!store.activeSessionId || store.previewLoading"
+            @click="store.requestPreview()"
+          >
+            {{ store.previewLoading ? '生成中…' : '生成 Prompt 预览' }}
+          </button>
+
+          <p v-if="!store.preview && !store.previewLoading" class="bv-room__rail-hint">
+            开团后可预览每次 AI 请求的 prompt 组装（各阶段 token、世界书命中、最终 messages）。
+          </p>
+
+          <div v-if="store.preview" class="bv-room__preview">
+            <h3 class="bv-room__preview-title">各阶段 token</h3>
+            <ul class="bv-room__preview-list">
+              <li v-for="s in store.preview.stages" :key="s.name">
+                <span>{{ s.name }}</span>
+                <span>{{ s.tokenCount }}</span>
+              </li>
+            </ul>
+
+            <h3 class="bv-room__preview-title">世界书命中</h3>
+            <p v-if="scanDetail.hits.length === 0" class="bv-room__rail-hint">无命中条目</p>
+            <ul v-else class="bv-room__preview-list">
+              <li v-for="h in scanDetail.hits" :key="h.uid">{{ hitLabel(h) }}</li>
+            </ul>
+
+            <h3 class="bv-room__preview-title">预算裁剪</h3>
+            <p class="bv-room__rail-hint">
+              装入 {{ budgetDetail.includedUids.length }} 条 · 被裁
+              {{ budgetDetail.droppedUids.length }} 条（{{
+                budgetDetail.droppedUids.map((u) => `#${u}`).join('、') || '无'
+              }}）
+            </p>
+
+            <h3 class="bv-room__preview-title">硬顶校验</h3>
+            <p class="bv-room__rail-hint">
+              总 {{ validateDetail.totalTokens }} token
+              <template v-if="validateDetail.hardCap !== null"
+                >/ 硬顶 {{ validateDetail.hardCap }}</template
+              >
+              <span v-if="validateDetail.overBudget" class="bv-room__preview-over">· 超限</span>
+            </p>
+
+            <h3 class="bv-room__preview-title">最终 messages</h3>
+            <details v-for="m in store.preview.messages" :key="m.role" class="bv-room__preview-msg">
+              <summary>{{ m.role }}（{{ m.content.length }} 字）</summary>
+              <pre>{{ m.content }}</pre>
+            </details>
+          </div>
+        </template>
+        <p v-else class="bv-room__rail-hint">状态板 / KP 控制台仅 Host 可见。</p>
       </aside>
     </div>
   </main>
@@ -229,6 +319,54 @@ function senderName(msg: Message): string {
 .bv-room__rail-hint {
   color: var(--bv-text-tertiary);
   font-size: 12px;
+}
+.bv-room__preview-btn {
+  width: 100%;
+  margin-bottom: var(--bv-space-3);
+}
+.bv-room__preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bv-space-1);
+}
+.bv-room__preview-title {
+  margin: var(--bv-space-3) 0 var(--bv-space-1);
+  font-size: 12px;
+  color: var(--bv-text-secondary);
+}
+.bv-room__preview-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--bv-space-1);
+  font-size: 12px;
+}
+.bv-room__preview-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--bv-space-2);
+  color: var(--bv-text-secondary);
+}
+.bv-room__preview-over {
+  color: var(--bv-judge-fail);
+}
+.bv-room__preview-msg {
+  font-size: 12px;
+  color: var(--bv-text-secondary);
+}
+.bv-room__preview-msg pre {
+  margin: var(--bv-space-1) 0 0;
+  padding: var(--bv-space-2);
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: var(--bv-radius-card);
+  background: var(--bv-bg-elevated);
+  font-size: 11px;
 }
 .bv-room__main {
   display: flex;

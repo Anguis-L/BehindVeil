@@ -33,6 +33,7 @@ export function buildPrompt(input: PipelineInput, tokenizer: Tokenizer): Pipelin
   const bundle: PipelineBundle = {
     skeleton: '',
     stateBlock: '',
+    scanHits: [],
     worldbookBlocks: [],
     history: [],
     synopsis: '',

@@ -32,6 +32,13 @@ interface ServerToClientEvents {
   'narration:delta': (payload: { seq: number; delta: string }) => void;
   'narration:done': (payload: { seq: number }) => void;
   'error:app': (payload: { code: string; message: string }) => void;
+  'kp:promptPreview': (payload: { pipeline: PromptPreview }) => void;
+}
+
+/** kp:promptPreview 承载的管线 trace（T-M2-05/09，FR-13；形状对齐 PipelineTraceSchema） */
+export interface PromptPreview {
+  stages: Array<{ name: string; tokenCount: number; detail: unknown }>;
+  messages: Array<{ role: string; content: string }>;
 }
 
 interface SessionStartAck {
@@ -54,10 +61,13 @@ interface ClientToServerEvents {
         maxHistoryMessages: number;
         worldBookBudgetTokens: number;
         scanDepth: number;
+        contextWindowTokens: number;
+        outputReserveTokens: number;
       };
     },
     ack: (resp: SessionStartAck) => void,
   ) => void;
+  'kp:previewPrompt': (payload: { seq?: number }) => void;
 }
 
 let socket: Socket<ServerToClientEvents, ClientToServerEvents> | null = null;
@@ -77,6 +87,9 @@ export const useSessionStore = defineStore('session', {
     connected: false,
     connectionLost: false,
     error: '',
+    /** KP prompt 预览（T-M2-09，FR-13）：kp:promptPreview 回包 */
+    preview: null as PromptPreview | null,
+    previewLoading: false,
   }),
 
   getters: {
@@ -156,6 +169,8 @@ export const useSessionStore = defineStore('session', {
             maxHistoryMessages: 40,
             worldBookBudgetTokens: 2000,
             scanDepth: 4,
+            contextWindowTokens: 32_768,
+            outputReserveTokens: 2_048,
           },
         },
         (resp) => {
@@ -166,6 +181,13 @@ export const useSessionStore = defineStore('session', {
           }
         },
       );
+    },
+
+    requestPreview(): void {
+      // host only（服务端同校验）；回包走 kp:promptPreview 监听
+      if (this.role !== 'host' || !this.activeSessionId) return;
+      this.previewLoading = true;
+      getSocket().emit('kp:previewPrompt', {});
     },
 
     ingest(list: Message[]): void {
@@ -241,6 +263,12 @@ function getSocket(): Socket<ServerToClientEvents, ClientToServerEvents> {
 
   socket.on('error:app', (payload) => {
     store.error = payload.message ? `[${payload.code}] ${payload.message}` : payload.code;
+    store.previewLoading = false;
+  });
+
+  socket.on('kp:promptPreview', (payload) => {
+    store.preview = payload.pipeline;
+    store.previewLoading = false;
   });
 
   return socket;

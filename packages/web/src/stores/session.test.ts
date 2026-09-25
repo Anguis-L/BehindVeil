@@ -233,6 +233,55 @@ describe('send / startSession / fetchHistory', () => {
   });
 });
 
+describe('KP prompt 预览（T-M2-09，FR-13）', () => {
+  it('host 触发 requestPreview：emit kp:previewPrompt 并进入 loading', () => {
+    const store = useSessionStore();
+    store.role = 'host';
+    store.activeSessionId = 's_1';
+    store.send('ic', 'x'); // 惰性触发 getSocket
+    fake.socket.emit.mockClear();
+
+    store.requestPreview();
+
+    expect(fake.socket.emit).toHaveBeenCalledWith('kp:previewPrompt', {});
+    expect(store.previewLoading).toBe(true);
+  });
+
+  it('非 host / 未开团不请求', () => {
+    const store = useSessionStore();
+    store.role = 'player';
+    store.activeSessionId = 's_1';
+    store.requestPreview();
+    store.role = 'host';
+    store.activeSessionId = null;
+    store.requestPreview();
+    expect(fake.socket.emit).not.toHaveBeenCalledWith('kp:previewPrompt', {});
+  });
+
+  it('kp:promptPreview 回包写入 preview 并结束 loading', () => {
+    const store = useSessionStore();
+    store.send('ic', 'x');
+    store.previewLoading = true;
+    const pipeline = {
+      stages: [{ name: 'S1-skeleton', tokenCount: 10, detail: {} }],
+      messages: [{ role: 'system', content: '…' }],
+    };
+
+    fake.handlers.get('kp:promptPreview')?.({ pipeline });
+
+    expect(store.preview).toEqual(pipeline);
+    expect(store.previewLoading).toBe(false);
+  });
+
+  it('error:app 同时结束 previewLoading', () => {
+    const store = useSessionStore();
+    store.send('ic', 'x');
+    store.previewLoading = true;
+    fake.handlers.get('error:app')?.({ code: 'E-ROOM-01', message: '仅 Host 可预览 prompt' });
+    expect(store.previewLoading).toBe(false);
+  });
+});
+
 describe('socket 事件接线（connect / disconnect / error:app / reset）', () => {
   it('error:app 格式化为 [code] message', () => {
     const store = useSessionStore();
