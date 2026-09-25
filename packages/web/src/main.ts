@@ -1,6 +1,6 @@
-import { renderShell } from './app.js';
+import { createApp } from 'vue';
+import { createPinia } from 'pinia';
+import App from './App.vue';
+import './styles/tokens.css';
 
-const root = document.querySelector<HTMLDivElement>('#app');
-if (root) {
-  root.innerHTML = renderShell();
-}
+createApp(App).use(createPinia()).mount('#app');

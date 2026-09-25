@@ -47,6 +47,7 @@ info:
     | E-AI-01 | AI 指令解析失败 | （玩家无感，KP 端告警） |
     | E-ST-01 | 状态板版本冲突 | 数据已更新，请刷新 |
     | E-ROOM-01 | 邀请码无效/满员 | 邀请码无效或房间已满 |
+    | E-MOD-01 | 模组卸载冲突（D-09，2026-09-25 拍板新增） | 模组使用中，无法卸载 |
 
     框架级未捕获异常走 `INTERNAL`（HTTP ≥ 500 时不回传原始 message，防止 key 泄露，NFR-03）。
 
@@ -56,10 +57,14 @@ info:
     设计文档**没有**为管理面 REST 定义账号体系或令牌机制。当前假设：
     管理面靠网络边界保护（只监听 127.0.0.1，或反代 + TLS + IP 白名单）。
 
-    待拍板（落地 M1 前需补 ADR）：
-    1. 建房者如何取得 Host 身份？建房走 REST、进房走 Socket，两者之间没有身份关联字段。
-    2. PATCH /rooms/{id}/settings 的调用方权限如何校验？
-    3. 模组卸载冲突（D-09）尚无专属错误码，本文暂用 409 + E-ROOM-01。
+    四项已于 2026-09-25 拍板并落地（详见 00.development/notes/M0-测试契约约定.md §8）：
+    1. Host 身份（决议 ①）：POST /rooms 响应携带 hostToken，建房者进房（room:join）时
+       出示即成为 Host；hostToken 只随建房响应发放一次，任何其他响应不得回带。
+    2. 管理面门禁（决议 ②）：环境变量 AIDLE_ADMIN_TOKEN 设置后，除 /healthz 外的
+       管理接口必须携带 `X-Admin-Token` 头（缺失/错误 → 401）；未设置则不启用（零配置）。
+    3. 模组卸载冲突（决议 ③）：新增错误码 E-MOD-01（错误码表第 7 码，M5 消费）。
+    4. 历史消息（决议 ④）：走 REST（GET /rooms/{roomId}/messages）；Socket 补发只管
+       断线重连的缺口，两者互补。
   contact:
     name: BehindVeil
   license:
@@ -110,6 +115,7 @@ paths:
       x-status: implemented
       x-milestone: M0
       x-source: packages/server/src/index.ts
+      security: []
       responses:
         '200':
           description: 服务正常
@@ -133,8 +139,9 @@ paths:
       description: |
         创建一个房间并返回 6 位邀请码。建房者即 Host，**v1 不可转让**（决议 D-02）。
 
-        ⚠️ 开放问题：本接口无调用者身份，建房者如何绑定到后续 Socket 连接的 Host 角色
-        尚未定义，见 info 描述中的开放问题 1。
+        决议 ①（已拍板）：本响应携带 hostToken，建房者进房（room:join）时出示即成为
+        Host（D-02：建房者即 Host，v1 不可转让）。hostToken 只随本响应发放一次，
+        任何其他接口不得返回。
       x-status: planned
       x-milestone: M1
       x-source: T-M1-02 / FR-01 / D-02
@@ -163,11 +170,11 @@ paths:
                     scanDepth: 4
       responses:
         '201':
-          description: 创建成功
+          description: 创建成功（Room + hostToken）
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Room'
+                $ref: '#/components/schemas/RoomCreated'
               examples:
                 created:
                   value:
@@ -188,8 +195,8 @@ paths:
       summary: 房间列表
       description: |
         列出本机全部房间（自托管单机，无分页与租户隔离）。
-        供自建部署的"房间选择页"使用；`inviteCode` 属于敏感信息（等同房间钥匙），
-        列表是否返回该字段待拍板——本文暂按返回处理。
+        供自建部署的"房间选择页"使用；`inviteCode` 属于敏感信息（等同房间钥匙）。
+        拍板：管理面有门禁（决议 ②），能过门禁者即管理员，列表按返回邀请码处理。
       x-status: planned
       x-milestone: M1
       x-source: T-M1-02 / FR-01
@@ -230,9 +237,9 @@ paths:
       description: |
         设计文档未列出该路径，此处为补全提案（`GET /rooms` 已能取到全部字段）。
         若前端需要"进房前校验房间是否存在/是否满员"，本接口比拉全量列表更合适。
-      x-status: proposed
+      x-status: implemented
       x-milestone: M1
-      x-source: 提案（TDD §3.1 Room）
+      x-source: 提案（TDD §3.1 Room），T-M1-02 已实现
       responses:
         '200':
           description: 房间详情
@@ -253,9 +260,11 @@ paths:
       tags: [房间]
       summary: 重置邀请码
       description: |
-        Host 专用。生成新的 6 位邀请码并使旧码失效（TDD §8：房间入侵对策）。
+        生成新的 6 位邀请码并使旧码失效（TDD §8：房间入侵对策）。
         已进房成员不受影响，仅影响后续加入。
-      x-status: planned
+        鉴权：管理面门禁（决议 ②）；hostToken 不参与管理面鉴权（决议 ①，
+        仅用于 Socket 进房证明 Host 身份）。
+      x-status: implemented
       x-milestone: M1
       x-source: T-M1-02 / TDD §8
       responses:
@@ -284,13 +293,13 @@ paths:
       tags: [房间]
       summary: 修改房间配置
       description: |
-        Host 专用，局部更新（未传字段保持不变）。
+        局部更新（未传字段保持不变），鉴权同管理面门禁（决议 ②）。
         可改：房间名、成员上限、本房默认会话设置（provider / model / temperature /
         历史裁剪窗 / 世界书预算 / 扫描深度）。
 
         注意：`defaultSessionSettings` 只影响**之后新建**的会话，
         不改写已存在 Session 的 settings（会话级设置随 Session 快照固化）。
-      x-status: planned
+      x-status: implemented
       x-milestone: M1
       x-source: T-M1-02
       requestBody:
@@ -340,7 +349,7 @@ paths:
       description: |
         一房多会话（连载团，FR-11）。`activeSessionId` 指向当前活跃会话；
         历史会话 `endedAt` 非空，消息流按 sessionId 隔离。
-      x-status: proposed
+      x-status: implemented
       x-milestone: M1
       x-source: T-M1-07 / FR-11 / TDD §3.1
       responses:
@@ -373,6 +382,67 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/sessions/{sessionId}/end:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: endSession
+      tags: [会话]
+      summary: 结束会话（提案回补）
+      description: |
+        T-M1-07：endedAt 落今；若为活跃会话则同时清空 activeSessionId。
+        openapi 初版未列出，随实现回补（提案端点）。
+      x-status: implemented
+      x-milestone: M1
+      x-source: T-M1-07 / FR-11
+      responses:
+        '200':
+          description: 结束后的会话
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /rooms/{roomId}/active-session:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    put:
+      operationId: setActiveSession
+      tags: [会话]
+      summary: 切换活跃会话（提案回补）
+      description: |
+        T-M1-07 / FR-11 连载复播：把 activeSessionId 指向本房已存在的会话。
+        openapi 初版未列出，随实现回补（提案端点）。
+      x-status: implemented
+      x-milestone: M1
+      x-source: T-M1-07 / FR-11
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sessionId:
+                  type: string
+              required: [sessionId]
+      responses:
+        '200':
+          description: 切换后的会话
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /rooms/{roomId}/messages:
     parameters:
@@ -408,9 +478,9 @@ paths:
         进房时取最近 N 条 + `beforeSeq` 向前翻页（T-M1-09）。
         设计文档写的是 "`gateway/http/` 或 socket 事件"，**通道未定**，此处按 REST 提案给出。
         与 Socket 补发（`lastSeq`）的边界：断线重连走 Socket 补缺口，本接口用于主动翻历史。
-      x-status: proposed
+      x-status: implemented
       x-milestone: M1
-      x-source: T-M1-09 / FR-02 / TDD §3.2
+      x-source: T-M1-09 / FR-02 / 决议④（走 REST）
       responses:
         '200':
           description: 消息数组，按 seq 降序（最新在前）
@@ -671,8 +741,7 @@ paths:
         **卸载策略（决议 D-09）**：有活跃 Session 引用该模组时拒绝卸载，返回 409；
         空闲时才允许卸载。
 
-        ⚠️ 该冲突目前没有专属错误码（TDD §11 仅 6 个码），本文暂用 409 + E-ROOM-01，
-        建议新增 E-MOD-01。
+        冲突返回 E-MOD-01（决议 ③，2026-09-25 拍板新增，错误码表第 7 码）。
       x-status: proposed
       x-milestone: M5
       x-source: T-M5-05 / FR-10 / D-09
@@ -696,7 +765,18 @@ paths:
           $ref: '#/components/responses/Internal'
 
 # =============================================================================
+security:
+  - XAdminToken: []
+
 components:
+  securitySchemes:
+    XAdminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token
+      description: |
+        管理面门禁（决议 ②）。仅当服务端设置环境变量 AIDLE_ADMIN_TOKEN 时启用；
+        未设置时管理面零配置开放（依托网络边界）。/healthz 永远公开。
   parameters:
     RoomId:
       name: roomId
@@ -780,7 +860,7 @@ components:
     ErrorCode:
       type: string
       description: 业务错误码（TDD §11 / shared/errors.ts）
-      enum: [E-LLM-01, E-LLM-02, E-DICE-01, E-AI-01, E-ST-01, E-ROOM-01]
+      enum: [E-LLM-01, E-LLM-02, E-DICE-01, E-AI-01, E-ST-01, E-ROOM-01, E-MOD-01]
       x-code-scenes:
         E-LLM-01: provider 超时/5xx
         E-LLM-02: 流中断
@@ -845,7 +925,24 @@ components:
           minimum: 1
           description: 成员上限（默认 8）
           default: 8
+        defaultSessionSettings:
+          $ref: '#/components/schemas/SessionSettings'
+          description: 本房默认会话设置（只影响之后新建的会话）；缺省由 session:start 显式给出
       required: [id, name, createdAt, inviteCode, activeSessionId, memberLimit]
+
+    RoomCreated:
+      type: object
+      description: |
+        建房响应（决议 ①）：Room + hostToken。hostToken 是 Host 身份凭据，
+        只随本响应发放一次；房间列表/详情等任何其他响应一律不含该字段。
+      allOf:
+        - $ref: '#/components/schemas/Room'
+        - type: object
+          properties:
+            hostToken:
+              type: string
+              description: Host 身份凭据，进房（room:join）时出示即成为 Host
+          required: [hostToken]
 
     CreateRoomRequest:
       type: object

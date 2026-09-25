@@ -5,7 +5,10 @@ import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { APP_NAME, PROTOCOL_VERSION } from '@behindveil/shared';
 import { recover } from './adapters/storage/recovery.js';
+import { createDataLayout } from './adapters/storage/layout.js';
 import { loadConfig } from './config.js';
+import { registerRoomRoutes } from './gateway/http/rooms.js';
+import { attachGateway } from './gateway/socket.js';
 import { redact } from './observability/redact.js';
 
 /**
@@ -47,6 +50,7 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
   });
 
   // 启动恢复（TDD §6 / SDD §5.3）：坏行告警不阻断启动
+  const layout = createDataLayout(dataDir);
   const report = await recover(dataDir);
   const recoveredMessages = report.sessions.reduce((sum, s) => sum + s.messageCount, 0);
   app.log.info(
@@ -55,11 +59,20 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
   );
   for (const warning of report.warnings) app.log.warn(warning);
 
+  // 恢复出的会话 lastSeq 作为网关 seq 计数起点（断电重启 seq 严格单调，NFR-06/FR-11）
+  const initialSeqs = new Map<string, number>();
+  for (const session of report.sessions) {
+    if (session.lastSeq !== null) initialSeqs.set(session.session.id, session.lastSeq);
+  }
+
   app.get('/healthz', async () => ({
     ok: true,
     name: serverInfo.name,
     protocol: PROTOCOL_VERSION,
   }));
+
+  registerRoomRoutes(app, { layout, adminToken: cfg.adminToken });
+  attachGateway(app, { layout, initialSeqs });
 
   const webDistDir =
     opts.webDistDir ?? resolve(fileURLToPath(new URL('../../web/dist', import.meta.url)));

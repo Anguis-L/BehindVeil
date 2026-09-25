@@ -56,6 +56,25 @@ describe('loadConfig 非敏感项装载', () => {
   });
 });
 
+describe('loadConfig 管理面门禁（决议 ②：AIDLE_ADMIN_TOKEN）', () => {
+  it('AIDLE_ADMIN_TOKEN 设置时透传到 adminToken', async () => {
+    const dataDir = await makeDataDir();
+    await writeFile(path.join(dataDir, 'config.yaml'), yaml, 'utf8');
+
+    const cfg = loadConfig({ dataDir, env: { AIDLE_ADMIN_TOKEN: 'secret-admin-000' } });
+
+    expect(cfg.adminToken).toBe('secret-admin-000');
+  });
+
+  it('未设置时 adminToken 为 undefined（门禁不启用，零配置）', async () => {
+    const dataDir = await makeDataDir();
+
+    const cfg = loadConfig({ dataDir, env: {} });
+
+    expect(cfg.adminToken).toBeUndefined();
+  });
+});
+
 describe('loadConfig 密钥只来自环境变量（NFR-03）', () => {
   it('AIDLE_LLM_KEY 注入 apiKey', async () => {
     const dataDir = await makeDataDir();

@@ -1,0 +1,127 @@
+/* BehindVeil 设计基线 · 设计 token
+ * ---------------------------------------------------------------------------
+ * 来源：Ardot 设计文件「BehindVeil 界面设计基线」
+ * 定位：这份文件是 M1 聊天室 → M6 控制台共用的施工图。
+ *
+ * 规则：
+ *   1. 改设计先改设计稿，再同步这里。两边不同步等于没有基线。
+ *   2. 界面的配色只允许来自本文件。组件里不许出现裸色值。
+ *   3. 判定色（--bv-judge-*）只用于表达检定结果，不得挪作他用，
+ *      否则六级色阶的语义会失效。
+ */
+
+:root {
+  /* ---- 底色（暖褐黑，长时间阅读不刺眼）---- */
+  --bv-bg-canvas: #14120d; /* 应用画布 */
+  --bv-bg-surface: #1c1712; /* 侧栏 / 面板 */
+  --bv-bg-elevated: #241f17; /* 卡片 / 输入框 / 抬起层 */
+  --bv-bg-sunken: #1a160f; /* 审计行 / 凹陷层 */
+  --bv-bg-inset: #17130e; /* 密语 / 快照等次级卡片 */
+
+  /* ---- 描边（用半透明，叠在不同底色上都成立）---- */
+  --bv-line-subtle: rgba(245, 235, 219, 0.09);
+  --bv-line-strong: rgba(245, 235, 219, 0.2);
+
+  /* ---- 文字 ---- */
+  --bv-text-primary: #f2ebdb;
+  --bv-text-secondary: #a89c8a;
+  --bv-text-tertiary: #6e6659;
+
+  /* ---- 强调色：全站只有这一个 ---- */
+  --bv-accent: #c79640;
+  --bv-accent-lift: #e3ba6b; /* 悬停 / 高亮 */
+  --bv-accent-press: #8a6a2e; /* 主按钮填充底 */
+
+  /* ---- COC 7e 六级判定语义色 ----
+   * 色相从冷到暖 = 结果从好到坏。
+   * 同一张骰子卡上，左侧色条、等级徽章、结果数字三处共用同一色。
+   */
+  --bv-judge-critical: #70d4c7; /* 大成功 */
+  --bv-judge-extreme: #80b069; /* 极难成功 */
+  --bv-judge-hard: #b8a84f; /* 困难成功 */
+  --bv-judge-regular: #c79640; /* 普通成功 */
+  --bv-judge-fail: #c26640; /* 失败 */
+  --bv-judge-fumble: #b2402e; /* 大失败 */
+
+  /* ---- 状态色 ---- */
+  --bv-state-hp: #c26640;
+  --bv-state-san: #8c7db8;
+  --bv-state-mp: #4f87a8;
+
+  /* ---- 字体 ---- */
+  --bv-font-narrative: 'Noto Serif SC', 'Source Serif 4', Georgia, serif;
+  --bv-font-ui: 'Sarasa Gothic SC', 'Inter', system-ui, sans-serif;
+  --bv-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* 叙事正文：17px / 行高 29 / 一栏最宽 720px，按长阅读调过 */
+  --bv-size-narrative: 17px;
+  --bv-leading-narrative: 29px;
+  --bv-column-read: 720px;
+
+  /* ---- 圆角 ---- */
+  --bv-radius-card: 12px;
+  --bv-radius-control: 8px;
+  --bv-radius-pill: 999px;
+
+  /* ---- 间距（以 8 为基数）---- */
+  --bv-space-1: 4px;
+  --bv-space-2: 8px;
+  --bv-space-3: 12px;
+  --bv-space-4: 16px;
+  --bv-space-5: 24px;
+  --bv-space-6: 32px;
+
+  /* ---- 三栏宽度 ---- */
+  --bv-rail-left: 264px; /* 成员 + 模组信息 */
+  --bv-rail-right: 320px; /* 角色 / 手记 / KP 控制台 */
+}
+
+/* ---- 判定等级取色 ---------------------------------------------------------
+ * 骰子卡上加 class 即可让色条、徽章、结果数字同步成同一色。
+ */
+.bv-judge-critical {
+  --bv-judge: var(--bv-judge-critical);
+}
+.bv-judge-extreme {
+  --bv-judge: var(--bv-judge-extreme);
+}
+.bv-judge-hard {
+  --bv-judge: var(--bv-judge-hard);
+}
+.bv-judge-regular {
+  --bv-judge: var(--bv-judge-regular);
+}
+.bv-judge-fail {
+  --bv-judge: var(--bv-judge-fail);
+}
+.bv-judge-fumble {
+  --bv-judge: var(--bv-judge-fumble);
+}
+/* 暗骰：玩家端显示为隐藏，判定色降级为灰，但流水号照常显示 */
+.bv-judge-hidden {
+  --bv-judge: #4a4238;
+}
+
+/* ---- 骰子卡：高度必须自适应 ----------------------------------------------
+ * 卡片高度由内容撑开，禁止写死固定值。原因：
+ *   骰式可能是 1d100，也可能是 2d6+3；COC 有奖励骰 / 惩罚骰；
+ *   大失败会多出「判定后果」行；暗骰还要降级显示。
+ *   内容条数不固定，写死高度一定会切掉内容。
+ *
+ * 左侧判定色条不要用独立元素去撑满高度（会和自适应互相依赖），
+ * 用背景渐变实现，它完全不参与布局计算：
+ *
+ * .bv-dice-card {
+ *   height: auto;                  // 由内容撑开
+ *   display: flex;
+ *   flex-direction: column;
+ *   gap: var(--bv-space-3);
+ *   padding: var(--bv-space-4);
+ *   border-radius: var(--bv-radius-card);
+ *   background:
+ *     linear-gradient(to right,
+ *       var(--bv-judge) 0 6px,
+ *       transparent 6px) no-repeat,
+ *     var(--bv-bg-elevated);
+ * }
+ */

@@ -45,6 +45,11 @@ export interface AppConfig {
   host: string;
   port: number;
   llm: LlmConfig;
+  /**
+   * 管理面门禁（决议 ②）：设置 AIDLE_ADMIN_TOKEN 后，除 /healthz 外的管理接口
+   * 必须携带 X-Admin-Token 头；未设置则不启用（零配置，依托网络边界）。
+   */
+  adminToken: string | undefined;
 }
 
 export function loadConfig(opts: {
@@ -67,6 +72,7 @@ export function loadConfig(opts: {
       maxTokens: parsed.llm.maxTokens,
       apiKey: env['AIDLE_LLM_KEY'],
     },
+    adminToken: env['AIDLE_ADMIN_TOKEN'],
   };
 }
 
