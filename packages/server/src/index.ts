@@ -6,10 +6,17 @@ import fastifyStatic from '@fastify/static';
 import { APP_NAME, PROTOCOL_VERSION } from '@behindveil/shared';
 import { recover } from './adapters/storage/recovery.js';
 import { createDataLayout } from './adapters/storage/layout.js';
+import { createLlmAdapter } from './adapters/llm/index.js';
+import { createMockLlm } from './adapters/llm/mock.js';
+import type { LlmAdapter } from './domain/llm.js';
 import { loadConfig } from './config.js';
+import { registerExportRoutes } from './gateway/http/export.js';
 import { registerRoomRoutes } from './gateway/http/rooms.js';
 import { attachGateway } from './gateway/socket.js';
 import { redact } from './observability/redact.js';
+
+/** v1 固定采样温度（config 未暴露该字段；TDD §7 ChatRequest 必填） */
+const DEFAULT_AI_TEMPERATURE = 0.7;
 
 /**
  * 服务端组装根（T-M0-11）。
@@ -71,8 +78,34 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
     protocol: PROTOCOL_VERSION,
   }));
 
+  // LLM 适配器（T-M3-06 装配）：provider=mock 走 MockLlm（无 key CI/回归）；
+  // 真实 provider 配置缺失或非法 → 告警并禁用 AI 触发（服务主体功能不受影响）
+  let llm: LlmAdapter | undefined;
+  if (cfg.llm.provider === 'mock') {
+    llm = createMockLlm();
+    app.log.info('LLM provider=mock：AI 触发以脚本回放运行');
+  } else {
+    try {
+      llm = createLlmAdapter(cfg.llm);
+    } catch (err) {
+      app.log.warn(
+        `LLM 适配器装配失败，AI 功能停用：${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   registerRoomRoutes(app, { layout, adminToken: cfg.adminToken });
-  attachGateway(app, { layout, initialSeqs });
+  registerExportRoutes(app, { layout, adminToken: cfg.adminToken });
+  attachGateway(app, {
+    layout,
+    initialSeqs,
+    llm,
+    chat: {
+      model: cfg.llm.model,
+      temperature: DEFAULT_AI_TEMPERATURE,
+      maxTokens: cfg.llm.maxTokens,
+    },
+  });
 
   const webDistDir =
     opts.webDistDir ?? resolve(fileURLToPath(new URL('../../web/dist', import.meta.url)));

@@ -25,6 +25,10 @@ export type MockScriptStep =
       directive: Record<string, unknown>;
     }
   | {
+      /** 正常结束本次 chat 调用（剧本分段标记：一次回合内多次 LLM 请求的回放用，T-M3-07） */
+      stop: true;
+    }
+  | {
       /** 注入业务错误：到此处中止本次调用并抛 LlmError */
       error: ErrorCode;
     };
@@ -68,6 +72,7 @@ class MockLlmAdapterImpl implements MockLlmAdapter {
       if (!step) break;
       if ('error' in step)
         throw new LlmError(step.error, `MockLlm 注入错误：${step.error}`, { retryable: false });
+      if ('stop' in step) break;
       if ('delta' in step) {
         onDelta(step.delta);
         content += step.delta;

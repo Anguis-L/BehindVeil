@@ -11,21 +11,27 @@ import {
   type MemberRole,
   type Message,
   type OocVisibility,
+  type RollResult,
   type ServerEventName,
   type SystemMsgSubtype,
 } from '@behindveil/shared';
 import type { FastifyInstance } from 'fastify';
 import { JsonlStore } from '../adapters/storage/jsonl-store.js';
 import type { DataLayout } from '../adapters/storage/layout.js';
+import type { ParsedRoll } from '../domain/dice/evaluator.js';
+import { DirectiveSuccessTracker } from '../domain/ai-directive/degrade.js';
+import { runAiTurn } from '../domain/ai-directive/loop.js';
+import type { LlmAdapter } from '../domain/llm.js';
 import { appendMessage, readMessagesAfter } from '../domain/session/messages.js';
 import { addMember, readMembers } from '../domain/session/members.js';
 import { findByInviteCode, readRoomFile } from '../domain/session/rooms.js';
 import { createSession } from '../domain/session/sessions.js';
+import { createRosterStub } from '../domain/stateboard/roster.stub.js';
 import { buildPreviewTrace } from '../observability/preview.js';
 import type { MsgSendPayload, RoomJoinPayload, SessionStartPayload } from '@behindveil/shared';
 
 /**
- * Socket.IO 网关（T-M1-03/05/06/07/08，TDD §4/§8）。
+ * Socket.IO 网关（T-M1-03/05/06/07/08 + T-M3-06，TDD §4/§8/§5.4）。
  *
  * - 握手：校验协议版本（不一致拒绝连接）；邀请码/满员校验在 room:join 事件（E-ROOM-01）。
  * - 白名单：onAny 统一分发——非白名单事件或非法 payload 直接断连（TDD §8）。
@@ -34,8 +40,10 @@ import type { MsgSendPayload, RoomJoinPayload, SessionStartPayload } from '@behi
  * - OOC 可见性路由（T-M1-06）：all 走房间广播；host/whisper 走定向投递（绝不全房广播）。
  * - 出站自检：所有投递经 SERVER_EVENT_SCHEMAS 校验后才发出（双向 Zod，TC-FR-02-004）。
  * - KP prompt 预览（T-M2-05，FR-13）：kp:previewPrompt → host only → kp:promptPreview 定向回包。
- * - M3+ 事件（dice:roll/state:update/state:snapshot/ai:invoke）：
- *   payload 校验通过后暂不处理（未到里程碑不提前实现），到点在 dispatch 落位。
+ * - AI 触发（T-M3-06，D-07）：玩家 IC 自动触发 + ai:invoke 显式触发（每人每轮 1 次，
+ *   「轮」= 相邻两次 AI 回合之间的窗口）；AI 回合独立串行队列，不阻塞消息主链路。
+ * - M4 事件（dice:roll/state:update/state:snapshot）：payload 校验通过后暂不处理
+ *   （未到里程碑不提前实现），到点在 dispatch 落位。
  */
 
 const MSG_RATE_LIMIT = 10;
@@ -45,6 +53,10 @@ export interface GatewayDeps {
   layout: DataLayout;
   /** 启动恢复出的各会话 lastSeq：新消息 seq 从这里续（T-M0-04 → T-M1-05） */
   initialSeqs: Map<string, number>;
+  /** LLM 适配器（装配根按配置产出；缺省/失败为 undefined → AI 触发不生效） */
+  llm?: LlmAdapter;
+  /** ChatRequest 参数（model/maxTokens 来自 config，temperature 装配侧定） */
+  chat?: { model: string; temperature: number; maxTokens: number };
 }
 
 export interface GatewayHandle {
@@ -83,7 +95,9 @@ type AppendableMessage =
       visibility: OocVisibility;
       targetId?: string;
     }
-  | { type: 'system'; subtype: SystemMsgSubtype; content: string };
+  | { type: 'system'; subtype: SystemMsgSubtype; content: string }
+  | { type: 'dice'; roll: RollResult }
+  | { type: 'narration'; content: string };
 
 /** 投递范围：room=全房广播；custom=定向 socket 列表（host/whisper 收窄场景） */
 type Routing = { mode: 'room' } | { mode: 'custom'; socketIds: Iterable<string> };
@@ -97,9 +111,18 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   const roomHostSockets = new Map<string, Set<string>>();
   const memberSockets = new Map<string, Set<string>>();
   const seqCounters = new Map<string, number>(deps.initialSeqs);
-  const roomQueues = new Map<string, Promise<void>>();
+  const roomQueues = new Map<string, Promise<unknown>>();
+  /** AI 回合独立串行队列（D-07：AI 忙时排队串行，不阻塞消息主链路） */
+  const aiQueues = new Map<string, Promise<unknown>>();
+  /** 「轮」计数（D-07）：每完成一个 AI 回合 +1；ai:invoke 配额按轮判定 */
+  const aiRounds = new Map<string, number>();
+  /** 成员最近一次 ai:invoke 所在轮（同一轮再次调用被限流，TC-FR-05-010） */
+  const memberInvokeRound = new Map<string, Map<string, number>>();
+  /** R-01 滑动窗口（T-M3-05）：挂在会话上，跨 AI 回合累计 */
+  const trackers = new Map<string, DirectiveSuccessTracker>();
   const sendWindows = new Map<string, number[]>();
   const jsonlStores = new Map<string, JsonlStore>();
+  const roster = createRosterStub();
 
   app.addHook('onClose', async () => {
     io.disconnectSockets(true);
@@ -165,6 +188,9 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       case 'kp:previewPrompt':
         await handlePreviewPrompt(socket, payload as KpPreviewPromptPayload);
         return;
+      case 'ai:invoke':
+        await handleAiInvoke(socket);
+        return;
       default:
         return;
     }
@@ -183,14 +209,29 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     emitter.emit(event, parsed.data);
   }
 
-  function emitError(socket: Socket, code: ErrorCode, message: string): void {
-    emitChecked(socket, 'error:app', { code, message });
+  function emitError(
+    emitter: { emit(event: string, ...args: unknown[]): unknown },
+    code: ErrorCode,
+    message: string,
+  ): void {
+    emitChecked(emitter, 'error:app', { code, message });
   }
 
-  function enqueue(roomId: string, task: () => Promise<void>): Promise<void> {
+  function enqueue<T>(roomId: string, task: () => Promise<T>): Promise<T> {
     const previous = roomQueues.get(roomId) ?? Promise.resolve();
     const next = previous.then(task, task); // 前序失败不阻塞后续消息
     roomQueues.set(
+      roomId,
+      next.catch(() => undefined),
+    );
+    return next;
+  }
+
+  /** AI 回合串行队列（与消息队列分离：LLM 生成期间玩家消息照常收发，D-07） */
+  function enqueueAi(roomId: string, task: () => Promise<void>): Promise<void> {
+    const previous = aiQueues.get(roomId) ?? Promise.resolve();
+    const next = previous.then(task, task);
+    aiQueues.set(
       roomId,
       next.catch(() => undefined),
     );
@@ -229,16 +270,25 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
           subtype: appendable.subtype,
           content: appendable.content,
         };
+      case 'dice':
+        return {
+          ...base,
+          type: 'dice',
+          roll: appendable.roll,
+          hidden: false,
+        };
+      case 'narration':
+        return { ...base, type: 'narration', streaming: false, content: appendable.content };
     }
   }
 
-  /** 在串行队列内：分配 seq → WAP 落盘 → 按路由投递（T-M1-05 主链路）；缺省全房广播 */
+  /** 在串行队列内：分配 seq → WAP 落盘 → 按路由投递（T-M1-05 主链路）；缺省全房广播。返回落盘 seq */
   async function persistAndDeliver(
     roomId: string,
     sessionId: string,
     appendable: AppendableMessage,
     routing: Routing = { mode: 'room' },
-  ): Promise<void> {
+  ): Promise<number> {
     const seq = (seqCounters.get(sessionId) ?? 0) + 1;
     const message = buildMessage(sessionId, appendable, seq);
     await appendMessage(layout, roomId, sessionId, message, storeFor(roomId, sessionId));
@@ -247,11 +297,12 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     const payload = { msg: message };
     if (routing.mode === 'room') {
       emitChecked(io.to(`room:${roomId}`), 'msg:broadcast', payload);
-      return;
+      return seq;
     }
     for (const socketId of routing.socketIds) {
       emitChecked(io.to(socketId), 'msg:broadcast', payload);
     }
+    return seq;
   }
 
   async function handleJoin(socket: Socket, data: RoomJoinPayload, ack: Ack): Promise<void> {
@@ -333,11 +384,13 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
 
     // 断线补发（T-M1-08）：seq > lastSeq 的消息按升序回放给本连接
     if (data.lastSeq !== undefined && activeSessionId) {
+      // 补发按本连接身份过滤（FR-14 / D-10）：不给旁人补暗骰与密语
       const missed = await readMessagesAfter(
         layout,
         roomFile.id,
         activeSessionId,
         data.lastSeq,
+        { memberId: member.id, role },
         storeFor(roomFile.id, activeSessionId),
       );
       for (const message of missed) emitChecked(socket, 'msg:broadcast', { msg: message });
@@ -419,7 +472,13 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       };
     }
 
-    await enqueue(me.roomId, () => persistAndDeliver(me.roomId, sessionId, appendable, routing));
+    const seq = await enqueue(me.roomId, () =>
+      persistAndDeliver(me.roomId, sessionId, appendable, routing),
+    );
+    // AI 自动触发（D-07）：仅 IC 消息触发，OOC 不触发；LLM 未装配时为 no-op
+    if (data.type === 'ic' && deps.llm && deps.chat) {
+      scheduleAiTurn(me.roomId, sessionId, seq);
+    }
   }
 
   async function handleSessionStart(
@@ -451,6 +510,120 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       }),
     );
     ack?.({ ok: true, session });
+  }
+
+  /** ParsedRoll → DiceMsg.roll（raw 不入契约；audit 由 T-M4-01 审计流水落账时补充） */
+  function toRollResult(roll: ParsedRoll): RollResult {
+    return {
+      expr: roll.expr,
+      rolls: roll.rolls,
+      kept: roll.kept,
+      total: roll.total,
+      ...(roll.check ? { check: roll.check } : {}),
+    };
+  }
+
+  /**
+   * 排程一个 AI 回合（T-M3-06，D-07）：进入房间级 AI 串行队列；回合完成后开启新「轮」。
+   * 触发源：玩家 IC 消息（triggerSeq=该消息 seq）或 ai:invoke（triggerSeq=当前 lastSeq）。
+   */
+  function scheduleAiTurn(roomId: string, sessionId: string, triggerSeq: number): void {
+    if (!deps.llm || !deps.chat) return;
+    const llm = deps.llm;
+    const chat = deps.chat;
+    void enqueueAi(roomId, async () => {
+      const tracker = trackers.get(sessionId) ?? new DirectiveSuccessTracker();
+      trackers.set(sessionId, tracker);
+      try {
+        await runAiTurn(triggerSeq, {
+          llm,
+          chat,
+          roster,
+          tracker,
+          buildMessages: async () => (await buildPreviewTrace(layout, roomId, sessionId)).messages,
+          emitDice: async (roll) => {
+            await enqueue(roomId, () =>
+              persistAndDeliver(roomId, sessionId, { type: 'dice', roll: toRollResult(roll) }),
+            );
+          },
+          emitDirectiveResult: async (content) => {
+            await enqueue(roomId, () =>
+              persistAndDeliver(roomId, sessionId, {
+                type: 'system',
+                subtype: 'ai_directive_result',
+                content,
+              }),
+            );
+          },
+          emitNarrationDelta: (seq, delta) => {
+            emitChecked(io.to(`room:${roomId}`), 'narration:delta', { seq, delta });
+          },
+          finishNarration: async (_triggerSeq, content) => {
+            const seq = await enqueue(roomId, () =>
+              persistAndDeliver(roomId, sessionId, { type: 'narration', content }),
+            );
+            emitChecked(io.to(`room:${roomId}`), 'narration:done', { seq });
+          },
+          alertKp: (code, message) => {
+            // E-AI-01 玩家无感：告警只定向 Host（TDD §11）
+            for (const socketId of roomHostSockets.get(roomId) ?? []) {
+              emitError(io.to(socketId), code, message);
+            }
+          },
+          notifyFallback: async () => {
+            await enqueue(roomId, () =>
+              persistAndDeliver(roomId, sessionId, {
+                type: 'system',
+                subtype: 'notice',
+                content: 'KP 指令协议本轮停用，请玩家使用 .r 手动掷骰',
+              }),
+            );
+          },
+        });
+      } catch (err) {
+        // buildMessages/持久化侧未预期失败：对 Host 告警，回合终止（消息主链路不受影响）
+        console.error('[gateway] AI 回合失败：', err);
+        for (const socketId of roomHostSockets.get(roomId) ?? []) {
+          emitError(io.to(socketId), 'E-SRV-01', 'AI 回合内部错误');
+        }
+      } finally {
+        aiRounds.set(roomId, (aiRounds.get(roomId) ?? 0) + 1);
+      }
+    });
+  }
+
+  /** ai:invoke 显式触发（TDD §4.1）：player+，每人每轮 1 次（D-07 轮定义） */
+  async function handleAiInvoke(socket: Socket): Promise<void> {
+    const me = presence.get(socket.id);
+    if (!me) {
+      emitError(socket, 'E-ROOM-01', '尚未加入房间');
+      return;
+    }
+    if (me.role === 'observer') {
+      emitError(socket, 'E-ROOM-01', '观察者不能请求 KP 响应');
+      return;
+    }
+    if (!deps.llm || !deps.chat) {
+      emitError(socket, 'E-ROOM-01', 'AI 功能未启用');
+      return;
+    }
+    const room = await readRoomFile(layout, me.roomId);
+    const sessionId = room?.activeSessionId;
+    if (!room || !sessionId) {
+      emitError(socket, 'E-ROOM-01', '尚未开团，KP 无法响应');
+      return;
+    }
+    const round = aiRounds.get(me.roomId) ?? 0;
+    const invoked = memberInvokeRound.get(me.roomId) ?? new Map<string, number>();
+    if (invoked.get(me.memberId) === round) {
+      emitError(socket, 'E-ROOM-01', '每人每轮只能请求一次 KP 响应');
+      return;
+    }
+    invoked.set(me.memberId, round);
+    memberInvokeRound.set(me.roomId, invoked);
+
+    const lastSeq = seqCounters.get(sessionId) ?? 0;
+    scheduleAiTurn(me.roomId, sessionId, lastSeq);
   }
 
   /** KP prompt 预览（T-M2-05，FR-13）：host only，trace 定向回请求 socket；seq 语义见 PreviewOptions */

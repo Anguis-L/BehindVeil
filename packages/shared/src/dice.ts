@@ -75,7 +75,11 @@ export const RollAuditSchema = z.object({
 });
 export type RollAudit = z.infer<typeof RollAuditSchema>;
 
-/** 掷骰结果（TDD §3.5）。audit 由 T-M4-01 审计流水组装，P 轨道引擎产物不含 audit */
+/**
+ * 掷骰结果（TDD §3.5）。
+ * audit 由 T-M4-01 审计流水落账时补充：M3 掷骰广播（FR-05）先于审计落地，故可选。
+ * M4 落地后收紧为必填（audit-first：无审计号的骰子不进消息流）。
+ */
 export const RollResultSchema = z.object({
   /** 规范化表达式，如 "1d100"、"3d6kh2"、"2d6+3<=8" */
   expr: z.string(),
@@ -85,6 +89,6 @@ export const RollResultSchema = z.object({
   kept: z.array(z.number()),
   total: z.number(),
   check: RollCheckSchema.optional(),
-  audit: RollAuditSchema,
+  audit: RollAuditSchema.optional(),
 });
 export type RollResult = z.infer<typeof RollResultSchema>;
