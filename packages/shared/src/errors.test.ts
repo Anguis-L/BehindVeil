@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AppErrorSchema, ERROR_CODES } from './errors.js';
+import { AppErrorSchema, ERROR_CODES, ERROR_DETAILS } from './errors.js';
 
 /**
  * T-M0-02：错误码常量表（TDD §11）。
@@ -56,5 +56,17 @@ describe.skipIf(!hasModCode)('E-MOD-01（决议：模组卸载冲突，2026-09-2
       AppErrorSchema.safeParse({ code: 'E-MOD-01', message: '模组正被活跃会话使用，无法卸载' })
         .success,
     ).toBe(true);
+  });
+});
+
+describe('E-SRV-01（2026-09-25 拍板：服务端内部错误）', () => {
+  it('已入错误码表且可过 AppErrorSchema（TC-FR-02-001 故障变体：写盘失败回业务错误）', () => {
+    expect(
+      AppErrorSchema.safeParse({ code: 'E-SRV-01', message: '服务器开小差了，请稍后重试' }).success,
+    ).toBe(true);
+  });
+
+  it('userMessage 与错误码表一致（前端按码渲染同一文案）', () => {
+    expect(ERROR_DETAILS['E-SRV-01'].userMessage).toBe('服务器开小差了，请稍后重试');
   });
 });

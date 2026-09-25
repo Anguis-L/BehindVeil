@@ -724,7 +724,7 @@ components:
       properties:
         code:
           type: string
-          enum: [E-LLM-01, E-LLM-02, E-DICE-01, E-AI-01, E-ST-01, E-ROOM-01]
+          enum: [E-LLM-01, E-LLM-02, E-DICE-01, E-AI-01, E-ST-01, E-ROOM-01, E-MOD-01, E-SRV-01]
         message:
           type: string
       required: [code, message]

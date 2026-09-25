@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { io, type Socket } from 'socket.io-client';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_VERSION, type Message } from '@behindveil/shared';
 import { createDataLayout, type DataLayout } from '../adapters/storage/layout.js';
 import { JsonlStore } from '../adapters/storage/jsonl-store.js';
@@ -443,6 +443,29 @@ describe('msg:send 主链路（T-M1-05/06）', () => {
     expect(contents).not.toContain('第 11 条');
     host.close();
     sender.close();
+  });
+
+  it('TC-FR-02-001 故障变体：写盘失败 → 不广播、回 error:app（E-SRV-01）且 seq 不留空洞', async () => {
+    const { room, host, sessionId } = await setupLiveRoom('写盘失败房');
+    const spy = vi
+      .spyOn(JsonlStore.prototype, 'append')
+      .mockRejectedValueOnce(new Error('EIO: 模拟磁盘满'));
+
+    const errPromise = waitError(host);
+    host.emit('msg:send', { type: 'ic', content: '会失败的消息' });
+    expect(await errPromise, 'WAP：失败消息不广播，回业务错误').toMatchObject({ code: 'E-SRV-01' });
+    spy.mockRestore();
+
+    // 恢复后消息正常广播，并复用失败消息未占用的 seq
+    const recovered = waitBroadcast(host);
+    host.emit('msg:send', { type: 'ic', content: '恢复后的消息' });
+    const got = await recovered;
+    expect(got.msg.type === 'ic' ? got.msg.content : '').toBe('恢复后的消息');
+    expect(got.msg.seq).toBe(2); // notice=1；失败的那条没落盘也没占 seq
+
+    const { records } = await new JsonlStore(layout.messagesFile(room.id, sessionId)).readAll();
+    expect(records.map((r) => (r as { seq: number }).seq)).toEqual([1, 2]);
+    host.close();
   });
 });
 

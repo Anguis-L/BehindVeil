@@ -48,6 +48,7 @@ info:
     | E-ST-01 | 状态板版本冲突 | 数据已更新，请刷新 |
     | E-ROOM-01 | 邀请码无效/满员 | 邀请码无效或房间已满 |
     | E-MOD-01 | 模组卸载冲突（D-09，2026-09-25 拍板新增） | 模组使用中，无法卸载 |
+    | E-SRV-01 | 服务端持久化/内部错误（2026-09-25 拍板新增；Socket 网关 dispatch 失败，如写盘失败——TC-FR-02-001 故障变体：失败消息不广播并回业务错误） | 服务器开小差了，请稍后重试 |
 
     框架级未捕获异常走 `INTERNAL`（HTTP ≥ 500 时不回传原始 message，防止 key 泄露，NFR-03）。
 
@@ -860,7 +861,7 @@ components:
     ErrorCode:
       type: string
       description: 业务错误码（TDD §11 / shared/errors.ts）
-      enum: [E-LLM-01, E-LLM-02, E-DICE-01, E-AI-01, E-ST-01, E-ROOM-01, E-MOD-01]
+      enum: [E-LLM-01, E-LLM-02, E-DICE-01, E-AI-01, E-ST-01, E-ROOM-01, E-MOD-01, E-SRV-01]
       x-code-scenes:
         E-LLM-01: provider 超时/5xx
         E-LLM-02: 流中断
@@ -868,6 +869,8 @@ components:
         E-AI-01: AI 指令解析失败
         E-ST-01: 状态板版本冲突
         E-ROOM-01: 邀请码无效/满员
+        E-MOD-01: 模组卸载冲突（D-09）
+        E-SRV-01: 服务端持久化/内部错误
 
     AppError:
       type: object

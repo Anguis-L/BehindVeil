@@ -130,6 +130,9 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       const ack = typeof args[1] === 'function' ? (args[1] as Ack) : undefined;
       void dispatch(socket, event as ClientEventName, parsed.data, ack).catch((err: unknown) => {
         console.error(`[gateway] 处理 ${event} 失败：`, err);
+        // TC-FR-02-001 故障变体：写盘失败等内部错误 → 该消息不广播（落盘后才广播），
+        // 并回业务错误让客户端可感知（2026-09-25 拍板：新增 E-SRV-01）
+        emitError(socket, 'E-SRV-01', '服务器开小差了，请稍后重试');
       });
     });
 

@@ -14,6 +14,7 @@ export const ERROR_CODES = [
   'E-ST-01',
   'E-ROOM-01',
   'E-MOD-01',
+  'E-SRV-01',
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -34,6 +35,9 @@ export const ERROR_DETAILS: Record<ErrorCode, ErrorDetail> = {
   'E-ROOM-01': { scene: '邀请码无效/满员', userMessage: '邀请码无效或房间已满' },
   // 2026-09-25 拍板新增（决议 ③，D-09）：模组被活跃会话引用时拒绝卸载
   'E-MOD-01': { scene: '模组卸载冲突', userMessage: '模组使用中，无法卸载' },
+  // 2026-09-25 拍板新增：服务端内部错误（TC-FR-02-001 故障变体——WAP 链路写盘失败时
+  // 该消息不广播并回业务错误；也覆盖 dispatch 其他未预期失败）
+  'E-SRV-01': { scene: '服务端持久化/内部错误', userMessage: '服务器开小差了，请稍后重试' },
 };
 
 /** `error:app` 事件 / REST 错误响应的统一载荷（TDD §4.2） */
