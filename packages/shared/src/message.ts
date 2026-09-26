@@ -58,8 +58,13 @@ export type SystemMsg = z.infer<typeof SystemMsgSchema>;
 export const DiceMsgSchema = BaseMsgSchema.extend({
   type: z.literal('dice'),
   roll: RollResultSchema,
-  /** true = 暗骰（FR-14）：结果仅广播 Host（权限语义见 D-10，待拍板） */
+  /**
+   * true = 暗骰（FR-14）。可见性按决议 D-10：仅 Host 与掷骰者本人可见，
+   * 其他成员一律不投递（审计流水仍完整记录——隐藏的是结果，不是凭据）。
+   */
   hidden: z.boolean(),
+  /** 掷骰者 memberId；缺省为引擎代掷（AI 检定骰） */
+  senderId: z.string().optional(),
 });
 export type DiceMsg = z.infer<typeof DiceMsgSchema>;
 

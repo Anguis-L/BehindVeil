@@ -41,6 +41,7 @@ defineProps<{
 
   <article v-else-if="msg.type === 'dice'" class="bv-dice-card" :class="judgeClass">
     <div class="bv-dice-card__head">
+      <span class="bv-dice-card__sender">{{ senderName }}</span>
       <span class="bv-dice-card__expr">{{ msg.roll.expr }}</span>
       <span class="bv-dice-card__result">
         {{ msg.hidden ? '??' : msg.roll.total }}
@@ -147,6 +148,11 @@ defineProps<{
   display: flex;
   align-items: baseline;
   gap: var(--bv-space-3);
+}
+.bv-dice-card__sender {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bv-text-secondary);
 }
 .bv-dice-card__expr {
   font-family: ui-monospace, monospace;

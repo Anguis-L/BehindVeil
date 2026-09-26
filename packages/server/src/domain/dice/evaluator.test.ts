@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Coc7RuleBook } from '../rulebook/coc7.js';
 import { DiceExpressionError } from './parser.js';
 import type { RandomSource } from './random.js';
-import { rollDice } from './evaluator.js';
+import { replayRoll, rollDice } from './evaluator.js';
 
 /**
  * T-P-02：求值器（TDD §5.3）。
@@ -150,8 +150,60 @@ describe('判定后缀（TC-FR-04-005 / 009）', () => {
     expect(() => rollDice('1d100<=50', { random: seq(42) })).toThrow(DiceExpressionError);
   });
 
+  it('缺省运算符记为 <=（规则书判定表路径）', () => {
+    const roll = rollDice('1d100<=50', { random: seq(42), rulebook: coc7 });
+
+    expect(roll.check).toMatchObject({ op: '<=', grade: 'normal' });
+  });
+
   it('无判定后缀时即使给了规则书也不产出 check', () => {
     expect(rollDice('1d100', { random: seq(42), rulebook: coc7 }).check).toBeNull();
+  });
+});
+
+describe('判定运算符 >= / =（2026-09-25 拍板方案 a，T-M4-02）', () => {
+  it('1d20+5>=13 达标为 success，且不查 COC7 判定表（无 grade）', () => {
+    const roll = rollDice('1d20+5>=13', { random: seq(10), rulebook: coc7 });
+
+    expect(roll.total).toBe(15);
+    expect(roll.check).toEqual({
+      rulebook: 'coc7',
+      kind: 'skill',
+      target: 13,
+      difficulty: 'normal',
+      op: '>=',
+      outcome: 'success',
+    });
+  });
+
+  it('>= 未达标为 fail（同样不带 grade）', () => {
+    const roll = rollDice('1d20+5>=13', { random: seq(2), rulebook: coc7 });
+
+    expect(roll.total).toBe(7);
+    expect(roll.check).toMatchObject({ op: '>=', outcome: 'fail' });
+    expect(roll.check?.grade).toBeUndefined();
+  });
+
+  it('= 为等值判定：相等 success、不等 fail', () => {
+    const hit = rollDice('1d6=3', { random: seq(3), rulebook: coc7 });
+    const miss = rollDice('1d6=3', { random: seq(5), rulebook: coc7 });
+
+    expect(hit.check).toMatchObject({ op: '=', outcome: 'success' });
+    expect(miss.check).toMatchObject({ op: '=', outcome: 'fail' });
+  });
+
+  it('>= 与 <= 同值时方向不同（运算符不再被丢弃）', () => {
+    // total=50：<=50 走 COC7 表判成功；>=50 布尔比较也成功，但语义与产物不同
+    const le = rollDice('1d100<=50', { random: seq(50), rulebook: coc7 });
+    const ge = rollDice('1d100>=50', { random: seq(50), rulebook: coc7 });
+
+    expect(le.check).toMatchObject({ op: '<=', outcome: 'success', grade: 'normal' });
+    expect(ge.check).toMatchObject({ op: '>=', outcome: 'success' });
+    expect(ge.check?.grade).toBeUndefined();
+  });
+
+  it('>= 也要求装配规则书（判定权威必须明确）', () => {
+    expect(() => rollDice('1d20+5>=13', { random: seq(10) })).toThrow(DiceExpressionError);
   });
 });
 
@@ -177,6 +229,11 @@ describe('可复现性（D-04：expr + rolls 可重算）', () => {
     const b = rollDice('3d6+2', { random: seq(2, 4, 6) });
 
     expect(a).toEqual(b);
+  });
+
+  it('骰值多于表达式所需：复现报数量不符（不许拿多余值蒙混）', () => {
+    // expr 只需 1 个骰值，流水却给了 3 个 → 重放后消耗数与提供数不等
+    expect(() => replayRoll('1d100', [[1], [2], [3]])).toThrow(/需要 1 个骰值，流水给了 3 个/);
   });
 
   it('total 可由 rolls 与表达式重算（审计复现的前提）', () => {

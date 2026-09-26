@@ -181,7 +181,7 @@ describe('消息流（ingest 去重 / 名册刷新）', () => {
       },
     ]);
     await vi.waitFor(() => expect(store.activeSessionId).toBe('s_2'));
-    expect(fetchMock).toHaveBeenCalledWith('/rooms/room-1');
+    expect(fetchMock).toHaveBeenCalledWith('/rooms/room-1/public');
   });
 });
 
@@ -230,6 +230,33 @@ describe('send / startSession / fetchHistory', () => {
 
     await expect(store.fetchHistory()).resolves.toBeUndefined();
     expect(store.messages).toEqual([]);
+  });
+});
+
+describe('掷骰（T-M4-02，FR-06/14）', () => {
+  it('roll 走 dice:roll，明骰 hidden=false', () => {
+    const store = useSessionStore();
+
+    store.roll('1d100<=60');
+
+    expect(fake.socket.emit).toHaveBeenCalledWith('dice:roll', {
+      expr: '1d100<=60',
+      hidden: false,
+    });
+  });
+
+  it('暗骰带 hidden=true（结果仅自己与 KP 可见，D-10）', () => {
+    const store = useSessionStore();
+
+    store.roll('1d100', true);
+
+    expect(fake.socket.emit).toHaveBeenCalledWith('dice:roll', { expr: '1d100', hidden: true });
+  });
+
+  it('空骰式不发送', () => {
+    const store = useSessionStore();
+    store.roll('   ');
+    expect(fake.socket.emit).not.toHaveBeenCalled();
   });
 });
 

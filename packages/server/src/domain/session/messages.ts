@@ -1,4 +1,4 @@
-import { MessageSchema, type Message } from '@behindveil/shared';
+import { MessageSchema, type MemberRole, type Message } from '@behindveil/shared';
 import { JsonlStore } from '../../adapters/storage/jsonl-store.js';
 import type { DataLayout } from '../../adapters/storage/layout.js';
 
@@ -63,20 +63,53 @@ export async function readMessagesPage(
   return { messages: messages.slice(0, opts.limit ?? 50), lastSeq };
 }
 
-/** 补发缺口（T-M1-08）：seq > afterSeq 的消息，按 seq 升序返回 */
+/** 补发/回放的观察者身份：决定密语与暗骰能否投递给他（T-M4-02，FR-14 / D-10） */
+export interface MessageViewer {
+  memberId: string;
+  role: MemberRole;
+}
+
+/**
+ * 补发缺口（T-M1-08）：seq > afterSeq 的消息，按 seq 升序返回。
+ *
+ * `viewer` 为补发目标的身份，必填且不可省略为「不过滤」——
+ * 断线补发的 lastSeq 由客户端给出，不按身份过滤等于把全房暗骰与密语拱手让人
+ * （2026-09-25 代码审查最高优先级问题）。仅管理工具等无身份场景显式传 null。
+ */
 export async function readMessagesAfter(
   layout: DataLayout,
   roomId: string,
   sessionId: string,
   afterSeq: number,
+  viewer: MessageViewer | null,
   store: JsonlStore = new JsonlStore(layout.messagesFile(roomId, sessionId)),
 ): Promise<Message[]> {
   const { records } = await store.readAll();
   const messages: Message[] = [];
   for (const record of records) {
     const parsed = MessageSchema.safeParse(record);
-    if (parsed.success && parsed.data.seq > afterSeq) messages.push(parsed.data);
+    if (!parsed.success) continue;
+    const message = parsed.data;
+    if (message.seq <= afterSeq) continue;
+    if (!canSee(message, viewer)) continue;
+    messages.push(message);
   }
   messages.sort((a, b) => a.seq - b.seq);
   return messages;
+}
+
+/** 可见性判定（与实时投递同源：Host 全见；暗骰归 Host+掷骰者；密语归收发双方+Host） */
+export function canSee(message: Message, viewer: MessageViewer | null): boolean {
+  if (!viewer) return true;
+  if (viewer.role === 'host') return true;
+  if (message.type === 'dice') {
+    return !message.hidden || message.senderId === viewer.memberId;
+  }
+  if (message.type === 'ooc') {
+    if (message.visibility === 'whisper') {
+      return message.senderId === viewer.memberId || message.targetId === viewer.memberId;
+    }
+    if (message.visibility === 'host') return message.senderId === viewer.memberId;
+  }
+  return true;
 }

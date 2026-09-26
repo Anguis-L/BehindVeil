@@ -56,6 +56,12 @@ export const RollCheckSchema = z.object({
   outcome: z.enum(CHECK_OUTCOMES),
   /** 成功子等级：COC7 困难/极难成功时携带；critical/fail/fumble 可省略（视为 normal） */
   grade: z.enum(CHECK_GRADES).optional(),
+  /**
+   * 判定运算符（2026-09-25 拍板方案 a，T-M4-02 落地）：缺省即 `<=`（走规则书判定表）。
+   * `>=` / `=` 无规则书语义，走通用布尔比较，outcome 仅 success/fail 且不带 grade
+   * （如 5e 的 `1d20+5>=13`）。
+   */
+  op: z.enum(['<=', '>=', '=']).optional(),
 });
 export type RollCheck = z.infer<typeof RollCheckSchema>;
 
@@ -77,8 +83,8 @@ export type RollAudit = z.infer<typeof RollAuditSchema>;
 
 /**
  * 掷骰结果（TDD §3.5）。
- * audit 由 T-M4-01 审计流水落账时补充：M3 掷骰广播（FR-05）先于审计落地，故可选。
- * M4 落地后收紧为必填（audit-first：无审计号的骰子不进消息流）。
+ * audit 必填：M4 起所有掷骰（玩家骰与 AI 检定骰）一律先落审计流水再广播，
+ * 没有审计号的骰子不允许进入消息流（出站 Schema 自检会拦下）。
  */
 export const RollResultSchema = z.object({
   /** 规范化表达式，如 "1d100"、"3d6kh2"、"2d6+3<=8" */
@@ -89,6 +95,6 @@ export const RollResultSchema = z.object({
   kept: z.array(z.number()),
   total: z.number(),
   check: RollCheckSchema.optional(),
-  audit: RollAuditSchema.optional(),
+  audit: RollAuditSchema,
 });
 export type RollResult = z.infer<typeof RollResultSchema>;

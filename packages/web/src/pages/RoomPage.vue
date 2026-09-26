@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick } from 'vue';
 import { useSessionStore } from '../stores/session';
+import { parseDiceInput } from '../dice-input.js';
 import type { Message } from '@behindveil/shared';
 import MessageCard from '../components/MessageCard.vue';
 
@@ -24,7 +25,10 @@ watch(
 
 function send(): void {
   if (!draft.value.trim() || !canSend.value) return;
-  store.send(mode.value, draft.value);
+  // `.r` / `.rh` 走掷骰，其余按当前模式发言（T-M4-05）
+  const parsed = parseDiceInput(draft.value);
+  if (parsed.kind === 'dice') store.roll(parsed.expr, parsed.hidden);
+  else store.send(mode.value, parsed.content);
   draft.value = '';
 }
 
@@ -54,8 +58,14 @@ function judgeClass(msg: Message): string {
 }
 
 function senderName(msg: Message): string {
-  if (msg.type !== 'ic' && msg.type !== 'ooc') return '';
-  return store.memberNameMap.get(msg.senderId) ?? msg.senderId;
+  if (msg.type === 'ic' || msg.type === 'ooc') {
+    return store.memberNameMap.get(msg.senderId) ?? msg.senderId;
+  }
+  // 骰子：有 senderId 是玩家掷的，无则是引擎代掷（KP 检定）
+  if (msg.type === 'dice') {
+    return msg.senderId ? (store.memberNameMap.get(msg.senderId) ?? msg.senderId) : 'KP';
+  }
+  return '';
 }
 
 // ---- KP prompt 预览（T-M2-09，FR-13）----
@@ -149,6 +159,10 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
             开团
           </button>
         </div>
+
+        <p class="bv-room__dice-hint">
+          <code>.r 1d100&lt;=60</code> 掷骰 · <code>.rh</code> 暗骰（仅你与 KP 可见）
+        </p>
 
         <div class="bv-room__composer">
           <div class="bv-room__modes" role="tablist">
@@ -406,6 +420,18 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
   background: var(--bv-bg-elevated);
   color: var(--bv-text-primary);
   font: inherit;
+}
+.bv-room__dice-hint {
+  margin: 0;
+  padding: var(--bv-space-1) var(--bv-space-4);
+  border-top: 1px solid var(--bv-line-subtle);
+  background: var(--bv-bg-surface);
+  color: var(--bv-text-tertiary);
+  font-size: 11px;
+}
+.bv-room__dice-hint code {
+  font-family: ui-monospace, monospace;
+  color: var(--bv-text-secondary);
 }
 .bv-room__composer {
   display: flex;

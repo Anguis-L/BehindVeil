@@ -51,6 +51,8 @@ interface SessionStartAck {
 interface ClientToServerEvents {
   'room:join': (payload: RoomJoinPayload, ack: (resp: JoinAck) => void) => void;
   'msg:send': (payload: MsgSendPayload) => void;
+  /** 玩家骰（T-M4-02，FR-06/14）：暗骰结果仅 Host 与自己可见（D-10） */
+  'dice:roll': (payload: { expr: string; hidden?: boolean }) => void;
   'session:start': (
     payload: {
       moduleId: string;
@@ -155,6 +157,12 @@ export const useSessionStore = defineStore('session', {
       getSocket().emit('msg:send', { type, content });
     },
 
+    /** 掷骰（T-M4-02）：骰式是否合法由服务端判定，非法回 E-DICE-01 行内提示 */
+    roll(expr: string, hidden = false): void {
+      if (!expr.trim()) return;
+      getSocket().emit('dice:roll', { expr, hidden });
+    },
+
     startSession(moduleId: string): void {
       // settings 全字段必填（SessionSettingsSchema）；web 端 v1 以默认值开团，
       // 细调走管理面 PATCH defaultSessionSettings（M6 控制台完善）
@@ -205,7 +213,8 @@ export const useSessionStore = defineStore('session', {
     async refreshMembers(): Promise<void> {
       if (!this.roomId) return;
       try {
-        const res = await fetch(`/rooms/${this.roomId}`);
+        // 玩家侧端点：免管理令牌，且不下发邀请码（2026-09-25 路由分离）
+        const res = await fetch(`/rooms/${this.roomId}/public`);
         if (!res.ok) return;
         const room = (await res.json()) as { activeSessionId?: string | null };
         this.activeSessionId = room.activeSessionId ?? null;

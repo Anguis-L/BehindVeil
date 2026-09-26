@@ -54,6 +54,7 @@ const msgs: Message[] = [
     type: 'dice',
     roll: { ...roll, audit: { ...roll.audit, rollId: 'roll-2' } },
     hidden: true,
+    senderId: 'm_a',
   },
   {
     seq: 4,
@@ -149,7 +150,7 @@ describe('readMessagesAfter（T-M1-08 断线补发缺口）', () => {
     const layout = await makeLayout();
     for (const m of msgs) await appendMessage(layout, 'room-1', 's_1', m);
 
-    const missed = await readMessagesAfter(layout, 'room-1', 's_1', 2);
+    const missed = await readMessagesAfter(layout, 'room-1', 's_1', 2, null);
 
     expect(missed.map((m) => m.seq)).toEqual([3, 4, 5]);
   });
@@ -158,6 +159,47 @@ describe('readMessagesAfter（T-M1-08 断线补发缺口）', () => {
     const layout = await makeLayout();
     await appendMessage(layout, 'room-1', 's_1', msgs[0] as Message);
 
-    expect(await readMessagesAfter(layout, 'room-1', 's_1', 1)).toEqual([]);
+    expect(await readMessagesAfter(layout, 'room-1', 's_1', 1, null)).toEqual([]);
+  });
+
+  it('旁人补发拿不到暗骰与密语（D-10：lastSeq 客户端可控，补发必须过滤）', async () => {
+    const layout = await makeLayout();
+    for (const m of msgs) await appendMessage(layout, 'room-1', 's_1', m);
+
+    const missed = await readMessagesAfter(layout, 'room-1', 's_1', 0, {
+      memberId: 'm_c',
+      role: 'player',
+    });
+
+    expect(missed.map((m) => m.seq)).toEqual([1, 4, 5]);
+  });
+
+  it('掷骰者本人可见自己的暗骰；密语收发双方可见', async () => {
+    const layout = await makeLayout();
+    for (const m of msgs) await appendMessage(layout, 'room-1', 's_1', m);
+
+    const roller = await readMessagesAfter(layout, 'room-1', 's_1', 0, {
+      memberId: 'm_a',
+      role: 'player',
+    });
+    const target = await readMessagesAfter(layout, 'room-1', 's_1', 0, {
+      memberId: 'm_b',
+      role: 'player',
+    });
+
+    expect(roller.map((m) => m.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect(target.map((m) => m.seq)).toEqual([1, 2, 4, 5]); // 密语收件人可见，暗骰不可见
+  });
+
+  it('Host 补发可见全部（含他人暗骰与密语）', async () => {
+    const layout = await makeLayout();
+    for (const m of msgs) await appendMessage(layout, 'room-1', 's_1', m);
+
+    const missed = await readMessagesAfter(layout, 'room-1', 's_1', 0, {
+      memberId: 'm_host',
+      role: 'host',
+    });
+
+    expect(missed.map((m) => m.seq)).toEqual([1, 2, 3, 4, 5]);
   });
 });

@@ -19,6 +19,11 @@ import type { FastifyInstance } from 'fastify';
 import { JsonlStore } from '../adapters/storage/jsonl-store.js';
 import type { DataLayout } from '../adapters/storage/layout.js';
 import type { ParsedRoll } from '../domain/dice/evaluator.js';
+import { rollDice } from '../domain/dice/evaluator.js';
+import { DiceExpressionError } from '../domain/dice/parser.js';
+import { createCsprngRandom } from '../domain/dice/random.js';
+import { createDiceAuditor } from '../domain/dice/audit.js';
+import { Coc7RuleBook } from '../domain/rulebook/coc7.js';
 import { DirectiveSuccessTracker } from '../domain/ai-directive/degrade.js';
 import { runAiTurn } from '../domain/ai-directive/loop.js';
 import type { LlmAdapter } from '../domain/llm.js';
@@ -28,7 +33,12 @@ import { findByInviteCode, readRoomFile } from '../domain/session/rooms.js';
 import { createSession } from '../domain/session/sessions.js';
 import { createRosterStub } from '../domain/stateboard/roster.stub.js';
 import { buildPreviewTrace } from '../observability/preview.js';
-import type { MsgSendPayload, RoomJoinPayload, SessionStartPayload } from '@behindveil/shared';
+import type {
+  DiceRollPayload,
+  MsgSendPayload,
+  RoomJoinPayload,
+  SessionStartPayload,
+} from '@behindveil/shared';
 
 /**
  * Socket.IO 网关（T-M1-03/05/06/07/08 + T-M3-06，TDD §4/§8/§5.4）。
@@ -42,12 +52,17 @@ import type { MsgSendPayload, RoomJoinPayload, SessionStartPayload } from '@behi
  * - KP prompt 预览（T-M2-05，FR-13）：kp:previewPrompt → host only → kp:promptPreview 定向回包。
  * - AI 触发（T-M3-06，D-07）：玩家 IC 自动触发 + ai:invoke 显式触发（每人每轮 1 次，
  *   「轮」= 相邻两次 AI 回合之间的窗口）；AI 回合独立串行队列，不阻塞消息主链路。
- * - M4 事件（dice:roll/state:update/state:snapshot）：payload 校验通过后暂不处理
+ * - 玩家骰（T-M4-02/03，FR-06/14）：dice:roll → 解析 → 掷骰 → 落审计 → 广播；
+ *   暗骰按决议 D-10 仅投递 Host 与掷骰者；非法骰式回 E-DICE-01（行内提示，不广播）。
+ * - M5 事件（state:update/state:snapshot）：payload 校验通过后暂不处理
  *   （未到里程碑不提前实现），到点在 dispatch 落位。
  */
 
 const MSG_RATE_LIMIT = 10;
 const MSG_RATE_WINDOW_MS = 30_000;
+
+/** 规则书无状态，模块级单例避免每次掷骰重建 */
+const RULEBOOK = new Coc7RuleBook();
 
 export interface GatewayDeps {
   layout: DataLayout;
@@ -96,7 +111,7 @@ type AppendableMessage =
       targetId?: string;
     }
   | { type: 'system'; subtype: SystemMsgSubtype; content: string }
-  | { type: 'dice'; roll: RollResult }
+  | { type: 'dice'; roll: RollResult; hidden: boolean; senderId?: string }
   | { type: 'narration'; content: string };
 
 /** 投递范围：room=全房广播；custom=定向 socket 列表（host/whisper 收窄场景） */
@@ -123,6 +138,9 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   const sendWindows = new Map<string, number[]>();
   const jsonlStores = new Map<string, JsonlStore>();
   const roster = createRosterStub();
+  /** 骰子审计流水（T-M4-01）：所有掷骰先落审计再广播 */
+  const auditor = createDiceAuditor(layout);
+  const random = createCsprngRandom();
 
   app.addHook('onClose', async () => {
     io.disconnectSockets(true);
@@ -190,6 +208,9 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
         return;
       case 'ai:invoke':
         await handleAiInvoke(socket);
+        return;
+      case 'dice:roll':
+        await handleDiceRoll(socket, payload as DiceRollPayload);
         return;
       default:
         return;
@@ -275,7 +296,8 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
           ...base,
           type: 'dice',
           roll: appendable.roll,
-          hidden: false,
+          hidden: appendable.hidden,
+          ...(appendable.senderId ? { senderId: appendable.senderId } : {}),
         };
       case 'narration':
         return { ...base, type: 'narration', streaming: false, content: appendable.content };
@@ -512,15 +534,94 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     ack?.({ ok: true, session });
   }
 
-  /** ParsedRoll → DiceMsg.roll（raw 不入契约；audit 由 T-M4-01 审计流水落账时补充） */
-  function toRollResult(roll: ParsedRoll): RollResult {
+  /**
+   * 掷骰落账（T-M4-01/02）：先写审计流水（WAP 同侧，record 返回即已 fsync），
+   * 再交给消息主链路广播——无审计号的骰子进不了消息流（出站 Schema 自检会拦下）。
+   */
+  async function recordDice(
+    roomId: string,
+    sessionId: string,
+    roll: ParsedRoll,
+    meta: { hidden: boolean; senderId?: string },
+  ): Promise<RollResult> {
+    const audit = await auditor.record({
+      roomId,
+      sessionId,
+      actor: meta.senderId ?? null,
+      hidden: meta.hidden,
+      expr: roll.expr,
+      rolls: roll.rolls,
+      kept: roll.kept,
+      total: roll.total,
+      check: roll.check,
+    });
     return {
       expr: roll.expr,
       rolls: roll.rolls,
       kept: roll.kept,
       total: roll.total,
       ...(roll.check ? { check: roll.check } : {}),
+      audit,
     };
+  }
+
+  /**
+   * 玩家骰（T-M4-02/03，FR-06/14）：dice:roll → 解析 → 掷骰 → 落审计 → 广播。
+   * 暗骰按决议 D-10 只投 Host 与掷骰者本人；非法骰式回 E-DICE-01 行内提示
+   * （不广播、不占 seq、不进审计——压根没掷出骰子）。
+   */
+  async function handleDiceRoll(socket: Socket, data: DiceRollPayload): Promise<void> {
+    const me = presence.get(socket.id);
+    if (!me) {
+      emitError(socket, 'E-ROOM-01', '尚未加入房间');
+      return;
+    }
+    if (me.role === 'observer') {
+      emitError(socket, 'E-ROOM-01', '旁观视角不能掷骰');
+      return;
+    }
+    const room = await readRoomFile(layout, me.roomId);
+    const sessionId = room?.activeSessionId;
+    if (!room || !sessionId) {
+      emitError(socket, 'E-ROOM-01', '尚未开团，暂不能掷骰');
+      return;
+    }
+
+    let roll: ParsedRoll;
+    try {
+      roll = rollDice(data.expr, { random, rulebook: RULEBOOK, kind: 'skill' });
+    } catch (err) {
+      if (err instanceof DiceExpressionError) {
+        emitError(socket, 'E-DICE-01', `${err.message}。${err.help}`);
+        return;
+      }
+      throw err;
+    }
+
+    const hidden = data.hidden === true;
+    // 暗骰收窄投递：Host + 掷骰者本人（D-10）
+    const routing: Routing = hidden
+      ? {
+          mode: 'custom',
+          socketIds: new Set<string>([
+            ...(roomHostSockets.get(me.roomId) ?? []),
+            ...(memberSockets.get(me.memberId) ?? []),
+          ]),
+        }
+      : { mode: 'room' };
+
+    await enqueue(me.roomId, async () => {
+      const diceRoll = await recordDice(me.roomId, sessionId, roll, {
+        hidden,
+        senderId: me.memberId,
+      });
+      await persistAndDeliver(
+        me.roomId,
+        sessionId,
+        { type: 'dice', roll: diceRoll, hidden, senderId: me.memberId },
+        routing,
+      );
+    });
   }
 
   /**
@@ -542,9 +643,14 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
           tracker,
           buildMessages: async () => (await buildPreviewTrace(layout, roomId, sessionId)).messages,
           emitDice: async (roll) => {
-            await enqueue(roomId, () =>
-              persistAndDeliver(roomId, sessionId, { type: 'dice', roll: toRollResult(roll) }),
-            );
+            await enqueue(roomId, async () => {
+              const diceRoll = await recordDice(roomId, sessionId, roll, { hidden: false });
+              await persistAndDeliver(roomId, sessionId, {
+                type: 'dice',
+                roll: diceRoll,
+                hidden: false,
+              });
+            });
           },
           emitDirectiveResult: async (content) => {
             await enqueue(roomId, () =>

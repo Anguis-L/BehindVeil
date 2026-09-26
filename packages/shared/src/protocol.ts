@@ -63,7 +63,10 @@ export type AiInvokePayload = z.infer<typeof AiInvokeSchema>;
 
 export const DiceRollSchema = z.object({
   expr: z.string(),
-  /** 暗骰（FR-14；决议 D-10：仅 Host 可用） */
+  /**
+   * 暗骰（FR-14）。决议 D-10：玩家也可掷暗骰，结果仅 Host 与掷骰者本人可见
+   * （消解「玩家看不见自己掷的骰子」的体验问题）。
+   */
   hidden: z.boolean().optional(),
   label: z.string().optional(),
 });
