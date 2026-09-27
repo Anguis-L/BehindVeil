@@ -309,6 +309,62 @@ describe('KP prompt 预览（T-M2-09，FR-13）', () => {
   });
 });
 
+describe('叙事流式渲染（T-M3-08，FR-05）', () => {
+  it('narration:delta：同触发源追加内容，占位不进消息时间线', () => {
+    const store = useSessionStore();
+    store.send('ic', 'x'); // 惰性触发接线
+
+    fake.handlers.get('narration:delta')?.({ seq: 5, delta: '你听见' });
+    fake.handlers.get('narration:delta')?.({ seq: 5, delta: '远处的风声……' });
+
+    expect(store.streaming).toEqual({ seq: 5, content: '你听见远处的风声……' });
+    expect(store.messages).toEqual([]);
+    expect(store.maxSeq).toBe(0); // delta 的 seq 是触发消息 seq，不得推进时间线游标
+  });
+
+  it('换触发源重开占位（新一轮叙事）', () => {
+    const store = useSessionStore();
+    store.send('ic', 'x');
+
+    fake.handlers.get('narration:delta')?.({ seq: 5, delta: '第一段' });
+    fake.handlers.get('narration:delta')?.({ seq: 9, delta: '新一轮' });
+
+    expect(store.streaming).toEqual({ seq: 9, content: '新一轮' });
+  });
+
+  it('narration:done：清占位；完整叙事由 msg:broadcast 落时间线', () => {
+    const store = useSessionStore();
+    store.send('ic', 'x');
+
+    fake.handlers.get('narration:delta')?.({ seq: 5, delta: '整段叙事……' });
+    fake.handlers.get('msg:broadcast')?.({
+      msg: {
+        seq: 6,
+        ts: '2026-09-27T12:00:00.000Z',
+        sessionId: 's_1',
+        type: 'narration',
+        streaming: false,
+        content: '整段叙事……',
+      },
+    });
+    fake.handlers.get('narration:done')?.({ seq: 6 });
+
+    expect(store.streaming).toBeNull();
+    expect(store.messages).toHaveLength(1);
+    expect(store.messages[0]).toMatchObject({ seq: 6, type: 'narration', streaming: false });
+  });
+
+  it('重连后占位作废（lastSeq 补发带来完整叙事）', () => {
+    const store = useSessionStore();
+    store.send('ic', 'x');
+
+    fake.handlers.get('narration:delta')?.({ seq: 5, delta: '未完成的叙事' });
+    fake.handlers.get('connect')?.();
+
+    expect(store.streaming).toBeNull();
+  });
+});
+
 describe('socket 事件接线（connect / disconnect / error:app / reset）', () => {
   it('error:app 格式化为 [code] message', () => {
     const store = useSessionStore();

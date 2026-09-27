@@ -92,6 +92,12 @@ export const useSessionStore = defineStore('session', {
     /** KP prompt 预览（T-M2-09，FR-13）：kp:promptPreview 回包 */
     preview: null as PromptPreview | null,
     previewLoading: false,
+    /**
+     * 正在流式的 KP 叙事占位（T-M3-08，FR-05）。seq 为触发消息 seq（服务端
+     * narration:delta 的 payload，仅作占位标识）；落盘广播 + narration:done 到达
+     * 后清除，完整叙事以 msg:broadcast 进时间线。占位永不入 messages（seq 语义不同）。
+     */
+    streaming: null as { seq: number; content: string } | null,
   }),
 
   getters: {
@@ -198,6 +204,20 @@ export const useSessionStore = defineStore('session', {
       getSocket().emit('kp:previewPrompt', {});
     },
 
+    /** KP 叙事流式增量（T-M3-08）：同触发源追加，换 seq 重开占位（AI 回合房间级串行，同时至多一段） */
+    appendNarrationDelta(seq: number, delta: string): void {
+      if (this.streaming?.seq !== seq) {
+        this.streaming = { seq, content: delta };
+        return;
+      }
+      this.streaming.content += delta;
+    },
+
+    /** 叙事收尾（T-M3-08）：完整消息已随 msg:broadcast 落入时间线，清占位 */
+    finishNarration(): void {
+      this.streaming = null;
+    },
+
     ingest(list: Message[]): void {
       for (const msg of list) {
         if (msg.seq <= this.maxSeq) continue; // 补发与实时流可能重叠，按 seq 去重
@@ -239,6 +259,7 @@ function getSocket(): Socket<ServerToClientEvents, ClientToServerEvents> {
 
   socket.on('connect', () => {
     store.connected = true;
+    store.streaming = null; // 重连后 lastSeq 补发带来完整叙事，流式占位作废
     if (store.view === 'room' && store.memberId) {
       // 断线重连：重入房并让服务端补发缺口
       socket?.emit(
@@ -268,6 +289,14 @@ function getSocket(): Socket<ServerToClientEvents, ClientToServerEvents> {
 
   socket.on('msg:broadcast', (payload) => {
     store.ingest([payload.msg]);
+  });
+
+  socket.on('narration:delta', ({ seq, delta }) => {
+    store.appendNarrationDelta(seq, delta);
+  });
+
+  socket.on('narration:done', () => {
+    store.finishNarration();
   });
 
   socket.on('error:app', (payload) => {

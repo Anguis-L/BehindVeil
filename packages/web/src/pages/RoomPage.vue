@@ -16,7 +16,8 @@ const canSend = computed(() => store.role !== 'observer' && store.activeSessionI
 const ordered = computed(() => store.messages);
 
 watch(
-  () => store.messages.length,
+  // 流式叙事逐 delta 增长，内容变化也要跟随滚动（T-M3-08）
+  () => [store.messages.length, store.streaming?.content] as const,
   async () => {
     await nextTick();
     listEl.value?.scrollTo({ top: listEl.value.scrollHeight });
@@ -140,7 +141,13 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
             :judge-label="judgeLabel(msg)"
             :judge-class="judgeClass(msg)"
           />
-          <p v-if="ordered.length === 0" class="bv-room__empty">还没有消息——开团后开始冒险吧。</p>
+          <!-- KP 叙事流式占位（T-M3-08）：delta 期间显示，落盘广播 + done 后由完整消息取代 -->
+          <blockquote v-if="store.streaming" class="bv-room__streaming">
+            <p class="bv-room__streaming-text">{{ store.streaming.content }}<span>▍</span></p>
+          </blockquote>
+          <p v-if="ordered.length === 0 && !store.streaming" class="bv-room__empty">
+            还没有消息——开团后开始冒险吧。
+          </p>
         </div>
 
         <p v-if="store.error" class="bv-room__error">{{ store.error }}</p>
@@ -400,6 +407,21 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
   color: var(--bv-text-tertiary);
   font-size: 13px;
   text-align: center;
+}
+.bv-room__streaming {
+  margin: 0;
+  padding: var(--bv-space-3) var(--bv-space-4);
+  border: 1px solid var(--bv-line-subtle);
+  border-left: 3px solid var(--bv-accent);
+  border-radius: var(--bv-radius-card);
+  background: var(--bv-bg-elevated);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.bv-room__streaming-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .bv-room__error {
   margin: 0;
