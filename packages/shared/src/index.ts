@@ -2,8 +2,8 @@
  * 共享契约层入口（TDD §1.2：web → shared ← server）。
  *
  * M0「契约先行」交付：message.ts / dice.ts / domain.ts / errors.ts。
- * protocol.ts（Socket 事件契约）随 T-M1-04 落地；worldbook.ts 完整拆分随 T-M2-01；
- * module.ts 随 T-M5-05。
+ * protocol.ts（Socket 事件契约）随 T-M1-04 落地；character.ts（角色卡契约）随 T-M5-01；
+ * module.ts（模组包契约）随 T-M5-05。
  */
 
 export const APP_NAME = 'BehindVeil';
@@ -15,5 +15,6 @@ export * from './errors.js';
 export * from './dice.js';
 export * from './domain.js';
 export * from './character.js';
+export * from './module.js';
 export * from './message.js';
 export * from './protocol.js';

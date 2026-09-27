@@ -130,6 +130,26 @@ describe('createSession（T-M1-01/07）', () => {
     const stateBoard = await new JsonStore(layout.stateFile(room.id, session.id)).read();
     expect(stateBoard).toMatchObject({ version: 0, pcs: {} });
   });
+
+  it('T-M5-05：模组 init-state 的 scene/facts 合入状态板初始值（TC-FR-10-003）', async () => {
+    const layout = await makeLayout();
+    const room = await createRoom(layout, { name: 'A' });
+    const session = await createSession(layout, room.id, {
+      moduleId: 'mod-1',
+      settings,
+      initState: {
+        scene: { name: '营地', time: '1931 年南极夏', publicDesc: '风雪刚停。' },
+        facts: ['营地补给只够三天'],
+        opening: '以无线电杂音开场。',
+      },
+    });
+    const stateBoard = await new JsonStore(layout.stateFile(room.id, session.id)).read();
+    expect(stateBoard).toMatchObject({
+      version: 0,
+      scene: { name: '营地', time: '1931 年南极夏', publicDesc: '风雪刚停。' },
+      facts: ['营地补给只够三天'],
+    });
+  });
 });
 
 describe('readSession / listSessions', () => {

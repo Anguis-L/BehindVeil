@@ -1,6 +1,8 @@
 import {
   SessionSchema,
+  SessionSettingsSchema,
   StateBoardSchema,
+  type InitState,
   type Session,
   type SessionSettings,
 } from '@behindveil/shared';
@@ -20,6 +22,8 @@ import { generateSessionId } from './ids.js';
 export interface CreateSessionInput {
   moduleId: string;
   settings: SessionSettings;
+  /** 模组 init-state（T-M5-05，TC-FR-10-003）：scene/facts 合入状态板初始值 */
+  initState?: InitState;
 }
 
 async function saveSession(layout: DataLayout, roomId: string, session: Session): Promise<void> {
@@ -68,8 +72,9 @@ export async function createSession(
         { sheet: declared.sheet, conditions: [] },
       ]),
     ),
-    scene: { name: '', time: '', publicDesc: '' },
-    facts: [],
+    // 模组 init-state（T-M5-05，TC-FR-10-003）：scene/facts 为模组定义的初始值
+    scene: input.initState?.scene ?? { name: '', time: '', publicDesc: '' },
+    facts: input.initState?.facts ?? [],
     updatedAt: now,
   });
   await new JsonStore(layout.stateFile(roomId, session.id)).write(stateBoard);
@@ -124,6 +129,30 @@ export async function endSession(
     await saveRoomFile(layout, room);
   }
   return session;
+}
+
+/**
+ * 会话级设置局部更新（T-M6-04 支撑端点，FR-13）。
+ *
+ * 与 `PATCH /rooms/{id}/settings` 的区别要分清：后者改的是房间**默认**设置，只影响
+ * 之后新建的会话；本函数改的是**当前会话**的运行时设置，写回 session.json，
+ * 下一次 LLM 调用即生效（temperature 取自会话设置、管线预算同读本字段）。
+ *
+ * 覆盖式合并后整体过 SessionSettingsSchema：contextWindowTokens / outputReserveTokens
+ * 有默认值，老会话缺这两个字段时一并补齐。
+ */
+export async function updateSessionSettings(
+  layout: DataLayout,
+  roomId: string,
+  sessionId: string,
+  patch: Partial<SessionSettings>,
+): Promise<Session | null> {
+  const session = await readSession(layout, roomId, sessionId);
+  if (!session) return null;
+  const settings = SessionSettingsSchema.parse({ ...session.settings, ...patch });
+  const updated: Session = { ...session, settings };
+  await saveSession(layout, roomId, updated);
+  return updated;
 }
 
 /** 切换活跃会话（T-M1-07）：仅允许指向本房已存在的会话（如复播旧团） */
