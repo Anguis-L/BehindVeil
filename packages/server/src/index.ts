@@ -42,6 +42,11 @@ export interface CreateServerOptions {
   logger?: boolean;
   /** web SPA 产物目录；不存在则跳过静态托管 */
   webDistDir?: string;
+  /**
+   * 测试装配口（T-M5-11 E2E）：注入剧本化 Mock 等适配器，覆盖 config 装配；
+   * 生产部署不传，行为与既有口径完全一致（config.yaml provider 驱动）。
+   */
+  llm?: LlmAdapter;
 }
 
 export async function createServer(opts: CreateServerOptions = {}): Promise<FastifyInstance> {
@@ -83,8 +88,10 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
 
   // LLM 适配器（T-M3-06 装配）：provider=mock 走 MockLlm（无 key CI/回归）；
   // 真实 provider 配置缺失或非法 → 告警并禁用 AI 触发（服务主体功能不受影响）
-  let llm: LlmAdapter | undefined;
-  if (cfg.llm.provider === 'mock') {
+  let llm: LlmAdapter | undefined = opts.llm;
+  if (llm) {
+    app.log.info('LLM 适配器由装配参数注入（测试/E2E）');
+  } else if (cfg.llm.provider === 'mock') {
     llm = createMockLlm();
     app.log.info('LLM provider=mock：AI 触发以脚本回放运行');
   } else {

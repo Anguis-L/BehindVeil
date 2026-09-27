@@ -12,6 +12,7 @@ import {
 } from '../../domain/session/rooms.js';
 import { listSessions, endSession, setActiveSession } from '../../domain/session/sessions.js';
 import { readMessagesPage } from '../../domain/session/messages.js';
+import { readStateBoard } from '../../domain/stateboard/board.js';
 
 /**
  * 管理面 REST（T-M1-02/09，决议 D-03 + docs/openapi.yaml + 2026-09-25 四项拍板）。
@@ -141,6 +142,16 @@ export function registerRoomRoutes(app: FastifyInstance, deps: RestDeps): void {
       memberLimit: room.memberLimit,
       activeSessionId: room.activeSessionId,
     };
+  });
+
+  // 状态板拉取（T-M5-10，FR-09）：进房/刷新后取当前板，之后靠 state:broadcast 增量维护。
+  // 全房可见（状态板本就是全员共识），未开团回 null 而非 404——前端据此显示「尚未开团」。
+  app.get('/rooms/:roomId/state', async (req, reply) => {
+    const { roomId } = req.params as { roomId: string };
+    const room = await readRoomFile(layout, roomId);
+    if (!room) return reply.code(404).send({ code: 'E-ROOM-01', message: '房间不存在' });
+    if (!room.activeSessionId) return { stateBoard: null };
+    return { stateBoard: await readStateBoard(layout, roomId, room.activeSessionId) };
   });
 
   // 历史拉取（决议 ④：走 REST，T-M1-09；与 Socket 补发互补——
