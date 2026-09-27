@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, open, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { JsonStore } from './json-store.js';
 
 /**
@@ -20,6 +20,16 @@ async function makeTmpDir(): Promise<string> {
 afterAll(async () => {
   await Promise.all(created.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
+
+/**
+ * node:fs 与 node:fs/promises 都不导出 FileHandle 类，要 spy 它的 `sync` 只能从实例反查原型。
+ */
+async function spyOnFsync(): Promise<ReturnType<typeof vi.spyOn>> {
+  const probe = await open(path.join(await makeTmpDir(), 'probe.json'), 'a');
+  const proto = Object.getPrototypeOf(probe) as { sync(): Promise<void> };
+  await probe.close();
+  return vi.spyOn(proto, 'sync');
+}
 
 describe('JsonStore 原子写', () => {
   it('写入后可原样读回', async () => {
@@ -56,6 +66,23 @@ describe('JsonStore 原子写', () => {
 
     const entries = await readdir(dir);
     expect(entries).toEqual(['session.json']);
+  });
+
+  /**
+   * 原子写的回归锁：临时文件 fsync 过再 rename，才算「中断不产生半文件」。
+   * 少了这步 fsync，rename 可能赶在落盘前完成，崩溃后新文件是空的。
+   */
+  it('write 在 rename 前 fsync 了临时文件', async () => {
+    const dir = await makeTmpDir();
+    const store = new JsonStore(path.join(dir, 'session.json'));
+    const syncSpy = await spyOnFsync();
+    try {
+      await store.write({ version: 1 });
+
+      expect(syncSpy, 'rename 前必须 fsync 临时文件').toHaveBeenCalled();
+    } finally {
+      syncSpy.mockRestore();
+    }
   });
 
   it('文件不存在时 read 返回 null（尚未开团）', async () => {

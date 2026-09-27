@@ -48,9 +48,16 @@ describe('AppErrorSchema（error:app 载荷）', () => {
   });
 });
 
-const hasModCode = (ERROR_CODES as readonly string[]).includes('E-MOD-01');
+/**
+ * 2026-09-27：原先用 `describe.skipIf(!hasModCode)` —— E-MOD-01 一旦被移出错误码表，
+ * 整组用例会静默变成 skipped，门禁照样全绿。错误码表是前后端共享契约，少一个码就是回归，
+ * 应当直接红。
+ */
+describe('E-MOD-01（决议：模组卸载冲突，2026-09-25 拍板）', () => {
+  it('已入错误码表（契约表少一个码即回归）', () => {
+    expect(ERROR_CODES).toContain('E-MOD-01');
+  });
 
-describe.skipIf(!hasModCode)('E-MOD-01（决议：模组卸载冲突，2026-09-25 拍板）', () => {
   it('已入错误码表且可过 AppErrorSchema（D-09：活跃会话引用中拒绝卸载）', () => {
     expect(
       AppErrorSchema.safeParse({ code: 'E-MOD-01', message: '模组正被活跃会话使用，无法卸载' })

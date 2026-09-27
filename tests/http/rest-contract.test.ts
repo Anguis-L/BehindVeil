@@ -1,7 +1,6 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 /**
@@ -15,15 +14,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
  *   ③ 卸载冲突错误码：E-MOD-01（见 shared errors 测试）。
  *   ④ 历史消息走 REST：GET /rooms/{id}/messages?sessionId=&beforeSeq=&limit=，seq 降序。
  *
- * 契约先行：路由未实现（GET /rooms 探测得 404）时整组跳过，落地后自动激活——
- * 与 tests/protocol 同一模式，避免打断已全绿的 pnpm verify / CI。
+ * 2026-09-27：路由已全部落地，原先「GET /rooms 探测得 404 就整组跳过」的临时开关拆除——
+ * 那个开关与 tests/protocol 同款，靠 dist 产物是否存在来决定跑不跑，构建产物缺失时整组
+ * 静默变 skipped，`pnpm verify` 却照样全绿。现在路由回归 = 直接失败。
  */
 
-const SERVER_DIST = fileURLToPath(new URL('../../packages/server/dist/index.js', import.meta.url));
+import * as serverEntry from '../../packages/server/src/index.js';
 
-const serverModule = (await import(/* @vite-ignore */ pathToFileURL(SERVER_DIST).href).catch(
-  () => null,
-)) as Record<string, unknown> | null;
+const serverModule = serverEntry as unknown as Record<string, unknown>;
 
 interface InjectResult {
   statusCode: number;
@@ -81,20 +79,26 @@ async function makeApp(env?: Record<string, string>): Promise<Ctx | null> {
 }
 
 const open = await makeApp();
-let enabled = false;
-if (open) {
-  const probe = await open.app.inject({ method: 'GET', url: '/rooms' });
-  enabled = probe.statusCode === 200; // 404 = 路由未落地 → 整组跳过
-}
-
-const suite = enabled ? describe : describe.skip;
 
 const ADMIN_TOKEN = 'secret-admin-123';
 let secured: Ctx | null = null;
 
 beforeAll(async () => {
-  if (!enabled) return;
   secured = await makeApp({ AIDLE_ADMIN_TOKEN: ADMIN_TOKEN });
+});
+
+/** 原先靠顶层探测决定整组跑不跑，现在改成一条明写的用例：路由没了就直接红 */
+describe('REST 契约：管理面已落地（守卫：不做静默降级）', () => {
+  it('server 入口导出 createServer', () => {
+    expect(typeof serverModule['createServer']).toBe('function');
+  });
+
+  it('GET /rooms 返回 200（路由回归即失败）', async () => {
+    expect(open, 'createServer 未返回 app').not.toBeNull();
+    const probe = await open!.app.inject({ method: 'GET', url: '/rooms' });
+
+    expect(probe.statusCode, `探测 GET /rooms 得 ${probe.statusCode}`).toBe(200);
+  });
 });
 
 afterAll(async () => {
@@ -127,7 +131,7 @@ async function seedMessages(dataDir: string, roomId: string, count: number): Pro
   await writeFile(path.join(dir, 'messages.jsonl'), lines.join('\n') + '\n', 'utf8');
 }
 
-suite('REST 契约：建房与 Host 身份（决议 ①）', () => {
+describe('REST 契约：建房与 Host 身份（决议 ①）', () => {
   it('POST /rooms 最小建房：返回邀请码、默认人数上限与 hostToken', async () => {
     expect(open).not.toBeNull();
     const room = await createRoom(open!.app);
@@ -193,7 +197,7 @@ suite('REST 契约：建房与 Host 身份（决议 ①）', () => {
   });
 });
 
-suite('REST 契约：邀请码重置与房间配置（T-M1-02）', () => {
+describe('REST 契约：邀请码重置与房间配置（T-M1-02）', () => {
   it('POST /rooms/{id}/invite-reset：新码 6 位且使旧码失效（旧码 ≠ 新码）', async () => {
     const room = await createRoom(open!.app);
     const old = String(room['inviteCode']);
@@ -231,7 +235,7 @@ suite('REST 契约：邀请码重置与房间配置（T-M1-02）', () => {
   });
 });
 
-suite('REST 契约：历史消息（决议 ④：走 REST，T-M1-09）', () => {
+describe('REST 契约：历史消息（决议 ④：走 REST，T-M1-09）', () => {
   it('seq 降序返回，limit 截断', async () => {
     const room = await createRoom(open!.app);
     await seedMessages(open!.dataDir, String(room['id']), 5);
@@ -297,7 +301,7 @@ suite('REST 契约：历史消息（决议 ④：走 REST，T-M1-09）', () => {
   });
 });
 
-suite('REST 契约：管理面门禁（决议 ②：AIDLE_ADMIN_TOKEN）', () => {
+describe('REST 契约：管理面门禁（决议 ②：AIDLE_ADMIN_TOKEN）', () => {
   it('设置环境变量后：无令牌 401，错令牌 401', async () => {
     expect(secured).not.toBeNull();
 

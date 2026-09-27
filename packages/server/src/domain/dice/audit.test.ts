@@ -110,9 +110,9 @@ describe('落账与流水号（T-M4-01）', () => {
     const auditor = createDiceAuditor(layout);
 
     const ids = new Set<string>();
-    for (let i = 0; i < 5; i += 1) ids.add((await auditor.record(input())).rollId);
+    for (let i = 0; i < 20; i += 1) ids.add((await auditor.record(input())).rollId);
 
-    expect(ids.size).toBe(5);
+    expect(ids.size).toBe(20);
     await auditor.close();
   });
 
@@ -126,6 +126,10 @@ describe('落账与流水号（T-M4-01）', () => {
 
     const seqs = results.map((r) => r.seq);
     expect(new Set(seqs).size).toBe(20);
+    // 并发下 rollId 同样不得撞号：审计号是凭据主键，撞了就无法唯一定位一颗骰子
+    const rollIds = results.map((r) => r.rollId);
+    expect(new Set(rollIds).size, '并发落账的 rollId 必须互不相同').toBe(20);
+
     const { entries } = await auditor.readAll();
     expect(entries).toHaveLength(20);
     // 落盘顺序与流水号顺序一致

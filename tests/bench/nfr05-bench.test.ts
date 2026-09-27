@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { scanWorldBook } from '../../packages/server/dist/domain/worldbook/scan.js';
-import { buildPrompt } from '../../packages/server/dist/pipeline/index.js';
-import type { PipelineInput } from '../../packages/server/dist/pipeline/index.js';
-import { createHeuristicTokenizer } from '../../packages/server/dist/pipeline/tokenizer.js';
-import type { WorldBook, WorldBookEntry } from '../../packages/shared/dist/domain.js';
-import type { Message } from '../../packages/shared/dist/message.js';
+// 直接吃源码：吃 dist 的话，源码改了不重新构建就测不到（且 dist 缺失会静默降级）
+import { scanWorldBook } from '../../packages/server/src/domain/worldbook/scan.js';
+import { buildPrompt } from '../../packages/server/src/pipeline/index.js';
+import type { PipelineInput } from '../../packages/server/src/pipeline/index.js';
+import { createHeuristicTokenizer } from '../../packages/server/src/pipeline/tokenizer.js';
+import type { WorldBook, WorldBookEntry } from '../../packages/shared/src/domain.js';
+import type { Message } from '../../packages/shared/src/message.js';
 
 /**
  * T-M2-08 性能基准（NFR-05，测试文档 §6.2 TC-NFR-05-001/002）。

@@ -1,23 +1,17 @@
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+// 直接吃源码，不吃 dist：源码一改就得重构建才能测到，等于给契约测试装了个延迟开关
+import * as protocolModule from '../../packages/shared/src/protocol.js';
 
 /**
  * T-M1-04：Socket 事件契约（TDD §4.1/§4.2 + docs/socketio-asyncapi.yaml）。
  * 对应 TC-FR-02-004（双向 Zod：出入站 payload 都要能被校验）。
  *
- * 契约先行：本文件在 `packages/shared/src/protocol.ts` 落地**之前**就写好。
- * 为避免在未落地时打断 `pnpm verify`（CI 首跑刚全绿），采用「契约未就绪则整组跳过」：
- * 动态加载 shared 构建产物，取不到就把整个 describe 置为 skipped；
- * 一旦 protocol.ts 落地，用例自动激活。跳过状态在测试输出里可见（↓），不会静默消失。
+ * 2026-09-27：契约 `packages/shared/src/protocol.ts` 已落地，原先「未落地则整组跳过」的
+ * 临时开关（`protocol ? describe : describe.skip`）随之拆除——它依赖 dist 产物，一旦构建
+ * 产物缺失就会把整组用例静默降级成 skipped，门禁却依旧全绿。
  */
 
-const PROTOCOL_DIST = fileURLToPath(
-  new URL('../../packages/shared/dist/protocol.js', import.meta.url),
-);
-
-const protocol = (await import(/* @vite-ignore */ pathToFileURL(PROTOCOL_DIST).href).catch(
-  () => null,
-)) as Record<string, unknown> | null;
+const protocol: Record<string, unknown> = protocolModule as unknown as Record<string, unknown>;
 
 interface AnySchema {
   parse(input: unknown): unknown;
@@ -25,12 +19,10 @@ interface AnySchema {
 }
 
 const schema = (name: string): AnySchema => {
-  const found = protocol?.[name];
+  const found = protocol[name];
   if (!found) throw new Error(`protocol.ts 未导出 ${name}`);
   return found as AnySchema;
 };
-
-const suite = protocol ? describe : describe.skip;
 
 const asRecord = (value: unknown): Record<string, unknown> => value as Record<string, unknown>;
 
@@ -60,11 +52,7 @@ const STATE_BOARD = {
   updatedAt: '2026-09-25T00:00:00.000Z',
 };
 
-suite('protocol.ts 契约（T-M1-04）', () => {
-  it('契约模块已落地（否则本组用例跳过）', () => {
-    expect(protocol).not.toBeNull();
-  });
-
+describe('protocol.ts 契约（T-M1-04）', () => {
   describe('客户端 → 服务端（TDD §4.1）', () => {
     it('room:join：邀请码定长 6，wantRole 不得为 host（D-02）', () => {
       const s = schema('RoomJoinSchema');
@@ -200,13 +188,9 @@ suite('protocol.ts 契约（T-M1-04）', () => {
   });
 });
 
-const hasWhitelist =
-  protocol !== null && 'CLIENT_EVENTS' in protocol && 'isClientEvent' in protocol;
-const whitelistSuite = hasWhitelist ? describe : describe.skip;
-
-whitelistSuite('事件白名单（TDD §8：非白名单事件即断连）', () => {
+describe('事件白名单（TDD §8：非白名单事件即断连）', () => {
   it('入站白名单覆盖八个客户端事件', () => {
-    const events = protocol?.['CLIENT_EVENTS'] as readonly string[];
+    const events = protocol['CLIENT_EVENTS'] as readonly string[];
 
     for (const name of [
       'room:join',
@@ -223,7 +207,7 @@ whitelistSuite('事件白名单（TDD §8：非白名单事件即断连）', () 
   });
 
   it('出站事件不得被当作入站事件接受', () => {
-    const isClientEvent = protocol?.['isClientEvent'] as (name: string) => boolean;
+    const isClientEvent = protocol['isClientEvent'] as (name: string) => boolean;
 
     expect(isClientEvent('room:join')).toBe(true);
     expect(isClientEvent('msg:broadcast')).toBe(false);

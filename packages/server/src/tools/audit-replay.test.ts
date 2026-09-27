@@ -159,12 +159,19 @@ describe('篡改必被检出（防「算错也看不出来」）', () => {
   it('改判定结果（check.outcome）', async () => {
     const entries = makeEntries(40);
     const victim = entries.find((e) => e.check !== null);
-    expect(victim).toBeDefined();
-    if (victim?.check) victim.check = { ...victim.check, outcome: 'critical' };
+    expect(victim?.check).toBeTruthy();
+    if (victim?.check) {
+      // 换成一个必定与当前不同的 outcome：改完就一定不一致，不必用弱断言兜底
+      victim.check = {
+        ...victim.check,
+        outcome: victim.check.outcome === 'success' ? 'critical' : 'success',
+      };
+    }
 
     const report = await replayAuditFile(await writeAuditFile(entries));
 
-    expect(report.mismatches.length).toBeGreaterThan(0);
+    expect(report.mismatches).toHaveLength(1);
+    expect(report.mismatches[0]?.seq).toBe(victim?.seq);
     expect(report.mismatches[0]?.reason).toContain('check 不一致');
   });
 

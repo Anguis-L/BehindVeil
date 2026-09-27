@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { JsonlStore } from './jsonl-store.js';
 
 /**
@@ -20,6 +20,16 @@ async function makeTmpDir(): Promise<string> {
 afterAll(async () => {
   await Promise.all(created.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
+
+/**
+ * node:fs 与 node:fs/promises 都不导出 FileHandle 类，要 spy 它的 `sync` 只能从实例反查原型。
+ */
+async function spyOnFsync(): Promise<ReturnType<typeof vi.spyOn>> {
+  const probe = await open(path.join(await makeTmpDir(), 'probe.jsonl'), 'a');
+  const proto = Object.getPrototypeOf(probe) as { sync(): Promise<void> };
+  await probe.close();
+  return vi.spyOn(proto, 'sync');
+}
 
 describe('JsonlStore.append（写前持久化 WAP）', () => {
   it('追加一条即落盘为完整行（以换行收尾）', async () => {
@@ -68,6 +78,25 @@ describe('JsonlStore.append（写前持久化 WAP）', () => {
 
     const result = await store.readAll();
     expect(result.records).toHaveLength(1);
+  });
+
+  /**
+   * WAP 的回归锁（NFR-06：消息 0 丢失）。
+   * 「append 返回后可读回」只能证明写进了页缓存，证明不了刷到了磁盘——断电照样丢。
+   * 这条用例盯住 fsync 本身：谁把 `handle.sync()` 删了，这里立刻红。
+   */
+  it('append 返回前确实 fsync 过（不只是写进页缓存）', async () => {
+    const dir = await makeTmpDir();
+    const store = new JsonlStore(path.join(dir, 'messages.jsonl'));
+    const syncSpy = await spyOnFsync();
+    try {
+      await store.append({ seq: 1 });
+
+      expect(syncSpy, 'append 必须 fsync：否则断电会丢已广播的消息').toHaveBeenCalled();
+    } finally {
+      syncSpy.mockRestore();
+    }
+    await store.close();
   });
 
   // 每条 append 都带 fsync，Windows 上单条约数毫秒，500 条远超默认 5s 预算

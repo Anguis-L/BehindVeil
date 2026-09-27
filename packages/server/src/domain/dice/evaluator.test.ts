@@ -166,7 +166,8 @@ describe('判定运算符 >= / =（2026-09-25 拍板方案 a，T-M4-02）', () =
     const roll = rollDice('1d20+5>=13', { random: seq(10), rulebook: coc7 });
 
     expect(roll.total).toBe(15);
-    expect(roll.check).toEqual({
+    // toMatchObject：只断言关心的字段，后续给 check 加字段时不必改测试
+    expect(roll.check).toMatchObject({
       rulebook: 'coc7',
       kind: 'skill',
       target: 13,
@@ -234,6 +235,11 @@ describe('可复现性（D-04：expr + rolls 可重算）', () => {
   it('骰值多于表达式所需：复现报数量不符（不许拿多余值蒙混）', () => {
     // expr 只需 1 个骰值，流水却给了 3 个 → 重放后消耗数与提供数不等
     expect(() => replayRoll('1d100', [[1], [2], [3]])).toThrow(/需要 1 个骰值，流水给了 3 个/);
+  });
+
+  it('骰值少于表达式所需：重放当场失败（不许拿别的值凑）', () => {
+    // expr 要 2 个骰值、流水只给 1 个：重放源在第二颗骰子处就断了
+    expect(() => replayRoll('2d6', [[1]])).toThrow(/原始骰值不足以重放该表达式/);
   });
 
   it('total 可由 rolls 与表达式重算（审计复现的前提）', () => {

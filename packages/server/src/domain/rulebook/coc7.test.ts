@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { rollDice } from '../dice/evaluator.js';
 import type { RandomSource } from '../dice/random.js';
 import { Coc7RuleBook, DEFAULT_COC7_HOUSE_RULES } from './coc7.js';
+import type { CheckSpec } from './types.js';
 
 /**
  * T-P-04：COC7 规则书（TDD §5.3 判定表 = TC-FR-04-007~015 验收基准）。
@@ -28,6 +29,10 @@ describe('规则书标识', () => {
 describe('TC-FR-04-010：大成功', () => {
   it('roll=01 即大成功', () => {
     expect(judge(1, 60)).toEqual({ outcome: 'critical', grade: 'normal' });
+  });
+
+  it('默认 criticalMax=1：roll=02 不再是大成功（边界另一侧）', () => {
+    expect(judge(2, 60)).toEqual({ outcome: 'success', grade: 'extreme' });
   });
 
   it('房规 criticalMax=5 时 02–05 亦为大成功，06 不再是大成功', () => {
@@ -82,16 +87,16 @@ describe('TC-FR-04-014：大失败', () => {
     expect(judge(99, 50)).toEqual({ outcome: 'fail', grade: 'normal' });
   });
 
-  it('房规阈值可配', () => {
+  it('房规阈值可配，且阈值另一侧不算大失败', () => {
+    const spec = (target: number): CheckSpec => ({ kind: 'skill', target, difficulty: 'normal' });
+
     const low = new Coc7RuleBook({ fumbleLowSkill: 90 });
-    expect(low.adjudicate(90, { kind: 'skill', target: 40, difficulty: 'normal' })).toMatchObject({
-      outcome: 'fumble',
-    });
+    expect(low.adjudicate(90, spec(40))).toEqual({ outcome: 'fumble', grade: 'normal' });
+    expect(low.adjudicate(89, spec(40))).toEqual({ outcome: 'fail', grade: 'normal' });
 
     const high = new Coc7RuleBook({ fumbleHighSkill: 98 });
-    expect(high.adjudicate(98, { kind: 'skill', target: 50, difficulty: 'normal' })).toMatchObject({
-      outcome: 'fumble',
-    });
+    expect(high.adjudicate(98, spec(50))).toEqual({ outcome: 'fumble', grade: 'normal' });
+    expect(high.adjudicate(97, spec(50))).toEqual({ outcome: 'fail', grade: 'normal' });
   });
 });
 
@@ -109,49 +114,55 @@ describe('KP 难度档（difficulty）', () => {
 });
 
 describe('TC-FR-04-007：幸运检定（kind=luck）', () => {
-  it('roll ≤ 幸运值即成功，边界正确', () => {
-    const roll = (value: number) =>
-      rollDice('1d100<=60', { random: fixed(value), rulebook: book, kind: 'luck' });
+  const roll = (value: number) =>
+    rollDice('1d100<=60', { random: fixed(value), rulebook: book, kind: 'luck' });
 
+  it('roll ≤ 幸运值即成功，边界正确', () => {
     expect(roll(60).check).toMatchObject({ kind: 'luck', outcome: 'success' });
     expect(roll(61).check).toMatchObject({ kind: 'luck', outcome: 'fail' });
     expect(roll(1).check).toMatchObject({ kind: 'luck', outcome: 'critical' });
+  });
+
+  // 幸运值 60 ≥ 50 → 走高技能档阈值 100
+  it('roll=100 为大失败（判定表四档齐全，原先独缺这一侧）', () => {
+    expect(roll(100).check).toMatchObject({ kind: 'luck', outcome: 'fumble' });
+    expect(roll(99).check).not.toMatchObject({ outcome: 'fumble' });
   });
 });
 
 describe('TC-FR-04-008：对抗检定', () => {
   it('成功等级高者胜（大成功 > 普通成功）', () => {
-    expect(book.adjudicateOpposed?.({ roll: 1, skill: 50 }, { roll: 40, skill: 50 })).toEqual({
+    expect(book.adjudicateOpposed({ roll: 1, skill: 50 }, { roll: 40, skill: 50 })).toEqual({
       winner: 'a',
     });
   });
 
   it('一方失败一方成功 → 成功方胜', () => {
-    expect(book.adjudicateOpposed?.({ roll: 90, skill: 50 }, { roll: 40, skill: 50 })).toEqual({
+    expect(book.adjudicateOpposed({ roll: 90, skill: 50 }, { roll: 40, skill: 50 })).toEqual({
       winner: 'b',
     });
   });
 
   it('双方均失败 → 平', () => {
-    expect(book.adjudicateOpposed?.({ roll: 90, skill: 50 }, { roll: 91, skill: 50 })).toEqual({
+    expect(book.adjudicateOpposed({ roll: 90, skill: 50 }, { roll: 91, skill: 50 })).toEqual({
       winner: 'tie',
     });
   });
 
   it('等级相同 → 技能值高者胜', () => {
-    expect(book.adjudicateOpposed?.({ roll: 40, skill: 50 }, { roll: 30, skill: 70 })).toEqual({
+    expect(book.adjudicateOpposed({ roll: 40, skill: 50 }, { roll: 30, skill: 70 })).toEqual({
       winner: 'b',
     });
   });
 
   it('等级与技能值都相同 → 平', () => {
-    expect(book.adjudicateOpposed?.({ roll: 40, skill: 50 }, { roll: 30, skill: 50 })).toEqual({
+    expect(book.adjudicateOpposed({ roll: 40, skill: 50 }, { roll: 30, skill: 50 })).toEqual({
       winner: 'tie',
     });
   });
 
   it('极难成功胜过困难成功', () => {
-    expect(book.adjudicateOpposed?.({ roll: 2, skill: 60 }, { roll: 25, skill: 60 })).toEqual({
+    expect(book.adjudicateOpposed({ roll: 2, skill: 60 }, { roll: 25, skill: 60 })).toEqual({
       winner: 'a',
     });
   });
@@ -159,25 +170,25 @@ describe('TC-FR-04-008：对抗检定', () => {
 
 describe('TC-FR-04-015：理智损失（sanityRule）', () => {
   it('按判定等级查表输出损失表达式与描述', () => {
-    expect(book.sanityRule?.(1, 65)).toEqual({
+    expect(book.sanityRule(1, 65)).toEqual({
       loss: DEFAULT_COC7_HOUSE_RULES.sanityLossTable.critical,
       desc: '大成功：损失 0',
     });
-    expect(book.sanityRule?.(40, 65)).toEqual({
+    expect(book.sanityRule(40, 65)).toEqual({
       loss: DEFAULT_COC7_HOUSE_RULES.sanityLossTable.normal,
       desc: '普通成功：损失 1d2',
     });
-    expect(book.sanityRule?.(80, 65)).toEqual({
+    expect(book.sanityRule(80, 65)).toEqual({
       loss: DEFAULT_COC7_HOUSE_RULES.sanityLossTable.fail,
       desc: '失败：损失 1d6',
     });
   });
 
   it('大失败按当前 SAN 分档（SAN≥50 时 100 才大失败；SAN<50 时 96 即大失败）', () => {
-    expect(book.sanityRule?.(100, 65)).toMatchObject({
+    expect(book.sanityRule(100, 65)).toMatchObject({
       loss: DEFAULT_COC7_HOUSE_RULES.sanityLossTable.fumble,
     });
-    expect(book.sanityRule?.(96, 40)).toMatchObject({
+    expect(book.sanityRule(96, 40)).toMatchObject({
       loss: DEFAULT_COC7_HOUSE_RULES.sanityLossTable.fumble,
     });
   });
@@ -187,7 +198,7 @@ describe('TC-FR-04-015：理智损失（sanityRule）', () => {
       sanityLossTable: { ...DEFAULT_COC7_HOUSE_RULES.sanityLossTable, fail: '1d4' },
     });
 
-    expect(house.sanityRule?.(80, 65)).toMatchObject({ loss: '1d4' });
+    expect(house.sanityRule(80, 65)).toMatchObject({ loss: '1d4' });
   });
 });
 

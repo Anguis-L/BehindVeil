@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createCsprngRandom } from '../../packages/server/dist/domain/dice/random.js';
+// 直接吃源码：吃 dist 的话，源码改了不重新构建就测不到（且 dist 缺失会静默降级）
+import { createCsprngRandom } from '../../packages/server/src/domain/dice/random.js';
 
 /**
  * T-P-06 / TC-NFR-04-001：χ² 均匀性检验（测试文档 §12.2）。
