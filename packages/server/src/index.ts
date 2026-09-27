@@ -12,6 +12,7 @@ import type { LlmAdapter } from './domain/llm.js';
 import { loadConfig } from './config.js';
 import { registerCardRoutes } from './gateway/http/cards.js';
 import { registerExportRoutes } from './gateway/http/export.js';
+import { registerModuleRoutes } from './gateway/http/modules.js';
 import { registerPcRoutes } from './gateway/http/pcs.js';
 import { registerRoomRoutes } from './gateway/http/rooms.js';
 import { attachGateway } from './gateway/socket.js';
@@ -105,6 +106,7 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
   registerRoomRoutes(app, { layout, adminToken: cfg.adminToken });
   registerCardRoutes(app, { layout, adminToken: cfg.adminToken });
   registerPcRoutes(app, { layout, adminToken: cfg.adminToken });
+  registerModuleRoutes(app, { layout, adminToken: cfg.adminToken });
   registerExportRoutes(app, { layout, adminToken: cfg.adminToken });
   attachGateway(app, {
     layout,

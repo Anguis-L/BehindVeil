@@ -42,7 +42,10 @@ export function sanityLossPatch(
     desc,
     patch: {
       pcs: {
-        [target]: { sheet: { ...pc.sheet, san: pc.sheet.san - applied }, conditions: pc.conditions },
+        [target]: {
+          sheet: { ...pc.sheet, san: pc.sheet.san - applied },
+          conditions: pc.conditions,
+        },
       },
     },
   };

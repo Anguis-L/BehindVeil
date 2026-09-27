@@ -31,6 +31,7 @@ import { runAiTurn } from '../domain/ai-directive/loop.js';
 import type { LlmAdapter } from '../domain/llm.js';
 import { applyStatePatch, readStateBoard, saveStateBoard } from '../domain/stateboard/board.js';
 import { createStateBoardRoster } from '../domain/stateboard/roster.js';
+import { loadModule } from '../domain/module/library.js';
 import { appendMessage, readMessagesAfter } from '../domain/session/messages.js';
 import { addMember, readMembers } from '../domain/session/members.js';
 import { findByInviteCode, readRoomFile } from '../domain/session/rooms.js';
@@ -569,9 +570,18 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       ack?.({ ok: false, code: 'E-ROOM-01', message: '仅 Host 可开团' });
       return;
     }
+    // 模组校验（T-M5-05，TC-FR-10-001）：manifest + 三件套不通过即拒绝开团（E-MOD-01），
+    // init-state 随 createSession 合入状态板初始值（TC-FR-10-003）
+    const loaded = await loadModule(layout, data.moduleId);
+    if (!loaded.ok) {
+      emitError(socket, 'E-MOD-01', `模组无法装载：${loaded.message}`);
+      ack?.({ ok: false, code: 'E-MOD-01', message: `模组无法装载：${loaded.message}` });
+      return;
+    }
     const session = await createSession(layout, me.roomId, {
       moduleId: data.moduleId,
       settings: data.settings,
+      initState: loaded.module.initState,
     });
     seqCounters.set(session.id, 0);
     await enqueue(me.roomId, () =>
