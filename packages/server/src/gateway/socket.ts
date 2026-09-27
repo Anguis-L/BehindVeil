@@ -62,12 +62,15 @@ import type {
  * - 状态板写路径（T-M5-06，FR-09）：state:update → 仅 Host → 房间队列内乐观锁校验
  *   （E-ST-01 拒绝并广播最新版）→ 原子落盘 → state:broadcast 全员广播。
  *   状态板内存态按会话懒加载，检定名册（T-M5-04）同步读内存板。
- * - M5 事件（state:snapshot）：payload 校验通过后暂不处理（未到里程碑不提前实现），
- *   到点在 dispatch 落位。
+ * - 快照机制（T-M5-07，SDD §5.4）：state:snapshot（Host）→ SnapshotMsg 入流
+ *   （WAP 落盘 + 全房广播）；每 N=20 条消息追加提醒 notice，由 Host 确认生成。
  */
 
 const MSG_RATE_LIMIT = 10;
 const MSG_RATE_WINDOW_MS = 30_000;
+
+/** 快照提醒周期（T-M5-07，SDD §5.4：每 N=20 条消息提醒 Host 确认生成快照） */
+const SNAPSHOT_REMINDER_EVERY = 20;
 
 /** 规则书无状态，模块级单例避免每次掷骰重建 */
 const RULEBOOK = new Coc7RuleBook();
@@ -125,7 +128,8 @@ type AppendableMessage =
     }
   | { type: 'system'; subtype: SystemMsgSubtype; content: string }
   | { type: 'dice'; roll: RollResult; hidden: boolean; senderId?: string }
-  | { type: 'narration'; content: string };
+  | { type: 'narration'; content: string }
+  | { type: 'state_snapshot'; stateBoard: StateBoard };
 
 /** 投递范围：room=全房广播；custom=定向 socket 列表（host/whisper 收窄场景） */
 type Routing = { mode: 'room' } | { mode: 'custom'; socketIds: Iterable<string> };
@@ -233,6 +237,9 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       case 'state:update':
         await handleStateUpdate(socket, payload as StateUpdatePayload);
         return;
+      case 'state:snapshot':
+        await handleStateSnapshot(socket);
+        return;
       default:
         return;
     }
@@ -332,6 +339,8 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
         };
       case 'narration':
         return { ...base, type: 'narration', streaming: false, content: appendable.content };
+      case 'state_snapshot':
+        return { ...base, type: 'state_snapshot', stateBoard: appendable.stateBoard };
     }
   }
 
@@ -350,10 +359,20 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     const payload = { msg: message };
     if (routing.mode === 'room') {
       emitChecked(io.to(`room:${roomId}`), 'msg:broadcast', payload);
-      return seq;
+    } else {
+      for (const socketId of routing.socketIds) {
+        emitChecked(io.to(socketId), 'msg:broadcast', payload);
+      }
     }
-    for (const socketId of routing.socketIds) {
-      emitChecked(io.to(socketId), 'msg:broadcast', payload);
+
+    // 快照提醒（T-M5-07，TC-FR-09-005）：每 N=20 条消息追加一条 notice。
+    // 提醒自身占 seq=N+1（N%20=0 时 N+1 不再命中周期），无连锁递归。
+    if (seq % SNAPSHOT_REMINDER_EVERY === 0) {
+      await persistAndDeliver(roomId, sessionId, {
+        type: 'system',
+        subtype: 'notice',
+        content: `本会话已达 ${seq} 条消息，KP 可确认生成状态板快照（state:snapshot）`,
+      });
     }
     return seq;
   }
@@ -691,6 +710,34 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       stateBoards.set(sessionId, result.next);
       await saveStateBoard(layout, me.roomId, sessionId, result.next);
       emitChecked(io.to(`room:${me.roomId}`), 'state:broadcast', { stateBoard: result.next });
+    });
+  }
+
+  /**
+   * 快照生成（T-M5-07，TDD §5.5 / SDD §5.4）：仅 Host 触发，把当前状态板作为
+   * SnapshotMsg 入流（WAP 落盘 + 全房广播）。数值权威仍是 state.json（S2 每轮注入
+   * 当前板），快照是流内的存档点：断线补发与回放可从快照消息看到版本锚点。
+   */
+  async function handleStateSnapshot(socket: Socket): Promise<void> {
+    const me = presence.get(socket.id);
+    if (!me) {
+      emitError(socket, 'E-ROOM-01', '尚未加入房间');
+      return;
+    }
+    if (me.role !== 'host') {
+      emitError(socket, 'E-ROOM-01', '仅 Host 可生成快照');
+      return;
+    }
+    const room = await readRoomFile(layout, me.roomId);
+    const sessionId = room?.activeSessionId;
+    if (!room || !sessionId) {
+      emitError(socket, 'E-ROOM-01', '尚未开团，暂无状态板可快照');
+      return;
+    }
+
+    await enqueue(me.roomId, async () => {
+      const board = await boardFor(me.roomId, sessionId);
+      await persistAndDeliver(me.roomId, sessionId, { type: 'state_snapshot', stateBoard: board });
     });
   }
 
