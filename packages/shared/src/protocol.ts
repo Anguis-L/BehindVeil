@@ -96,6 +96,19 @@ export const KpPreviewPromptSchema = z.object({
 });
 export type KpPreviewPromptPayload = z.infer<typeof KpPreviewPromptSchema>;
 
+/**
+ * 房内实时指标请求（T-M6-03/05，FR-13 / R-02，TDD §9）。
+ *
+ * 为什么要有 Socket 版：`GET /metrics` 走管理面令牌门禁，而前端不带 X-Admin-Token，
+ * 拿不到；KP 控制台要的又是**当前会话**的实时数，不是全局数。故房内另开一对事件，
+ * 权限照 `kp:previewPrompt`：仅 Host。
+ */
+export const KpMetricsSchema = z.object({
+  /** 指定会话；缺省取房间当前活跃会话 */
+  sessionId: z.string().min(1).optional(),
+});
+export type KpMetricsPayload = z.infer<typeof KpMetricsSchema>;
+
 // ---- 服务端 → 客户端（TDD §4.2，出站同样须过 Schema）----
 
 export const MsgBroadcastSchema = z.object({
@@ -142,6 +155,42 @@ export const KpPromptPreviewSchema = z.object({
 });
 export type KpPromptPreviewPayload = z.infer<typeof KpPromptPreviewSchema>;
 
+/**
+ * 会话级实时指标（T-M6-03/05，FR-13 / R-01 / R-02）。
+ *
+ * 与 `GET /metrics`（全局、含 uptimeSec）互为补充：这里是**单个会话**的口径，
+ * 多一项按 TDD §12 成本模型折算的 `cost.estimatedCny`（R-02 成本失控的早期预警）。
+ * 延迟分布取最近 N 次 LLM 调用（p50/p95/max/avg，单位毫秒），无样本时全 0。
+ */
+export const KpMetricsResultSchema = z.object({
+  sessionId: z.string(),
+  directives: z.object({
+    attempts: z.number(),
+    successes: z.number(),
+    rate: z.number(),
+  }),
+  dice: z.object({
+    total: z.number(),
+    hidden: z.number(),
+  }),
+  llm: z.object({
+    calls: z.number(),
+    failures: z.number(),
+    tokensIn: z.number(),
+    tokensOut: z.number(),
+    latencyMs: z.object({
+      p50: z.number(),
+      p95: z.number(),
+      max: z.number(),
+      avg: z.number(),
+    }),
+  }),
+  cost: z.object({
+    estimatedCny: z.number(),
+  }),
+});
+export type KpMetricsResultPayload = z.infer<typeof KpMetricsResultSchema>;
+
 /** 业务错误出口（TDD §4.2 error:app），code 必须落在 §11 错误码表内 */
 export const ErrorAppSchema = AppErrorSchema;
 export type ErrorAppPayload = z.infer<typeof ErrorAppSchema>;
@@ -157,6 +206,7 @@ export const CLIENT_EVENTS = [
   'state:update',
   'state:snapshot',
   'kp:previewPrompt',
+  'kp:metrics',
 ] as const;
 export type ClientEventName = (typeof CLIENT_EVENTS)[number];
 
@@ -166,6 +216,7 @@ export const SERVER_EVENTS = [
   'narration:done',
   'state:broadcast',
   'kp:promptPreview',
+  'kp:metricsResult',
   'error:app',
 ] as const;
 export type ServerEventName = (typeof SERVER_EVENTS)[number];
@@ -180,6 +231,7 @@ export const CLIENT_EVENT_SCHEMAS = {
   'state:update': StateUpdateSchema,
   'state:snapshot': StateSnapshotSchema,
   'kp:previewPrompt': KpPreviewPromptSchema,
+  'kp:metrics': KpMetricsSchema,
 } as const satisfies Record<ClientEventName, z.ZodType>;
 
 /** 出站事件 → Schema 映射（出站广播前的自检） */
@@ -189,6 +241,7 @@ export const SERVER_EVENT_SCHEMAS = {
   'narration:done': NarrationDoneSchema,
   'state:broadcast': StateBroadcastSchema,
   'kp:promptPreview': KpPromptPreviewSchema,
+  'kp:metricsResult': KpMetricsResultSchema,
   'error:app': ErrorAppSchema,
 } as const satisfies Record<ServerEventName, z.ZodType>;
 

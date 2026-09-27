@@ -12,13 +12,19 @@ import type { LlmAdapter } from './domain/llm.js';
 import { loadConfig } from './config.js';
 import { registerCardRoutes } from './gateway/http/cards.js';
 import { registerExportRoutes } from './gateway/http/export.js';
+import { registerMetricsRoutes } from './gateway/http/metrics.js';
 import { registerModuleRoutes } from './gateway/http/modules.js';
 import { registerPcRoutes } from './gateway/http/pcs.js';
 import { registerRoomRoutes } from './gateway/http/rooms.js';
 import { attachGateway } from './gateway/socket.js';
+import { MetricsCollector } from './observability/metrics.js';
 import { redact } from './observability/redact.js';
 
-/** v1 固定采样温度（config 未暴露该字段；TDD §7 ChatRequest 必填） */
+/**
+ * 采样温度兜底值（config 未暴露该字段；TDD §7 ChatRequest 必填）。
+ * 会话设置带 temperature（SessionSettings 必填），实际取值以会话设置为准——
+ * 会话读不到时才回退到这里（T-M6-04：控制台改会话设置即时生效）。
+ */
 const DEFAULT_AI_TEMPERATURE = 0.7;
 
 /**
@@ -115,7 +121,9 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
   registerPcRoutes(app, { layout, adminToken: cfg.adminToken });
   registerModuleRoutes(app, { layout, adminToken: cfg.adminToken });
   registerExportRoutes(app, { layout, adminToken: cfg.adminToken });
-  attachGateway(app, {
+  // 指标收集器（T-M6-03）：进程内单例，网关埋点与 GET /metrics 共用同一实例
+  const metrics = new MetricsCollector();
+  const gateway = attachGateway(app, {
     layout,
     initialSeqs,
     llm,
@@ -124,6 +132,13 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
       temperature: DEFAULT_AI_TEMPERATURE,
       maxTokens: cfg.llm.maxTokens,
     },
+    metrics,
+  });
+  // 指令成功率取网关累计口径（R-01 唯一统计源），此处只做出口
+  registerMetricsRoutes(app, {
+    adminToken: cfg.adminToken,
+    metrics,
+    directives: () => gateway.directiveStats(),
   });
 
   const webDistDir =

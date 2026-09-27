@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { io } from 'socket.io-client';
-import type { Message } from '@behindveil/shared';
+import type { Message, Session, SessionSettings } from '@behindveil/shared';
 
 /**
  * T-M1-10：会话 store（进房 → 消息流 → 断线重连）。
@@ -42,8 +42,46 @@ type Fake = ReturnType<typeof makeFakeSocket>;
 
 let fake: Fake;
 let useSessionStore: (typeof import('./session.js'))['useSessionStore'];
-const fetchMock =
-  vi.fn<(input: string | URL) => Promise<{ ok: boolean; json: () => Promise<unknown> }>>();
+
+interface FakeResponse {
+  ok: boolean;
+  status: number;
+  json: () => Promise<unknown>;
+}
+
+const fetchMock = vi.fn<(input: string | URL, init?: RequestInit) => Promise<FakeResponse>>();
+
+/** 管理面 REST 的假响应（默认 200） */
+function jsonResponse(payload: unknown, status = 200): FakeResponse {
+  return { ok: status >= 200 && status < 300, status, json: async () => payload };
+}
+
+function headersOf(call: unknown): Record<string, string> {
+  const init = (call as [string, RequestInit] | undefined)?.[1];
+  return (init?.headers ?? {}) as Record<string, string>;
+}
+
+const settings: SessionSettings = {
+  provider: 'openai-compat',
+  model: 'deepseek-chat',
+  temperature: 0.7,
+  maxHistoryMessages: 40,
+  worldBookBudgetTokens: 2000,
+  scanDepth: 4,
+  contextWindowTokens: 32_768,
+  outputReserveTokens: 2_048,
+};
+
+const liveSession: Session = {
+  id: 's_1',
+  roomId: 'room-1',
+  moduleRef: 'mod-1',
+  startedAt: '2026-09-28T04:00:00.000Z',
+  endedAt: null,
+  stateBoardVersion: 0,
+  settings,
+  synopsis: '',
+};
 
 const icMsg = (seq: number): Message => ({
   seq,
@@ -80,8 +118,19 @@ beforeEach(async () => {
   vi.mocked(io).mockClear();
   vi.mocked(io).mockReturnValue(fake.socket as never);
   fetchMock.mockReset();
-  fetchMock.mockResolvedValue({ ok: true, json: async () => [] });
+  fetchMock.mockResolvedValue(jsonResponse([]));
   vi.stubGlobal('fetch', fetchMock);
+  // 管理令牌走 sessionStorage：每个用例一份干净的存储
+  const tokenBox = new Map<string, string>();
+  vi.stubGlobal('sessionStorage', {
+    getItem: (key: string) => tokenBox.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      tokenBox.set(key, value);
+    },
+    removeItem: (key: string) => {
+      tokenBox.delete(key);
+    },
+  });
   setActivePinia(createPinia());
   ({ useSessionStore } = await import('./session.js'));
 });
@@ -93,7 +142,7 @@ afterEach(() => {
 describe('join（进房，T-M1-03/08）', () => {
   it('成功：状态转移、REST 拉历史并恢复时间线正序', async () => {
     ackOn('room:join', okAck);
-    fetchMock.mockResolvedValue({ ok: true, json: async () => [icMsg(2), icMsg(1)] }); // 接口降序
+    fetchMock.mockResolvedValue(jsonResponse([icMsg(2), icMsg(1)])); // 接口降序
     const store = useSessionStore();
 
     await store.join('ABC234', '阿珂', '');
@@ -165,10 +214,7 @@ describe('消息流（ingest 去重 / 名册刷新）', () => {
     const store = useSessionStore();
     store.roomId = 'room-1';
     store.name = '阿珂';
-    fetchMock.mockResolvedValue({
-      ok: true,
-      json: async () => ({ activeSessionId: 's_2' }),
-    });
+    fetchMock.mockResolvedValue(jsonResponse({ activeSessionId: 's_2' }));
 
     store.ingest([
       {
@@ -401,6 +447,30 @@ describe('socket 事件接线（connect / disconnect / error:app / reset）', ()
     expect(store.activeSessionId).toBe('s_2');
   });
 
+  it('kp:metricsResult 收包后也要结束 loading（T-M6-05）', () => {
+    const store = useSessionStore();
+    store.send('ic', 'x');
+    store.metricsLoading = true;
+    const payload = {
+      sessionId: 's_1',
+      directives: { attempts: 4, successes: 3, rate: 0.75 },
+      dice: { total: 9, hidden: 2 },
+      llm: {
+        calls: 5,
+        failures: 1,
+        tokensIn: 12_000,
+        tokensOut: 3_000,
+        latencyMs: { p50: 800, p95: 1_500, max: 2_000, avg: 900 },
+      },
+      cost: { estimatedCny: 0.42 },
+    };
+
+    fake.handlers.get('kp:metricsResult')?.(payload);
+
+    expect(store.metrics).toEqual(payload);
+    expect(store.metricsLoading).toBe(false);
+  });
+
   it('reset：断开 socket 并复位状态', () => {
     const store = useSessionStore();
     store.send('ic', 'x'); // 触发 getSocket 创建连接
@@ -410,5 +480,187 @@ describe('socket 事件接线（connect / disconnect / error:app / reset）', ()
 
     expect(fake.socket.disconnect).toHaveBeenCalled();
     expect(store.view).toBe('join');
+  });
+});
+
+describe('KP 控制台：实时指标（T-M6-05，FR-13 / R-02）', () => {
+  it('host 请求：emit kp:metrics，缺省不带 sessionId（服务端取活跃会话）', () => {
+    const store = useSessionStore();
+    store.role = 'host';
+    store.activeSessionId = 's_1';
+    store.send('ic', 'x'); // 惰性触发 getSocket
+    fake.socket.emit.mockClear();
+
+    store.requestMetrics();
+
+    expect(fake.socket.emit).toHaveBeenCalledWith('kp:metrics', {});
+    expect(store.metricsLoading).toBe(true);
+  });
+
+  it('显式 sessionId 随 payload 下发', () => {
+    const store = useSessionStore();
+    store.role = 'host';
+    store.activeSessionId = 's_1';
+    store.send('ic', 'x');
+    fake.socket.emit.mockClear();
+
+    store.requestMetrics('s_old');
+
+    expect(fake.socket.emit).toHaveBeenCalledWith('kp:metrics', { sessionId: 's_old' });
+  });
+
+  it('非 host / 未开团不请求（服务端同样拒，前端先挡一次）', () => {
+    const store = useSessionStore();
+    store.send('ic', 'x');
+    fake.socket.emit.mockClear();
+    store.role = 'player';
+    store.activeSessionId = 's_1';
+    store.requestMetrics();
+    store.role = 'host';
+    store.activeSessionId = null;
+    store.requestMetrics();
+
+    expect(fake.socket.emit).not.toHaveBeenCalledWith('kp:metrics', {});
+  });
+});
+
+describe('KP 控制台：管理令牌（T-M6-04）', () => {
+  it('setAdminToken：进 state 并落 sessionStorage', () => {
+    const store = useSessionStore();
+
+    store.setAdminToken('  tok-abc  ');
+
+    expect(store.adminToken).toBe('tok-abc');
+    expect(sessionStorage.getItem('bv.adminToken')).toBe('tok-abc');
+  });
+
+  it('空串清除令牌', () => {
+    const store = useSessionStore();
+    store.setAdminToken('tok-abc');
+
+    store.setAdminToken('  ');
+
+    expect(store.adminToken).toBe('');
+    expect(sessionStorage.getItem('bv.adminToken')).toBeNull();
+  });
+});
+
+describe('KP 控制台：会话管理 REST（T-M6-04）', () => {
+  it('loadSessions：带 X-Admin-Token 拉列表', async () => {
+    fake.socket.emit.mockImplementation(() => undefined);
+    fetchMock.mockResolvedValue(jsonResponse([liveSession]));
+    const store = useSessionStore();
+    store.roomId = 'room-1';
+    store.setAdminToken('tok-abc');
+
+    await store.loadSessions();
+
+    expect(fetchMock).toHaveBeenCalledWith('/rooms/room-1/sessions', expect.objectContaining({}));
+    expect(headersOf(fetchMock.mock.calls[0])['X-Admin-Token']).toBe('tok-abc');
+    expect(store.sessions).toEqual([liveSession]);
+    expect(store.sessionsLoading).toBe(false);
+  });
+
+  it('401 → 明确提示需要管理令牌，不静默失败', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ code: 'E-ROOM-01', message: '管理面需要 X-Admin-Token 令牌' }, 401),
+    );
+    const store = useSessionStore();
+    store.roomId = 'room-1';
+
+    await store.loadSessions();
+
+    expect(store.error).toBe('需要管理令牌，请在 KP 控制台填写');
+    expect(store.sessions).toEqual([]);
+  });
+
+  it('其它错误码用服务端 message', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ code: 'E-ROOM-01', message: '房间不存在' }, 404));
+    const store = useSessionStore();
+    store.roomId = 'room-1';
+
+    await store.loadSessions();
+
+    expect(store.error).toBe('房间不存在');
+  });
+
+  it('endSession：POST 结束后刷新列表；结束活跃会话则清空 activeSessionId', async () => {
+    const ended: Session = { ...liveSession, endedAt: '2026-09-28T06:00:00.000Z' };
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(ended))
+      .mockResolvedValueOnce(jsonResponse([ended]));
+    const store = useSessionStore();
+    store.roomId = 'room-1';
+    store.activeSessionId = 's_1';
+
+    await store.endSession('s_1');
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/rooms/room-1/sessions/s_1/end');
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe('POST');
+    expect(store.activeSessionId).toBeNull();
+    expect(store.sessions).toEqual([ended]);
+  });
+
+  it('activateSession：PUT 切换活跃会话（FR-11 连载复播）', async () => {
+    const old: Session = { ...liveSession, id: 's_old', endedAt: '2026-09-27T06:00:00.000Z' };
+    fetchMock.mockResolvedValue(jsonResponse(old));
+    const store = useSessionStore();
+    store.roomId = 'room-1';
+    store.activeSessionId = 's_1';
+
+    await store.activateSession('s_old');
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/rooms/room-1/active-session');
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe('PUT');
+    expect(JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)).toEqual({
+      sessionId: 's_old',
+    });
+    expect(store.activeSessionId).toBe('s_old');
+  });
+});
+
+describe('KP 控制台：会话参数设置（T-M6-04，FR-13）', () => {
+  it('PATCH 保存并把更新后的会话写回列表', async () => {
+    const updated: Session = {
+      ...liveSession,
+      settings: { ...settings, temperature: 0.9, worldBookBudgetTokens: 1500 },
+    };
+    fetchMock.mockResolvedValue(jsonResponse(updated));
+    const store = useSessionStore();
+    store.roomId = 'room-1';
+    store.sessions = [liveSession];
+
+    const ok = await store.saveSessionSettings('s_1', { temperature: 0.9 });
+
+    expect(ok).toBe(true);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/rooms/room-1/sessions/s_1/settings');
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe('PATCH');
+    expect(JSON.parse((fetchMock.mock.calls[0]?.[1] as RequestInit).body as string)).toEqual({
+      temperature: 0.9,
+    });
+    expect(store.sessions[0]?.settings.temperature).toBe(0.9);
+  });
+
+  it('空 patch 不发请求（无改动不该打扰服务端）', async () => {
+    const store = useSessionStore();
+    store.roomId = 'room-1';
+
+    const ok = await store.saveSessionSettings('s_1', {});
+
+    expect(ok).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('参数非法（400）→ 错误进 store.error', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ code: 'E-ROOM-01', message: 'temperature: 需在 0–2 之间' }, 400),
+    );
+    const store = useSessionStore();
+    store.roomId = 'room-1';
+
+    const ok = await store.saveSessionSettings('s_1', { temperature: 9 });
+
+    expect(ok).toBe(false);
+    expect(store.error).toBe('temperature: 需在 0–2 之间');
   });
 });

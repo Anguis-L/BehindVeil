@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDataLayout, type DataLayout } from '../../adapters/storage/layout.js';
 import { appendMessage } from '../../domain/session/messages.js';
 import { createRoom } from '../../domain/session/rooms.js';
-import { createSession } from '../../domain/session/sessions.js';
+import { createSession, readSession } from '../../domain/session/sessions.js';
 import { registerRoomRoutes } from './rooms.js';
 import type { Message } from '@behindveil/shared';
 
@@ -186,6 +186,95 @@ describe('PUT /rooms/:roomId/active-session（FR-11 提案端点）', () => {
       payload: {},
     });
     expect(bad.statusCode).toBe(400);
+  });
+});
+
+describe('PATCH /rooms/:roomId/sessions/:sessionId/settings（T-M6-04 支撑端点）', () => {
+  it('改当前会话设置并写回 session.json；未传字段保持不变', async () => {
+    const room = await newRoom();
+    const session = await newSession(room.id);
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/rooms/${room.id}/sessions/${session.id}/settings`,
+      payload: { temperature: 1.2, maxHistoryMessages: 20 },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { id: string; settings: Record<string, unknown> };
+    expect(body.id).toBe(session.id);
+    expect(body.settings['temperature']).toBe(1.2);
+    expect(body.settings['maxHistoryMessages']).toBe(20);
+    expect(body.settings['scanDepth']).toBe(4); // 未传保持原值
+
+    // 真正落盘：下一次 LLM 调用读的就是这份设置
+    const persisted = await readSession(layout, room.id, session.id);
+    expect(persisted?.settings.temperature).toBe(1.2);
+    expect(persisted?.settings.maxHistoryMessages).toBe(20);
+  });
+
+  it('空对象 / 越界值 → 400（E-ROOM-01）', async () => {
+    const room = await newRoom();
+    const session = await newSession(room.id);
+    const url = `/rooms/${room.id}/sessions/${session.id}/settings`;
+
+    const empty = await app.inject({ method: 'PATCH', url, payload: {} });
+    expect(empty.statusCode).toBe(400);
+    expect(empty.json()).toMatchObject({ code: 'E-ROOM-01' });
+
+    expect(
+      (await app.inject({ method: 'PATCH', url, payload: { temperature: 3 } })).statusCode,
+    ).toBe(400);
+    expect(
+      (await app.inject({ method: 'PATCH', url, payload: { maxHistoryMessages: 0 } })).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: 'PATCH',
+          url,
+          payload: { contextWindowTokens: 1.5 },
+        })
+      ).statusCode,
+    ).toBe(400);
+  });
+
+  it('房间不存在 / 会话不存在 → 404（E-ROOM-01）', async () => {
+    const room = await newRoom();
+    expect(
+      (
+        await app.inject({
+          method: 'PATCH',
+          url: `/rooms/room_nope/sessions/s_missing/settings`,
+          payload: { temperature: 0.5 },
+        })
+      ).statusCode,
+    ).toBe(404);
+
+    const missing = await app.inject({
+      method: 'PATCH',
+      url: `/rooms/${room.id}/sessions/s_missing/settings`,
+      payload: { temperature: 0.5 },
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toMatchObject({ code: 'E-ROOM-01', message: '会话不存在' });
+  });
+
+  it('管理面令牌启用后同口径受保护', async () => {
+    const room = await newRoom();
+    const session = await newSession(room.id);
+    const url = `/rooms/${room.id}/sessions/${session.id}/settings`;
+
+    expect(
+      (await secured.inject({ method: 'PATCH', url, payload: { temperature: 0.9 } })).statusCode,
+    ).toBe(401);
+    const ok = await secured.inject({
+      method: 'PATCH',
+      url,
+      payload: { temperature: 0.9 },
+      headers: { 'x-admin-token': ADMIN_TOKEN },
+    });
+    expect(ok.statusCode).toBe(200);
   });
 });
 

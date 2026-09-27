@@ -4,12 +4,26 @@ import { useSessionStore } from '../stores/session';
 import { parseDiceInput } from '../dice-input.js';
 import type { Message } from '@behindveil/shared';
 import MessageCard from '../components/MessageCard.vue';
+import KpConsole from '../components/KpConsole.vue';
+import StateBoardPanel from '../components/StateBoardPanel.vue';
+import CardImportPanel from '../components/CardImportPanel.vue';
 
 const store = useSessionStore();
 const draft = ref('');
 const mode = ref<'ic' | 'ooc'>('ic');
 const moduleId = ref('');
 const listEl = ref<HTMLElement | null>(null);
+
+/** 右栏标签（tokens.css：--bv-rail-right 角色 / 手记 / KP 控制台 / 状态板 / 卡库） */
+type RailTab = 'roster' | 'notes' | 'kp' | 'board' | 'cards';
+const railTab = ref<RailTab>('board');
+const railTabs: Array<{ key: RailTab; label: string }> = [
+  { key: 'board', label: '状态板' },
+  { key: 'roster', label: '角色' },
+  { key: 'notes', label: '手记' },
+  { key: 'kp', label: 'KP 控制台' },
+  { key: 'cards', label: '卡库' },
+];
 
 const canSend = computed(() => store.role !== 'observer' && store.activeSessionId !== null);
 
@@ -212,60 +226,85 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
       </section>
 
       <aside class="bv-room__rail bv-room__rail--right">
-        <h2 class="bv-room__rail-title">KP 控制台</h2>
-        <template v-if="store.role === 'host'">
+        <nav class="bv-room__tabs" role="tablist">
           <button
-            class="bv-room__send bv-room__preview-btn"
-            :disabled="!store.activeSessionId || store.previewLoading"
-            @click="store.requestPreview()"
+            v-for="tab in railTabs"
+            :key="tab.key"
+            class="bv-room__tab"
+            :class="{ 'bv-room__tab--active': railTab === tab.key }"
+            type="button"
+            role="tab"
+            :aria-selected="railTab === tab.key"
+            @click="railTab = tab.key"
           >
-            {{ store.previewLoading ? '生成中…' : '生成 Prompt 预览' }}
+            {{ tab.label }}
           </button>
+        </nav>
 
-          <p v-if="!store.preview && !store.previewLoading" class="bv-room__rail-hint">
-            开团后可预览每次 AI 请求的 prompt 组装（各阶段 token、世界书命中、最终 messages）。
-          </p>
+        <StateBoardPanel v-if="railTab === 'board'" />
+        <CardImportPanel v-else-if="railTab === 'cards'" />
+        <template v-else-if="railTab === 'kp'">
+          <template v-if="store.role === 'host'">
+            <button
+              class="bv-room__send bv-room__preview-btn"
+              :disabled="!store.activeSessionId || store.previewLoading"
+              @click="store.requestPreview()"
+            >
+              {{ store.previewLoading ? '生成中…' : '生成 Prompt 预览' }}
+            </button>
 
-          <div v-if="store.preview" class="bv-room__preview">
-            <h3 class="bv-room__preview-title">各阶段 token</h3>
-            <ul class="bv-room__preview-list">
-              <li v-for="s in store.preview.stages" :key="s.name">
-                <span>{{ s.name }}</span>
-                <span>{{ s.tokenCount }}</span>
-              </li>
-            </ul>
-
-            <h3 class="bv-room__preview-title">世界书命中</h3>
-            <p v-if="scanDetail.hits.length === 0" class="bv-room__rail-hint">无命中条目</p>
-            <ul v-else class="bv-room__preview-list">
-              <li v-for="h in scanDetail.hits" :key="h.uid">{{ hitLabel(h) }}</li>
-            </ul>
-
-            <h3 class="bv-room__preview-title">预算裁剪</h3>
-            <p class="bv-room__rail-hint">
-              装入 {{ budgetDetail.includedUids.length }} 条 · 被裁
-              {{ budgetDetail.droppedUids.length }} 条（{{
-                budgetDetail.droppedUids.map((u) => `#${u}`).join('、') || '无'
-              }}）
+            <p v-if="!store.preview && !store.previewLoading" class="bv-room__rail-hint">
+              开团后可预览每次 AI 请求的 prompt 组装（各阶段 token、世界书命中、最终 messages）。
             </p>
 
-            <h3 class="bv-room__preview-title">硬顶校验</h3>
-            <p class="bv-room__rail-hint">
-              总 {{ validateDetail.totalTokens }} token
-              <template v-if="validateDetail.hardCap !== null"
-                >/ 硬顶 {{ validateDetail.hardCap }}</template
+            <div v-if="store.preview" class="bv-room__preview">
+              <h3 class="bv-room__preview-title">各阶段 token</h3>
+              <ul class="bv-room__preview-list">
+                <li v-for="s in store.preview.stages" :key="s.name">
+                  <span>{{ s.name }}</span>
+                  <span>{{ s.tokenCount }}</span>
+                </li>
+              </ul>
+
+              <h3 class="bv-room__preview-title">世界书命中</h3>
+              <p v-if="scanDetail.hits.length === 0" class="bv-room__rail-hint">无命中条目</p>
+              <ul v-else class="bv-room__preview-list">
+                <li v-for="h in scanDetail.hits" :key="h.uid">{{ hitLabel(h) }}</li>
+              </ul>
+
+              <h3 class="bv-room__preview-title">预算裁剪</h3>
+              <p class="bv-room__rail-hint">
+                装入 {{ budgetDetail.includedUids.length }} 条 · 被裁
+                {{ budgetDetail.droppedUids.length }} 条（{{
+                  budgetDetail.droppedUids.map((u) => `#${u}`).join('、') || '无'
+                }}）
+              </p>
+
+              <h3 class="bv-room__preview-title">硬顶校验</h3>
+              <p class="bv-room__rail-hint">
+                总 {{ validateDetail.totalTokens }} token
+                <template v-if="validateDetail.hardCap !== null"
+                  >/ 硬顶 {{ validateDetail.hardCap }}</template
+                >
+                <span v-if="validateDetail.overBudget" class="bv-room__preview-over">· 超限</span>
+              </p>
+
+              <h3 class="bv-room__preview-title">最终 messages</h3>
+              <details
+                v-for="m in store.preview.messages"
+                :key="m.role"
+                class="bv-room__preview-msg"
               >
-              <span v-if="validateDetail.overBudget" class="bv-room__preview-over">· 超限</span>
-            </p>
-
-            <h3 class="bv-room__preview-title">最终 messages</h3>
-            <details v-for="m in store.preview.messages" :key="m.role" class="bv-room__preview-msg">
-              <summary>{{ m.role }}（{{ m.content.length }} 字）</summary>
-              <pre>{{ m.content }}</pre>
-            </details>
-          </div>
+                <summary>{{ m.role }}（{{ m.content.length }} 字）</summary>
+                <pre>{{ m.content }}</pre>
+              </details>
+            </div>
+          </template>
+          <p v-else class="bv-room__rail-hint">KP 控制台仅 Host 可见。</p>
         </template>
-        <p v-else class="bv-room__rail-hint">状态板 / KP 控制台仅 Host 可见。</p>
+        <p v-else class="bv-room__rail-hint">
+          {{ railTabs.find((t) => t.key === railTab)?.label }}（建设中）
+        </p>
       </aside>
     </div>
   </main>
@@ -320,6 +359,27 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
   font-size: 12px;
   color: var(--bv-text-tertiary);
   letter-spacing: 0.1em;
+}
+.bv-room__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--bv-space-1);
+  margin-bottom: var(--bv-space-3);
+}
+.bv-room__tab {
+  padding: var(--bv-space-1) var(--bv-space-2);
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: var(--bv-radius-card);
+  background: transparent;
+  color: var(--bv-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.bv-room__tab--active {
+  background: var(--bv-bg-elevated);
+  color: var(--bv-text-primary);
+  border-color: var(--bv-line-strong);
 }
 .bv-room__members {
   margin: 0;

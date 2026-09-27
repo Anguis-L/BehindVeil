@@ -7,6 +7,7 @@ import {
   isClientEvent,
   type ClientEventName,
   type ErrorCode,
+  type KpMetricsPayload,
   type KpPreviewPromptPayload,
   type Member,
   type MemberRole,
@@ -35,8 +36,9 @@ import { loadModule } from '../domain/module/library.js';
 import { appendMessage, readMessagesAfter } from '../domain/session/messages.js';
 import { addMember, readMembers } from '../domain/session/members.js';
 import { findByInviteCode, readRoomFile } from '../domain/session/rooms.js';
-import { createSession } from '../domain/session/sessions.js';
+import { createSession, readSession } from '../domain/session/sessions.js';
 import { buildPreviewTrace } from '../observability/preview.js';
+import { MetricsCollector } from '../observability/metrics.js';
 import type {
   DiceRollPayload,
   MsgSendPayload,
@@ -65,6 +67,9 @@ import type {
  *   状态板内存态按会话懒加载，检定名册（T-M5-04）同步读内存板。
  * - 快照机制（T-M5-07，SDD §5.4）：state:snapshot（Host）→ SnapshotMsg 入流
  *   （WAP 落盘 + 全房广播）；每 N=20 条消息追加提醒 notice，由 Host 确认生成。
+ * - 指标埋点（T-M6-03/05，FR-13 / R-01 / R-02，TDD §9）：LLM 调用（耗时 / usage / 失败）
+ *   与掷骰（总数 / 暗骰）记入进程内收集器；`kp:metrics`（Host）回本会话实时指标
+ *   ——前端不带管理令牌，拿不到 `GET /metrics`，房内只能走这条。
  */
 
 const MSG_RATE_LIMIT = 10;
@@ -84,6 +89,11 @@ export interface GatewayDeps {
   llm?: LlmAdapter;
   /** ChatRequest 参数（model/maxTokens 来自 config，temperature 装配侧定） */
   chat?: { model: string; temperature: number; maxTokens: number };
+  /**
+   * 进程内指标收集器（T-M6-03）：装配根传入以与 `GET /metrics` 共用同一实例；
+   * 缺省时网关自建一个（房内 `kp:metrics` 仍可用，只是不进全局端点）。
+   */
+  metrics?: MetricsCollector;
 }
 
 export interface GatewayHandle {
@@ -164,6 +174,8 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   /** 骰子审计流水（T-M4-01）：所有掷骰先落审计再广播 */
   const auditor = createDiceAuditor(layout);
   const random = createCsprngRandom();
+  /** 指标收集器（T-M6-03）：与装配根共用实例，缺省自建（见 GatewayDeps.metrics） */
+  const metrics = deps.metrics ?? new MetricsCollector();
 
   app.addHook('onClose', async () => {
     io.disconnectSockets(true);
@@ -228,6 +240,9 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
         return;
       case 'kp:previewPrompt':
         await handlePreviewPrompt(socket, payload as KpPreviewPromptPayload);
+        return;
+      case 'kp:metrics':
+        await handleMetrics(socket, payload as KpMetricsPayload);
         return;
       case 'ai:invoke':
         await handleAiInvoke(socket);
@@ -604,6 +619,8 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     roll: ParsedRoll,
     meta: { hidden: boolean; senderId?: string },
   ): Promise<RollResult> {
+    // 指标埋点（T-M6-03）：玩家骰与 AI 检定骰共用本入口，一次记全（暗骰单独计数）
+    metrics.recordDice(sessionId, meta.hidden);
     const audit = await auditor.record({
       roomId,
       sessionId,
@@ -775,13 +792,38 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   }
 
   /**
+   * LLM 埋点包装（T-M6-03，R-02 / TDD §9）：在原适配器外套一层，按会话记录
+   * 调用耗时、usage 的输入输出 token 与失败次数。失败同样记耗时——用户体感到的
+   * 等待真实发生了；失败不记 token（provider 没回 usage）。
+   *
+   * 为什么不改 loop.ts：埋点是网关关切，领域层保持纯编排；包一层即可覆盖
+   * 一个回合内的全部续写请求，不改 runAiTurn 的端口契约。
+   */
+  function instrumentLlm(inner: LlmAdapter, sessionId: string): LlmAdapter {
+    return {
+      id: inner.id,
+      async chat(req, onDelta) {
+        const startedAt = Date.now();
+        try {
+          const response = await inner.chat(req, onDelta);
+          metrics.recordLlmCall(sessionId, Date.now() - startedAt, response.usage);
+          return response;
+        } catch (err) {
+          metrics.recordLlmFailure(sessionId, Date.now() - startedAt);
+          throw err;
+        }
+      },
+    };
+  }
+
+  /**
    * 排程一个 AI 回合（T-M3-06，D-07）：进入房间级 AI 串行队列；回合完成后开启新「轮」。
    * 触发源：玩家 IC 消息（triggerSeq=该消息 seq）或 ai:invoke（triggerSeq=当前 lastSeq）。
    */
   function scheduleAiTurn(roomId: string, sessionId: string, triggerSeq: number): void {
     if (!deps.llm || !deps.chat) return;
     const llm = deps.llm;
-    const chat = deps.chat;
+    const baseChat = deps.chat;
     void enqueueAi(roomId, async () => {
       const tracker = trackers.get(sessionId) ?? new DirectiveSuccessTracker();
       trackers.set(sessionId, tracker);
@@ -789,8 +831,14 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
         // 预热状态板懒加载（T-M5-04）：AI 回合可能先于任何 state:update 发生，
         // 不预热则名册查无 PC，检定全落 E-AI-01。读盘走 JsonStore 文件锁，无竞态损坏。
         await boardFor(roomId, sessionId);
+        // 会话级设置优先（T-M6-04）：temperature 取当前会话设置——KP 控制台改完
+        // 下一次调用即生效；会话读不到时回退装配常量（缺省 0.7）。
+        const session = await readSession(layout, roomId, sessionId);
+        const chat = session
+          ? { ...baseChat, temperature: session.settings.temperature }
+          : baseChat;
         await runAiTurn(triggerSeq, {
-          llm,
+          llm: instrumentLlm(llm, sessionId),
           chat,
           // 真实名册（T-M5-04）：按本会话状态板取技能值（含 roster 声明装配的初始板）
           roster: createStateBoardRoster(stateBoards.get(sessionId)),
@@ -909,6 +957,45 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       seq: data.seq,
     });
     emitChecked(socket, 'kp:promptPreview', { pipeline: trace });
+  }
+
+  /**
+   * 房内实时指标（T-M6-03/05，FR-13 / R-01 / R-02）：host only，会话级口径，
+   * 定向回请求 socket（不广播——其他成员不该看到本团的 token/成本与暗骰计数）。
+   *
+   * 为什么房内要再开一条：`GET /metrics` 走管理面令牌，前端不带 X-Admin-Token，
+   * 且它给的是全局数、不带会话维度。控制台要的是「本会话现在烧了多少钱」。
+   * 指令成功率直接取本会话 tracker（R-01 唯一口径，不另起一套统计）。
+   */
+  async function handleMetrics(socket: Socket, data: KpMetricsPayload): Promise<void> {
+    const me = presence.get(socket.id);
+    if (!me) {
+      emitError(socket, 'E-ROOM-01', '尚未加入房间');
+      return;
+    }
+    if (me.role !== 'host') {
+      emitError(socket, 'E-ROOM-01', '仅 Host 可查看实时指标');
+      return;
+    }
+    const room = await readRoomFile(layout, me.roomId);
+    const sessionId = data.sessionId ?? room?.activeSessionId;
+    if (!sessionId) {
+      emitError(socket, 'E-ROOM-01', '尚未开团，暂无指标可看');
+      return;
+    }
+    // 显式指定会话时必须属于本房：房内事件不得跨房读指标（只比默认路径多一次读盘）
+    if (
+      data.sessionId !== undefined &&
+      (await readSession(layout, me.roomId, sessionId)) === null
+    ) {
+      emitError(socket, 'E-ROOM-01', '会话不存在');
+      return;
+    }
+    const tracker = trackers.get(sessionId);
+    const directives = tracker
+      ? { attempts: tracker.totals.attempts, successes: tracker.totals.successes }
+      : { attempts: 0, successes: 0 };
+    emitChecked(socket, 'kp:metricsResult', metrics.sessionSnapshot(sessionId, directives));
   }
 
   async function handleDisconnect(socket: Socket): Promise<void> {

@@ -10,7 +10,12 @@ import {
   toPublicRoom,
   updateRoomSettings,
 } from '../../domain/session/rooms.js';
-import { listSessions, endSession, setActiveSession } from '../../domain/session/sessions.js';
+import {
+  listSessions,
+  endSession,
+  setActiveSession,
+  updateSessionSettings,
+} from '../../domain/session/sessions.js';
 import { readMessagesPage } from '../../domain/session/messages.js';
 import { readStateBoard } from '../../domain/stateboard/board.js';
 
@@ -50,6 +55,25 @@ const SettingsPatchSchema = z.object({
 });
 
 const ActiveSessionSchema = z.object({ sessionId: z.string().min(1) });
+
+/**
+ * 会话运行时设置局部更新（T-M6-04 支撑端点，FR-13）。
+ *
+ * 与上面的 RoomSettingsPatch（defaultSessionSettings）不是一个东西：
+ * 那个改房间默认、只影响之后新建的会话；这个改**当前会话**并写回 session.json，
+ * 下一次 LLM 调用就用新值。全字段可选，但至少要给一项（空对象 → 400）。
+ */
+const SessionSettingsPatchSchema = z
+  .object({
+    temperature: z.number().min(0).max(2),
+    maxHistoryMessages: z.number().int().positive(),
+    worldBookBudgetTokens: z.number().int().nonnegative(),
+    scanDepth: z.number().int().positive(),
+    contextWindowTokens: z.number().int().positive(),
+    outputReserveTokens: z.number().int().positive(),
+  })
+  .partial()
+  .refine((patch) => Object.keys(patch).length > 0, { message: '至少提供一项设置' });
 
 function firstIssueMessage(error: z.ZodError): string {
   const issue = error.issues[0];
@@ -189,6 +213,27 @@ export function registerRoomRoutes(app: FastifyInstance, deps: RestDeps): void {
       const session = await endSession(layout, roomId, sessionId);
       if (!session) return reply.code(404).send({ code: 'E-ROOM-01', message: '会话不存在' });
       return session;
+    },
+  );
+
+  /**
+   * 会话运行时设置（T-M6-04 支撑端点，FR-13）：改当前会话、写回 session.json，
+   * 与 PATCH /rooms/:roomId/settings（房间默认、只影响新建会话）分工不同。
+   */
+  app.patch(
+    '/rooms/:roomId/sessions/:sessionId/settings',
+    { preHandler: requireAdmin },
+    async (req, reply) => {
+      const { roomId, sessionId } = req.params as { roomId: string; sessionId: string };
+      const parsed = SessionSettingsPatchSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send({ code: 'E-ROOM-01', message: firstIssueMessage(parsed.error) });
+      }
+      const updated = await updateSessionSettings(layout, roomId, sessionId, parsed.data);
+      if (!updated) return reply.code(404).send({ code: 'E-ROOM-01', message: '会话不存在' });
+      return updated;
     },
   );
 
