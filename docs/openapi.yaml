@@ -3,41 +3,55 @@ openapi: 3.1.0
 # =============================================================================
 # BehindVeil · 管理面 REST API 契约（OpenAPI 3.1）
 #
-# 生成依据（单一事实来源）：
-#   - packages/shared/src/*.ts      Zod Schema（domain.ts / message.ts / dice.ts / errors.ts）
-#   - packages/server/src/index.ts  已实现路由（M0）
-#   - 00.development/AI_KP_TDD_技术设计文档_v1.md §3 数据模型 / §4 通信协议 / §8 安全 / §11 错误码
-#   - 00.development/AI_KP_施工文档_v1.md  决议 D-03（管理面走 REST）、T-M1-02 / T-M5-09 / T-M5-05
+# 单一事实来源（本文件随代码回写，勿凭空改）：
+#   - packages/server/src/gateway/http/rooms.ts   路由实现与 Zod 校验
+#   - packages/shared/src/{domain,message,dice,errors}.ts   Schema 与错误码
+#   - packages/server/src/config.ts                AIDLE_ADMIN_TOKEN 门禁
+#   - 00.development/AI_KP_TDD_技术设计文档_v1.md §3/§4/§8/§11
+#   - 00.development/AI_KP_施工文档_v1.md 决议 D-02/D-03/D-09/D-10
 #
-# 状态标注（x-status）说明——本文件是"契约先行"产物，不等于已实现：
-#   implemented = 代码里已存在（当前仅 /healthz）
-#   planned     = 设计文档已明确要求，路径/语义来自文档，尚未开工
-#   proposed    = 设计文档只说了"走 REST"但没定路径/字段，此处为补全提案，待拍板
+# 状态标注（x-status）：
+#   implemented = 代码已实现（M1 管理面已落地）
+#   proposed    = 设计文档只说"走 REST"、路径与字段为提案，代码未开工（M5 卡库/模组）
 #
 # 房内实时交互（消息、掷骰、AI 叙事、状态板）不走 REST，走 Socket.IO，
 # 见同目录 socketio-asyncapi.yaml。
+#
+# 最近一次回写：2026-09-25（M1 管理面落地 + 四项开放问题拍板）
 # =============================================================================
 
 info:
   title: BehindVeil 管理面 API
   version: 0.0.0
-  summary: 自托管 TRPG 平台的房间/会话/卡库/模组管理接口
+  summary: 自托管 TRPG 平台的房间/会话/历史消息管理接口
   description: |
     BehindVeil 是一个自托管的多人在线文字跑团平台：AI 扮演守秘人（KP）负责叙事，
     **服务端用 CSPRNG 掷骰并按规则书判定**——叙事交给 LLM，规则交给代码。
 
-    本文件只描述**管理面 HTTP REST**（建房、房间列表、重置邀请码、房间配置、卡库、模组）。
-    房内实时交互走 Socket.IO，见 `socketio-asyncapi.yaml`。
+    本文件只描述**管理面 HTTP REST**：建房、房间列表、邀请码重置、房间配置、
+    会话查询与切换、历史消息拉取。房内实时交互走 Socket.IO，见 `socketio-asyncapi.yaml`。
 
-    ## 实现状态（重要）
+    ## 实现状态
 
-    项目当前处于 M0 里程碑，**只有 `GET /healthz` 真实存在**。
-    其余接口是按设计文档（TDD §4 + 施工文档决议 D-03）先行固化的契约，用于前后端并行开发，
-    标注见每个操作的 `x-status`。接口行为以代码落地为准，落地后请回写本文件。
+    M1 已落地，**房间 / 会话 / 历史消息这一组接口全部可用**（标注 implemented）。
+    卡库（`/cards`）与模组（`/modules`）属 M5，仍是提案（proposed）。
+
+    ## 鉴权：X-Admin-Token（可选门禁）
+
+    服务端启动时读环境变量 `AIDLE_ADMIN_TOKEN`：
+
+    - **未设置**（默认，零配置）：管理接口全部放行，靠网络边界保护
+      （只监听 127.0.0.1，或反代 + TLS + IP 白名单）。
+    - **已设置**：除 `/healthz` 外的**全部**管理接口必须带 `X-Admin-Token` 头，
+      缺失或不一致 → `401`，载荷 `{ code: 'E-ROOM-01', message: '管理面需要 X-Admin-Token 令牌' }`。
+
+    ⚠️ **浏览器前端不会带这个头**（`packages/web` 只调 `GET /rooms/{id}` 与
+    `GET /rooms/{id}/messages`）。所以一旦设置该令牌，网页端这两个只读请求会被 401 挡掉。
+    它是给运维脚本 / curl 用的开关，不是给浏览器用的登录态。
 
     ## 错误模型
 
-    业务错误统一使用 `AppError` 载荷（错误码表见 TDD §11）：
+    业务错误统一 `AppError` 载荷（错误码表见 TDD §11 + 2026-09-25 拍板新增两码）：
 
     | 错误码 | 场景 | 用户侧提示 |
     |---|---|---|
@@ -46,26 +60,23 @@ info:
     | E-DICE-01 | 骰式非法 | 骰式无法解析 |
     | E-AI-01 | AI 指令解析失败 | （玩家无感，KP 端告警） |
     | E-ST-01 | 状态板版本冲突 | 数据已更新，请刷新 |
-    | E-ROOM-01 | 邀请码无效/满员 | 邀请码无效或房间已满 |
-    | E-MOD-01 | 模组卸载冲突（D-09，2026-09-25 拍板新增） | 模组使用中，无法卸载 |
-    | E-SRV-01 | 服务端持久化/内部错误（2026-09-25 拍板新增；Socket 网关 dispatch 失败，如写盘失败——TC-FR-02-001 故障变体：失败消息不广播并回业务错误） | 服务器开小差了，请稍后重试 |
+    | E-ROOM-01 | 邀请码无效/满员、房间或会话不存在、请求体非法、管理面未授权 | 见各接口 |
+    | E-MOD-01 | 模组卸载冲突（D-09） | 模组使用中，无法卸载 |
+    | E-SRV-01 | 服务端持久化/内部错误 | 服务器开小差了，请稍后重试 |
 
-    框架级未捕获异常走 `INTERNAL`（HTTP ≥ 500 时不回传原始 message，防止 key 泄露，NFR-03）。
+    请求体非法（400）的 `message` 取 Zod 首个 issue，格式 `字段路径: 原因`，
+    例如 `name: 字数不得少于 1`。
+    框架级未捕获异常走 `INTERNAL`（HTTP ≥ 500 不回传原始 message，防 key 泄露，NFR-03）。
 
-    ## 鉴权现状与开放问题
+    ## 2026-09-25 已拍板的四项决策（原开放问题，已落地）
 
-    v1 定位为单进程自托管（2C2G 小主机 / 树莓派 / Tailscale 组网），
-    设计文档**没有**为管理面 REST 定义账号体系或令牌机制。当前假设：
-    管理面靠网络边界保护（只监听 127.0.0.1，或反代 + TLS + IP 白名单）。
-
-    四项已于 2026-09-25 拍板并落地（详见 00.development/notes/M0-测试契约约定.md §8）：
-    1. Host 身份（决议 ①）：POST /rooms 响应携带 hostToken，建房者进房（room:join）时
-       出示即成为 Host；hostToken 只随建房响应发放一次，任何其他响应不得回带。
-    2. 管理面门禁（决议 ②）：环境变量 AIDLE_ADMIN_TOKEN 设置后，除 /healthz 外的
-       管理接口必须携带 `X-Admin-Token` 头（缺失/错误 → 401）；未设置则不启用（零配置）。
-    3. 模组卸载冲突（决议 ③）：新增错误码 E-MOD-01（错误码表第 7 码，M5 消费）。
-    4. 历史消息（决议 ④）：走 REST（GET /rooms/{roomId}/messages）；Socket 补发只管
-       断线重连的缺口，两者互补。
+    1. **Host 身份**：建房响应**一次性**下发 `hostToken`；进房时 `room:join` 携带它即被认定为 Host。
+       `hostToken` 是服务端机密（`room.json` 内存），**除建房响应外任何响应与广播都不回带**
+       （`toPublicRoom` 强制剥离）。Host 重连同样必须出示，防凭 `memberId` 冒领。
+    2. **管理面鉴权**：`AIDLE_ADMIN_TOKEN` + `X-Admin-Token` 头，不设置则不启用（见上）。
+    3. **模组卸载冲突**：新增错误码 `E-MOD-01`（"模组使用中，无法卸载"）。
+    4. **历史消息通道**：走 REST（`GET /rooms/{roomId}/messages`）；
+       Socket 只补断线期间的缺口（`room:join` 的 `lastSeq`）。
   contact:
     name: BehindVeil
   license:
@@ -87,10 +98,13 @@ tags:
   - name: 系统
     description: 健康检查与存活探测
   - name: 房间
-    description: 建房 / 列表 / 邀请码 / 配置（T-M1-02，决议 D-03）
+    description: 建房 / 列表 / 详情 / 邀请码 / 配置（T-M1-02，决议 D-03）
     x-milestone: M1
   - name: 会话
-    description: 一房多会话（连载团）查询（T-M1-07）
+    description: 一房多会话（连载团）查询、结束与切换（T-M1-07，FR-11）
+    x-milestone: M1
+  - name: 历史消息
+    description: 进房拉历史与向前翻页（T-M1-09，决议 ④）
     x-milestone: M1
   - name: 卡库
     description: chara_card_v3 角色卡导入导出（T-M5-09，FR-08）
@@ -98,11 +112,14 @@ tags:
   - name: 模组
     description: 模组包加载 / 卸载（T-M5-05，FR-10，决议 D-09）
     x-milestone: M5
+  - name: 可观测
+    description: 进程内指标（T-M6-03，FR-13 / R-01 / R-02，TDD §9）
+    x-milestone: M6
 
 x-extension-vocabulary:
-  x-status: implemented | planned | proposed
+  x-status: implemented | proposed
   x-milestone: '对应里程碑 M0–M6'
-  x-source: 设计文档出处（任务卡 ID 或 TDD 章节）
+  x-source: 代码路径或设计文档任务卡 ID
 
 paths:
   /healthz:
@@ -112,7 +129,8 @@ paths:
       summary: 健康检查
       description: |
         返回服务存活状态、服务名与协议版本。
-        **不依赖** 存储恢复与 LLM 配置，仅表示 HTTP 层可响应。
+        不依赖存储恢复与 LLM 配置，仅表示 HTTP 层可响应。
+        **唯一不参与管理面门禁的接口**。
       x-status: implemented
       x-milestone: M0
       x-source: packages/server/src/index.ts
@@ -132,20 +150,70 @@ paths:
                     name: BehindVeil-server
                     protocol: 0.0.0
 
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags: [可观测]
+      summary: 进程内全局指标
+      description: |
+        FR-13 / R-01 / R-02，TDD §9「指标」一行的落地：返回**进程内累计**的四类指标
+        ——运行秒数、指令解析成功率、骰子总数、LLM 调用（次数 / 失败 / 输入输出 token /
+        延迟分布 p50·p95·max·avg）。
+
+        几点口径要说明：
+
+        - **全局口径，不区分房间**；要看单个会话的实时数（含成本估算）走
+          Socket 事件 `kp:metrics`（见 `socketio-asyncapi.yaml`）——前端不带管理令牌，
+          拿不到本端点。
+        - 指令成功率的分母口径同测试文档 §12.4：成功 + 解析失败 + 白名单拒绝，
+          **截断块不计**；一次尝试都没有时 `rate = 1`（尚无失败证据，不误报）。
+        - 全部来自内存，**不读盘**（指标旁路不能拖慢跑团主链路）；进程重启即清零。
+        - 延迟分布只取最近 200 次调用（长团内存不随轮次增长），累计计数不受影响。
+      x-status: implemented
+      x-milestone: M6
+      x-source: 'packages/server/src/gateway/http/metrics.ts（T-M6-03）'
+      security:
+        - adminToken: []
+      responses:
+        '200':
+          description: 全局指标快照
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Metrics'
+              examples:
+                running:
+                  value:
+                    uptimeSec: 7345
+                    directives: { attempts: 128, successes: 124, rate: 0.96875 }
+                    dice: { total: 96, hidden: 12 }
+                    llm:
+                      calls: 132
+                      failures: 1
+                      tokensIn: 792000
+                      tokensOut: 128000
+                      latencyMs: { p50: 1180, p95: 3420, max: 9100, avg: 1462.5 }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+
   /rooms:
     post:
       operationId: createRoom
       tags: [房间]
       summary: 创建房间（建房者即 Host）
       description: |
-        创建一个房间并返回 6 位邀请码。建房者即 Host，**v1 不可转让**（决议 D-02）。
+        创建房间，返回房间对象 **外加一次性 `hostToken`**。
 
-        决议 ①（已拍板）：本响应携带 hostToken，建房者进房（room:join）时出示即成为
-        Host（D-02：建房者即 Host，v1 不可转让）。hostToken 只随本响应发放一次，
-        任何其他接口不得返回。
-      x-status: planned
+        这是**唯一**会回带 `hostToken` 的接口（决议 ①）——建房者凭它在 `room:join` 时
+        被认定为 Host。请妥善保存：后续任何接口都不再返回它，丢了只能重建房间
+        （v1 Host 不可转让，决议 D-02）。
+      x-status: implemented
       x-milestone: M1
-      x-source: T-M1-02 / FR-01 / D-02
+      x-source: packages/server/src/gateway/http/rooms.ts
+      security:
+        - adminToken: []
       requestBody:
         required: true
         content:
@@ -153,7 +221,7 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateRoomRequest'
             examples:
-              default:
+              minimal:
                 summary: 最小建房
                 value:
                   name: 疯狂山脉·第一夜
@@ -169,13 +237,15 @@ paths:
                     maxHistoryMessages: 40
                     worldBookBudgetTokens: 2000
                     scanDepth: 4
+                    contextWindowTokens: 32768
+                    outputReserveTokens: 2048
       responses:
         '201':
-          description: 创建成功（Room + hostToken）
+          description: 创建成功（含一次性 hostToken）
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RoomCreated'
+                $ref: '#/components/schemas/RoomWithHostToken'
               examples:
                 created:
                   value:
@@ -185,8 +255,11 @@ paths:
                     inviteCode: A7K2Q9
                     activeSessionId: null
                     memberLimit: 6
+                    hostToken: ht_9f2c1a7b3e5d
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/Internal'
 
@@ -195,12 +268,13 @@ paths:
       tags: [房间]
       summary: 房间列表
       description: |
-        列出本机全部房间（自托管单机，无分页与租户隔离）。
-        供自建部署的"房间选择页"使用；`inviteCode` 属于敏感信息（等同房间钥匙）。
-        拍板：管理面有门禁（决议 ②），能过门禁者即管理员，列表按返回邀请码处理。
-      x-status: planned
+        列出本机 `data/rooms/` 下全部房间（自托管单机，无分页与租户隔离）。
+        返回的是**剥离 hostToken 后的公开房间对象**；损坏或校验失败的房间文件跳过不列。
+      x-status: implemented
       x-milestone: M1
-      x-source: T-M1-02 / FR-01
+      x-source: packages/server/src/gateway/http/rooms.ts
+      security:
+        - adminToken: []
       responses:
         '200':
           description: 房间数组（无房间时为空数组）
@@ -225,6 +299,8 @@ paths:
                       inviteCode: 4BQXZT
                       activeSessionId: null
                       memberLimit: 8
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/Internal'
 
@@ -236,18 +312,62 @@ paths:
       tags: [房间]
       summary: 查询单个房间
       description: |
-        设计文档未列出该路径，此处为补全提案（`GET /rooms` 已能取到全部字段）。
-        若前端需要"进房前校验房间是否存在/是否满员"，本接口比拉全量列表更合适。
+        房间不存在或 room.json 校验失败 → 404。
+        响应含邀请码，**属管理端点**（需 X-Admin-Token）。
+        前端要只读房间信息请改用 `/rooms/{roomId}/public`——它不给邀请码。
       x-status: implemented
       x-milestone: M1
-      x-source: 提案（TDD §3.1 Room），T-M1-02 已实现
+      x-source: packages/server/src/gateway/http/rooms.ts
+      security:
+        - adminToken: []
       responses:
         '200':
-          description: 房间详情
+          description: 房间详情（不含 hostToken）
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Room'
+              examples:
+                one:
+                  value:
+                    id: V1StGXR8_Z5j
+                    name: 疯狂山脉·第一夜
+                    createdAt: '2026-09-25T10:15:30.000Z'
+                    inviteCode: A7K2Q9
+                    activeSessionId: s_01J9Z8Y7X6
+                    memberLimit: 6
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/public:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    get:
+      operationId: getRoomPublic
+      tags: [房间]
+      summary: 玩家侧房间信息（免令牌）
+      description: |
+        2026-09-25 路由分离新增：只给 `id / name / memberLimit / activeSessionId`，
+        **不含邀请码与 hostToken**——前端刷新活跃会话走这里（`packages/web/src/stores/session.ts`）。
+
+        为什么单独开一个端点：管理端点 `GET /rooms/{roomId}` 的响应带邀请码，
+        设了 AIDLE_ADMIN_TOKEN 后前端（不携带该头）会 401。玩家端点免令牌，
+        同时把邀请码从响应里摘掉，避免「知道房间 ID 就能拿到邀请码进房」。
+      x-status: implemented
+      x-milestone: M5
+      x-source: packages/server/src/gateway/http/rooms.ts
+      security: []
+      responses:
+        '200':
+          description: 玩家可见的房间字段
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomPublic'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -261,13 +381,13 @@ paths:
       tags: [房间]
       summary: 重置邀请码
       description: |
-        生成新的 6 位邀请码并使旧码失效（TDD §8：房间入侵对策）。
-        已进房成员不受影响，仅影响后续加入。
-        鉴权：管理面门禁（决议 ②）；hostToken 不参与管理面鉴权（决议 ①，
-        仅用于 Socket 进房证明 Host 身份）。
+        生成新的 6 位邀请码并使旧码立即失效（TDD §8 房间入侵对策）。
+        已进房成员不受影响，只影响后续加入。
       x-status: implemented
       x-milestone: M1
-      x-source: T-M1-02 / TDD §8
+      x-source: packages/server/src/gateway/http/rooms.ts
+      security:
+        - adminToken: []
       responses:
         '200':
           description: 返回新邀请码
@@ -279,8 +399,8 @@ paths:
                 reset:
                   value:
                     inviteCode: 9ZP4RT
-        '403':
-          $ref: '#/components/responses/Forbidden'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -294,15 +414,16 @@ paths:
       tags: [房间]
       summary: 修改房间配置
       description: |
-        局部更新（未传字段保持不变），鉴权同管理面门禁（决议 ②）。
-        可改：房间名、成员上限、本房默认会话设置（provider / model / temperature /
-        历史裁剪窗 / 世界书预算 / 扫描深度）。
+        局部更新，未传字段保持不变。可改：房间名、成员上限、本房默认会话设置。
 
-        注意：`defaultSessionSettings` 只影响**之后新建**的会话，
-        不改写已存在 Session 的 settings（会话级设置随 Session 快照固化）。
+        `defaultSessionSettings` 只影响**之后新建**的会话，不改写已存在 Session 的
+        `settings`（会话级设置随 Session 快照固化）。缺省时由 `session:start` 显式给出。
+        返回更新后的完整房间对象。
       x-status: implemented
       x-milestone: M1
-      x-source: T-M1-02
+      x-source: packages/server/src/gateway/http/rooms.ts
+      security:
+        - adminToken: []
       requestBody:
         required: true
         content:
@@ -324,6 +445,8 @@ paths:
                     maxHistoryMessages: 40
                     worldBookBudgetTokens: 1200
                     scanDepth: 3
+                    contextWindowTokens: 32768
+                    outputReserveTokens: 2048
       responses:
         '200':
           description: 更新后的房间对象
@@ -333,8 +456,8 @@ paths:
                 $ref: '#/components/schemas/Room'
         '400':
           $ref: '#/components/responses/BadRequest'
-        '403':
-          $ref: '#/components/responses/Forbidden'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -348,11 +471,13 @@ paths:
       tags: [会话]
       summary: 列出房间的全部会话
       description: |
-        一房多会话（连载团，FR-11）。`activeSessionId` 指向当前活跃会话；
-        历史会话 `endedAt` 非空，消息流按 sessionId 隔离。
+        一房多会话（连载团，FR-11），按 `startedAt` 升序返回。
+        `endedAt` 为 null 的即活跃会话；房间 `activeSessionId` 指向唯一活跃会话。
       x-status: implemented
       x-milestone: M1
-      x-source: T-M1-07 / FR-11 / TDD §3.1
+      x-source: packages/server/src/gateway/http/rooms.ts
+      security:
+        - adminToken: []
       responses:
         '200':
           description: 会话数组
@@ -367,7 +492,7 @@ paths:
                   value:
                     - id: s_01J9Z8Y7X6
                       roomId: V1StGXR8_Z5j
-                      moduleRef: mountains-of-madness@1.0.0
+                      moduleRef: mountains-of-madness
                       startedAt: '2026-09-25T10:20:00.000Z'
                       endedAt: null
                       stateBoardVersion: 12
@@ -379,6 +504,10 @@ paths:
                         maxHistoryMessages: 40
                         worldBookBudgetTokens: 2000
                         scanDepth: 4
+                        contextWindowTokens: 32768
+                        outputReserveTokens: 2048
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -390,27 +519,218 @@ paths:
       - name: sessionId
         in: path
         required: true
+        description: 会话 ID
         schema:
           type: string
+        example: s_01J9Z8Y7X6
     post:
       operationId: endSession
       tags: [会话]
-      summary: 结束会话（提案回补）
+      summary: 结束会话
       description: |
-        T-M1-07：endedAt 落今；若为活跃会话则同时清空 activeSessionId。
-        openapi 初版未列出，随实现回补（提案端点）。
+        `endedAt` 落当前时间（已结束的会话重复调用不改写原时间）。
+        若它是当前活跃会话，同时把房间 `activeSessionId` 置空——
+        **结束后房内不能再发言**（`msg:send` 会回"尚未开团"），
+        需重新 `session:start` 或用 `PUT /rooms/{roomId}/active-session` 切回旧会话。
       x-status: implemented
       x-milestone: M1
-      x-source: T-M1-07 / FR-11
+      x-source: 'packages/server/src/gateway/http/rooms.ts（T-M1-07）'
+      security:
+        - adminToken: []
       responses:
         '200':
-          description: 结束后的会话
+          description: 结束后的会话对象
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Session'
+              examples:
+                ended:
+                  value:
+                    id: s_01J9Z8Y7X6
+                    roomId: V1StGXR8_Z5j
+                    moduleRef: mountains-of-madness
+                    startedAt: '2026-09-25T10:20:00.000Z'
+                    endedAt: '2026-09-25T23:10:00.000Z'
+                    stateBoardVersion: 12
+                    synopsis: 考察队在南极营地发现异常冰层样本…
+                    settings:
+                      provider: openai-compat
+                      model: deepseek-chat
+                      temperature: 0.8
+                      maxHistoryMessages: 40
+                      worldBookBudgetTokens: 2000
+                      scanDepth: 4
+                      contextWindowTokens: 32768
+                      outputReserveTokens: 2048
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
-          $ref: '#/components/responses/NotFound'
+          description: 会话不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                missing:
+                  value:
+                    code: E-ROOM-01
+                    message: 会话不存在
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/sessions/{sessionId}/settings:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+      - name: sessionId
+        in: path
+        required: true
+        description: 会话 ID
+        schema:
+          type: string
+        example: s_01J9Z8Y7X6
+    patch:
+      operationId: updateSessionSettings
+      tags: [会话]
+      summary: 修改当前会话的运行时设置
+      description: |
+        T-M6-04 的支撑端点（FR-13）：改的是**当前会话**的 `settings` 并写回
+        `session.json`，下一次 LLM 调用即生效（temperature 取会话设置、管线预算同读本字段）。
+
+        与 `PATCH /rooms/{roomId}/settings` 的分工要分清：那个改的是房间
+        `defaultSessionSettings`，**只影响之后新建的会话**；这个改当前会话，
+        不动房间默认值，也不影响同房其他会话。
+
+        全字段可选，但至少要给一项——空对象 → 400。返回更新后的完整 Session 对象。
+      x-status: implemented
+      x-milestone: M6
+      x-source: 'packages/server/src/gateway/http/rooms.ts（T-M6-04）'
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionSettingsPatch'
+            examples:
+              temperature:
+                summary: 只调温度
+                value:
+                  temperature: 1.1
+              budget:
+                summary: 收紧历史窗与世界书预算（R-02 降本）
+                value:
+                  maxHistoryMessages: 24
+                  worldBookBudgetTokens: 1200
+                  scanDepth: 3
+      responses:
+        '200':
+          description: 更新后的会话对象
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          description: '请求体非法（含空对象），message 取首个 issue'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                empty:
+                  value:
+                    code: E-ROOM-01
+                    message: '(根): 至少提供一项设置'
+                badRange:
+                  value:
+                    code: E-ROOM-01
+                    message: 'temperature: 不得大于 2'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 房间或会话不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                missing:
+                  value:
+                    code: E-ROOM-01
+                    message: 会话不存在
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/sessions/{sessionId}/export:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+      - name: sessionId
+        in: path
+        required: true
+        description: 会话 ID
+        schema:
+          type: string
+        example: s_01J9Z8Y7X6
+      - name: format
+        in: query
+        required: false
+        description: 导出格式，缺省 md
+        schema:
+          type: string
+          enum: [md, html]
+          default: md
+    get:
+      operationId: exportSessionLog
+      tags: [会话]
+      summary: 导出跑团日志
+      description: |
+        FR-12。六类消息齐全，骰子记录含审计五要素（骰式 / 原始骰值 / 合计 / 判定 / 流水号，另附 rollId）。
+
+        导出为 **Host 视角完整版**：暗骰与仅 Host 可见的场外消息照实导出并打标记——
+        隐藏的是广播范围，不是凭据（审计流水本就完整记录）。**分享给玩家前请自行删减。**
+        世界书中 `kpOnly` 标记的条目（模组真相）不会出现在任何导出产物中。
+      x-status: implemented
+      x-milestone: M6
+      x-source: 'packages/server/src/gateway/http/export.ts（T-M6-01/02）'
+      security:
+        - adminToken: []
+      responses:
+        '200':
+          description: 导出产物（md / html 文本，带 Content-Disposition 附件名）
+          content:
+            text/markdown:
+              schema:
+                type: string
+            text/html:
+              schema:
+                type: string
+        '400':
+          description: format 非法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                badFormat:
+                  value:
+                    code: E-ROOM-01
+                    message: format 仅支持 md 或 html
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 房间或会话不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                missing:
+                  value:
+                    code: E-ROOM-01
+                    message: 会话不存在
+        '500':
+          $ref: '#/components/responses/Internal'
 
   /rooms/{roomId}/active-session:
     parameters:
@@ -418,47 +738,64 @@ paths:
     put:
       operationId: setActiveSession
       tags: [会话]
-      summary: 切换活跃会话（提案回补）
+      summary: 切换当前活跃会话
       description: |
-        T-M1-07 / FR-11 连载复播：把 activeSessionId 指向本房已存在的会话。
-        openapi 初版未列出，随实现回补（提案端点）。
+        把房间 `activeSessionId` 指向本房已存在的某个会话（连载团复播 / 接着上一场跑）。
+        目标会话必须属于该房间，否则 404。已结束的会话也可被切为活跃。
       x-status: implemented
       x-milestone: M1
-      x-source: T-M1-07 / FR-11
+      x-source: 'packages/server/src/gateway/http/rooms.ts（T-M1-07，FR-11）'
+      security:
+        - adminToken: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                sessionId:
-                  type: string
-              required: [sessionId]
+              $ref: '#/components/schemas/ActiveSessionRequest'
+            examples:
+              switch:
+                value:
+                  sessionId: s_01J9Z8Y7X6
       responses:
         '200':
-          description: 切换后的会话
+          description: 被切换为活跃的会话对象
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
-          $ref: '#/components/responses/NotFound'
+          description: 会话不存在（或不属于该房间）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                missing:
+                  value:
+                    code: E-ROOM-01
+                    message: 会话不存在
+        '500':
+          $ref: '#/components/responses/Internal'
 
   /rooms/{roomId}/messages:
     parameters:
       - $ref: '#/components/parameters/RoomId'
       - name: beforeSeq
         in: query
-        description: 向前分页游标，返回 seq < beforeSeq 的消息
+        description: 向前分页游标，只返回 seq 严格小于该值的消息
         required: false
         schema:
           type: integer
-          format: int64
           minimum: 0
+        example: 40
       - name: limit
         in: query
-        description: 单页条数
+        description: 单页条数，1–200
         required: false
         schema:
           type: integer
@@ -467,24 +804,33 @@ paths:
           default: 50
       - name: sessionId
         in: query
-        description: 指定会话；缺省取房间当前活跃会话
+        description: 指定会话；缺省取房间当前活跃会话。房间尚未开团时返回空数组
         required: false
         schema:
           type: string
+        example: s_01J9Z8Y7X6
     get:
       operationId: listMessages
-      tags: [会话]
+      tags: [历史消息]
       summary: 历史消息拉取
       description: |
-        进房时取最近 N 条 + `beforeSeq` 向前翻页（T-M1-09）。
-        设计文档写的是 "`gateway/http/` 或 socket 事件"，**通道未定**，此处按 REST 提案给出。
-        与 Socket 补发（`lastSeq`）的边界：断线重连走 Socket 补缺口，本接口用于主动翻历史。
+        进房时取最近 N 条，`beforeSeq` 向前翻页（决议 ④，T-M1-09）。
+        返回**按 seq 降序**（最新在前），与断线补发的升序回放不同，前端需自行反转。
+
+        两点行为要注意：
+
+        - **暗骰被剔除**：`hidden: true` 的骰子消息不进历史（决议 D-10，防未授权泄露）。
+          Host 要看暗骰只能走实时流，本接口一律不给。
+        - **坏行跳过**：JSONL 中解析失败的行静默跳过，不报错也不计入条数。
       x-status: implemented
       x-milestone: M1
-      x-source: T-M1-09 / FR-02 / 决议④（走 REST）
+      x-source: packages/server/src/gateway/http/rooms.ts
+      # 玩家端点（2026-09-25 路由分离）：免令牌，前端不携带 X-Admin-Token。
+      # 内容已剔除暗骰与密语，房间 ID 即访问凭据（v1 依托网络边界）。
+      security: []
       responses:
         '200':
-          description: 消息数组，按 seq 降序（最新在前）
+          description: 消息数组（降序）；未开团时为空数组
           content:
             application/json:
               schema:
@@ -493,7 +839,7 @@ paths:
                   $ref: '#/components/schemas/Message'
               examples:
                 mixed:
-                  summary: IC / 骰子 / 叙事三类混合
+                  summary: 叙事 / 骰子 / IC 三类混合（最新在前）
                   value:
                     - seq: 42
                       ts: '2026-09-25T10:31:02.000Z'
@@ -528,6 +874,157 @@ paths:
                       type: ic
                       senderId: m_alice
                       content: 我翻查书桌的抽屉。
+        '400':
+          description: beforeSeq / limit 不合法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                badParam:
+                  value:
+                    code: E-ROOM-01
+                    message: beforeSeq/limit 不合法
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/pcs:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    get:
+      operationId: listPcDeclarations
+      tags: [房间]
+      summary: 列出 PC 声明
+      description: |
+        开团前的名册准备（T-M5-04，SDD §5.1）：列出本房已声明的 PC。
+        声明收敛 Host 侧（与状态板写权限哲学一致），开团时整表装配进状态板初始 pcs。
+      x-status: implemented
+      x-milestone: M5
+      x-source: T-M5-04 / FR-01/08
+      security:
+        - adminToken: []
+      responses:
+        '200':
+          description: 声明数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PcDeclaration'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/pcs/{memberId}:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+      - name: memberId
+        in: path
+        required: true
+        description: 成员 ID（进房 ack 返回）
+        schema:
+          type: string
+    put:
+      operationId: declarePc
+      tags: [房间]
+      summary: 声明 / 覆盖 PC（PUT 幂等）
+      description: |
+        两条路径二选一：`cardId`（卡库玩家卡，取 `extensions.aidle.pcSheet`，
+        KP 卡或无扩展卡拒绝并提示 `E-CARD-01`）或 `sheet`（无卡速建表直填）。
+      x-status: implemented
+      x-milestone: M5
+      x-source: T-M5-04 / FR-01/08
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cardId:
+                  type: string
+                  description: 卡库文件名（CardEntry.id）
+                sheet:
+                  $ref: '#/components/schemas/PCSheet'
+              description: cardId 与 sheet 二选一
+      responses:
+        '201':
+          description: 已声明
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PcDeclaration'
+        '400':
+          description: 成员不存在 / 参数不合法 / 卡不可用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+    delete:
+      operationId: undeclarePc
+      tags: [房间]
+      summary: 撤销声明
+      x-status: implemented
+      x-milestone: M5
+      x-source: T-M5-04 / FR-01/08
+      security:
+        - adminToken: []
+      responses:
+        '204':
+          description: 已撤销
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 房间不存在或该成员未声明
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/state:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    get:
+      operationId: getRoomState
+      tags: [房间]
+      summary: 拉取当前状态板
+      description: |
+        玩家组免令牌（T-M5-10，与 /public 同口径）：进房/刷新后取当前板，
+        之后靠 `state:broadcast` 增量维护。未开团返回 `stateBoard: null`。
+      x-status: implemented
+      x-milestone: M5
+      x-source: T-M5-10 / FR-09
+      security: []
+      responses:
+        '200':
+          description: 当前状态板（未开团为 null）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stateBoard:
+                    oneOf:
+                      - $ref: '#/components/schemas/StateBoard'
+                      - type: 'null'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -541,9 +1038,13 @@ paths:
       description: |
         `data/cards/` 下的角色卡索引（ccv3，PNG 内嵌或 JSON，FR-08）。
         只返回摘要，不返回角色卡全文（`character_book` 可能很大）。
-      x-status: proposed
+        元数据现读现解析：卡库是几十张量级，不做索引文件；坏卡自动跳过，
+        不会因一张坏卡让整个列表失败。
+      x-status: implemented
       x-milestone: M5
       x-source: T-M5-09 / FR-08 / TDD §3.3
+      security:
+        - adminToken: []
       responses:
         '200':
           description: 卡片摘要数组
@@ -570,6 +1071,8 @@ paths:
                       kind: pc
                       source: png
                       updatedAt: '2026-09-24T18:05:00.000Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/Internal'
 
@@ -578,23 +1081,38 @@ paths:
       tags: [卡库]
       summary: 上传角色卡
       description: |
-        导入 chara_card_v3 卡片：JSON 直接存，PNG 从 tEXt 块提取 `chara` 字段（ADR-06）。
-        卡内 `extensions.aidle.rulebook` 决定规则书；未携带扩展键的社区卡需在此指定默认规则书。
-      x-status: proposed
+        走**三步导入流**（检测 → 转换 → 验证，SDD §3.2 M5 行）：
+
+        - 检测：PNG 从 tEXt 块取卡数据（**`ccv3` 优先、社区 v2 的 `chara` 回退**，值为 base64(UTF-8 JSON)）；
+          JSON 文件直接按文本解析；两者都不像卡 → 400 + `E-CARD-01`，message 里带 `detect`；
+        - 转换：v2 旧卡映射为 v3（description 合并 personality；缺 name → `convert`）；
+        - 验证：ccv3 Schema + 必填（失败 → `validate`，message 里带字段路径）。
+
+        实现与提案的两处偏差（2026-09-26 实现时定）：
+
+        1. 请求体是 **`application/json` 的 `{ fileName, contentBase64 }`**，不是 multipart——
+           省一个 multipart 依赖，NFR-08 许可证门禁少审一棵依赖树；PNG 与 JSON 同一入口。
+        2. 不做 `defaultRulebook`：社区卡常没有 `extensions.aidle`，**不编造规则书**，
+           摘要里 `rulebook` 返回 null，由 UI 提示用户补（避免猜错规则书导致判定口径错）。
+
+        文件在 `data/cards/` 下原样保存（PNG/JSON 都不重编码），同名不覆盖（追加 `_2` 序号）。
+      x-status: implemented
       x-milestone: M5
-      x-source: T-M5-09 / FR-08 / ADR-06
+      x-source: packages/server/src/gateway/http/cards.ts
+      security:
+        - adminToken: []
       requestBody:
         required: true
         content:
-          multipart/form-data:
+          application/json:
             schema:
               $ref: '#/components/schemas/UploadCardRequest'
             examples:
               png:
-                summary: 上传 PNG 卡（自动提取 chara 块）
+                summary: 上传 PNG 卡（自动提取 ccv3/chara 块）
                 value:
-                  file: '（二进制 PNG）'
-                  defaultRulebook: coc7
+                  fileName: keeper.png
+                  contentBase64: iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8
       responses:
         '201':
           description: 导入成功，返回卡片摘要
@@ -604,6 +1122,8 @@ paths:
                 $ref: '#/components/schemas/CardSummary'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/Internal'
 
@@ -620,10 +1140,14 @@ paths:
       operationId: getCard
       tags: [卡库]
       summary: 获取角色卡全文
-      description: 返回完整 CharacterCardV3（含 `character_book`），用于编辑/导出。
-      x-status: proposed
+      description: |
+        返回完整 CharacterCardV3（含 `character_book` 与社区字段），用于编辑/导出。
+        `cardId` = 落盘文件名；不存在或三步导入不通过 → 404。
+      x-status: implemented
       x-milestone: M5
-      x-source: T-M5-09 / TDD §3.3
+      x-source: packages/server/src/gateway/http/cards.ts
+      security:
+        - adminToken: []
       responses:
         '200':
           description: 角色卡全文
@@ -631,6 +1155,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CharacterCardV3'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -639,13 +1165,20 @@ paths:
       operationId: deleteCard
       tags: [卡库]
       summary: 删除角色卡
-      description: 从 `data/cards/` 移除。若有会话正在引用该卡的 KP 人格，行为待定（见开放问题 3）。
-      x-status: proposed
+      description: |
+        从 `data/cards/` 移除。
+        若有会话正在引用该卡的 KP 人格，建议参照 D-09 拒绝删除并返回 `E-MOD-01`，
+        具体行为待 M5 落地时定。
+      x-status: implemented
       x-milestone: M5
-      x-source: T-M5-09
+      x-source: packages/server/src/gateway/http/cards.ts
+      security:
+        - adminToken: []
       responses:
         '204':
           description: 已删除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -656,11 +1189,12 @@ paths:
       operationId: listModules
       tags: [模组]
       summary: 列出已加载模组
-      description: |
-        `data/modules/<module-id>/` 下已加载的模组包（manifest + kp-card + worldbook + init-state，TDD §3.6）。
-      x-status: proposed
+      description: '`data/modules/<module-id>/` 下已加载的模组包（manifest + kp-card + worldbook + init-state，TDD §3.6）；坏包视为不存在。'
+      x-status: implemented
       x-milestone: M5
       x-source: T-M5-05 / FR-10 / TDD §3.6
+      security:
+        - adminToken: []
       responses:
         '200':
           description: 模组数组
@@ -679,6 +1213,8 @@ paths:
                       rulebook: coc7
                       apiVersion: '1'
                       activeSessions: 1
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/Internal'
 
@@ -689,30 +1225,26 @@ paths:
       description: |
         校验 manifest（必须含 `id / version / apiVersion / entry`），再装载三件套。
         校验失败即拒绝加载，不落盘。
-      x-status: proposed
+        实现口径（T-M5-05 实测回写）：模组目录放置在 `data/modules/<moduleId>/`，
+        请求体给目录名即可完成装载校验；multipart zip 上传未实现（模组为目录形态，
+        v1 不引入解压依赖）。
+      x-status: implemented
       x-milestone: M5
       x-source: T-M5-05 / FR-10 / TDD §3.6
+      security:
+        - adminToken: []
       requestBody:
         required: true
         content:
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: 模组包（zip，解压后为 manifest.json + 三件套）
-              required: [file]
           application/json:
             schema:
               type: object
               properties:
-                dir:
+                moduleId:
                   type: string
-                  description: 服务端本地已存在的模组目录路径（本机放置场景）
-                  example: data/modules/mountains-of-madness
-              required: [dir]
+                  description: modules 目录下的模组目录名（= manifest.id）
+                  example: mountains-of-madness
+              required: [moduleId]
       responses:
         '201':
           description: 加载成功
@@ -722,6 +1254,8 @@ paths:
                 $ref: '#/components/schemas/ModuleInfo'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/Internal'
 
@@ -739,16 +1273,18 @@ paths:
       tags: [模组]
       summary: 卸载模组
       description: |
-        **卸载策略（决议 D-09）**：有活跃 Session 引用该模组时拒绝卸载，返回 409；
+        **卸载策略（决议 D-09）**：有活跃 Session 引用该模组时拒绝卸载，返回 409 + `E-MOD-01`；
         空闲时才允许卸载。
-
-        冲突返回 E-MOD-01（决议 ③，2026-09-25 拍板新增，错误码表第 7 码）。
-      x-status: proposed
+      x-status: implemented
       x-milestone: M5
       x-source: T-M5-05 / FR-10 / D-09
+      security:
+        - adminToken: []
       responses:
         '204':
           description: 已卸载
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -760,24 +1296,26 @@ paths:
               examples:
                 inUse:
                   value:
-                    code: E-ROOM-01
-                    message: 模组被 1 个活跃会话引用，无法卸载
+                    code: E-MOD-01
+                    message: 模组使用中，无法卸载
         '500':
           $ref: '#/components/responses/Internal'
 
 # =============================================================================
-security:
-  - XAdminToken: []
-
 components:
   securitySchemes:
-    XAdminToken:
+    adminToken:
       type: apiKey
       in: header
       name: X-Admin-Token
       description: |
-        管理面门禁（决议 ②）。仅当服务端设置环境变量 AIDLE_ADMIN_TOKEN 时启用；
-        未设置时管理面零配置开放（依托网络边界）。/healthz 永远公开。
+        管理面门禁（决议 ②）。**仅当服务端环境变量 `AIDLE_ADMIN_TOKEN` 已设置时生效**；
+        未设置则全部放行（零配置，靠网络边界保护），服务端启动时会打一条告警日志。
+
+        2026-09-25 路由分离：管理端点（建房/列房/改配置/重置邀请码/会话管理/卡库/导出）
+        才要这个头；**玩家端点 `GET /rooms/{id}/public` 与 `GET /rooms/{id}/messages` 免令牌**
+        （`security: []`），否则网页端（不携带该头）进房即 401。`/healthz` 永不要求。
+
   parameters:
     RoomId:
       name: roomId
@@ -790,29 +1328,29 @@ components:
 
   responses:
     BadRequest:
-      description: 请求体非法（Zod 校验失败）
+      description: '请求体非法（Zod 校验失败），message 取首个 issue，格式 `字段路径: 原因`'
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/AppError'
           examples:
-            invalid:
-              value:
-                code: E-DICE-01
-                message: 骰式无法解析
-    Forbidden:
-      description: 非 Host 操作（权限不足）
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/AppError'
-          examples:
-            notHost:
+            invalidName:
               value:
                 code: E-ROOM-01
-                message: 仅 Host 可执行该操作
+                message: 'name: 字数不得少于 1'
+    Unauthorized:
+      description: 管理面已开启门禁但请求未携带或携带错误的 X-Admin-Token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AppError'
+          examples:
+            noToken:
+              value:
+                code: E-ROOM-01
+                message: 管理面需要 X-Admin-Token 令牌
     NotFound:
-      description: 房间 / 卡片 / 模组不存在
+      description: 房间不存在（或 room.json 校验失败）
       content:
         application/json:
           schema:
@@ -839,6 +1377,78 @@ components:
   schemas:
     # ---- 系统 ----
 
+    # ---- 可观测（T-M6-03）----
+
+    Metrics:
+      type: object
+      description: |
+        `GET /metrics` 的全局快照（进程内累计，重启清零；不区分房间）。
+        延迟分布只取最近 200 次 LLM 调用，累计计数不受窗口影响。
+      properties:
+        uptimeSec:
+          type: integer
+          minimum: 0
+          description: 进程已运行秒数（向下取整）
+        directives:
+          type: object
+          description: 指令解析成功率（R-01；分母口径见测试文档 §12.4，无尝试时 rate = 1）
+          properties:
+            attempts:
+              type: integer
+            successes:
+              type: integer
+            rate:
+              type: number
+              minimum: 0
+              maximum: 1
+          required: [attempts, successes, rate]
+        dice:
+          type: object
+          properties:
+            total:
+              type: integer
+              description: 掷骰总数（玩家骰 + AI 检定骰）
+            hidden:
+              type: integer
+              description: 其中暗骰次数
+          required: [total, hidden]
+        llm:
+          $ref: '#/components/schemas/LlmMetrics'
+      required: [uptimeSec, directives, dice, llm]
+
+    LlmMetrics:
+      type: object
+      description: LLM 调用累计（R-02：token 消耗与延迟的防控依据）
+      properties:
+        calls:
+          type: integer
+          description: 成功（含流中断）调用次数
+        failures:
+          type: integer
+          description: 失败次数（重试耗尽 / provider 报错）；同样计入延迟样本
+        tokensIn:
+          type: integer
+          description: 累计输入 token（provider 未回 usage 时不计）
+        tokensOut:
+          type: integer
+          description: 累计输出 token
+        latencyMs:
+          type: object
+          description: |
+            延迟分布（毫秒，最近秩法 / nearest-rank，不做插值——返回值一定是真实观测样本）。
+            无样本时四项全 0。
+          properties:
+            p50:
+              type: number
+            p95:
+              type: number
+            max:
+              type: number
+            avg:
+              type: number
+          required: [p50, p95, max, avg]
+      required: [calls, failures, tokensIn, tokensOut, latencyMs]
+
     Health:
       type: object
       description: 健康检查响应（packages/server/src/index.ts）
@@ -852,7 +1462,7 @@ components:
           examples: [BehindVeil-server]
         protocol:
           type: string
-          description: 前后端协议版本，握手时校验，不一致即拒绝连接
+          description: 前后端协议版本，Socket 握手时校验，不一致即拒绝连接
           examples: ['0.0.0']
       required: [ok, name, protocol]
 
@@ -860,16 +1470,24 @@ components:
 
     ErrorCode:
       type: string
-      description: 业务错误码（TDD §11 / shared/errors.ts）
-      enum: [E-LLM-01, E-LLM-02, E-DICE-01, E-AI-01, E-ST-01, E-ROOM-01, E-MOD-01, E-SRV-01]
+      description: 业务错误码（TDD §11 + 2026-09-25 拍板新增 E-MOD-01 / E-SRV-01）
+      enum:
+        - E-LLM-01
+        - E-LLM-02
+        - E-DICE-01
+        - E-AI-01
+        - E-ST-01
+        - E-ROOM-01
+        - E-MOD-01
+        - E-SRV-01
       x-code-scenes:
         E-LLM-01: provider 超时/5xx
         E-LLM-02: 流中断
         E-DICE-01: 骰式非法
         E-AI-01: AI 指令解析失败
         E-ST-01: 状态板版本冲突
-        E-ROOM-01: 邀请码无效/满员
-        E-MOD-01: 模组卸载冲突（D-09）
+        E-ROOM-01: 邀请码无效/满员、房间或会话不存在、请求体非法、管理面未授权
+        E-MOD-01: 模组卸载冲突（被活跃会话引用）
         E-SRV-01: 服务端持久化/内部错误
 
     AppError:
@@ -884,7 +1502,7 @@ components:
       required: [code, message]
       examples:
         - code: E-ROOM-01
-          message: 邀请码无效或房间已满
+          message: 房间不存在
 
     InternalError:
       type: object
@@ -897,11 +1515,13 @@ components:
           type: string
       required: [code, message]
 
-    # ---- Room / Session ----
+    # ---- Room / Session / Member ----
 
     Room:
       type: object
-      description: 房间（TDD §3.1 / shared/domain.ts RoomSchema）
+      description: |
+        房间公开对象（TDD §3.1 / shared/domain.ts RoomSchema）。
+        **不含 hostToken**——它是服务端机密，只在建房响应里出现一次。
       properties:
         id:
           type: string
@@ -918,33 +1538,32 @@ components:
           type: string
           minLength: 6
           maxLength: 6
-          description: 6 位邀请码，Host 可重置
+          description: 6 位邀请码，可经 invite-reset 重置
           examples: [A7K2Q9]
         activeSessionId:
           type: [string, 'null']
-          description: 当前活跃会话；无会话时为 null
+          description: 当前活跃会话 ID；未开团或已结束时为 null
         memberLimit:
           type: integer
           minimum: 1
-          description: 成员上限（默认 8）
+          description: 成员上限（默认 8，建房时可设 2–64）
           default: 8
         defaultSessionSettings:
           $ref: '#/components/schemas/SessionSettings'
-          description: 本房默认会话设置（只影响之后新建的会话）；缺省由 session:start 显式给出
       required: [id, name, createdAt, inviteCode, activeSessionId, memberLimit]
 
-    RoomCreated:
-      type: object
+    RoomWithHostToken:
       description: |
-        建房响应（决议 ①）：Room + hostToken。hostToken 是 Host 身份凭据，
-        只随本响应发放一次；房间列表/详情等任何其他响应一律不含该字段。
+        建房响应专用：房间对象 + 一次性 `hostToken`（决议 ①）。
+        `hostToken` 只在本次响应出现，任何其他接口与广播都不回带。
       allOf:
         - $ref: '#/components/schemas/Room'
         - type: object
           properties:
             hostToken:
               type: string
-              description: Host 身份凭据，进房（room:join）时出示即成为 Host
+              description: Host 身份凭证，进房时经 `room:join` 出示
+              examples: [ht_9f2c1a7b3e5d]
           required: [hostToken]
 
     CreateRoomRequest:
@@ -953,9 +1572,11 @@ components:
         name:
           type: string
           minLength: 1
+          maxLength: 50
         memberLimit:
           type: integer
-          minimum: 1
+          minimum: 2
+          maximum: 64
           default: 8
         defaultSessionSettings:
           $ref: '#/components/schemas/SessionSettings'
@@ -963,15 +1584,17 @@ components:
 
     RoomSettingsPatch:
       type: object
-      description: 房间配置局部更新（未传字段不变）
+      description: 房间配置局部更新（未传字段保持不变）
       minProperties: 1
       properties:
         name:
           type: string
           minLength: 1
+          maxLength: 50
         memberLimit:
           type: integer
-          minimum: 1
+          minimum: 2
+          maximum: 64
         defaultSessionSettings:
           $ref: '#/components/schemas/SessionSettings'
 
@@ -984,6 +1607,16 @@ components:
           maxLength: 6
           examples: [9ZP4RT]
       required: [inviteCode]
+
+    ActiveSessionRequest:
+      type: object
+      properties:
+        sessionId:
+          type: string
+          minLength: 1
+          description: 目标会话 ID，必须属于该房间
+          examples: [s_01J9Z8Y7X6]
+      required: [sessionId]
 
     SessionSettings:
       type: object
@@ -1018,7 +1651,54 @@ components:
           minimum: 1
           description: 世界书扫描深度（最近 N 条消息，默认 4）
           default: 4
-      required: [provider, model, temperature, maxHistoryMessages, worldBookBudgetTokens, scanDepth]
+        contextWindowTokens:
+          type: integer
+          minimum: 1
+          description: |
+            模型上下文窗口。S7 硬顶 = contextWindowTokens − outputReserveTokens，
+            超顶回退 S5 再裁历史（TDD §5.1）。默认按 32K 级模型。
+          default: 32768
+        outputReserveTokens:
+          type: integer
+          minimum: 1
+          description: 为模型输出预留的 token 数，参与 S7 硬顶计算
+          default: 2048
+      required:
+        - provider
+        - model
+        - temperature
+        - maxHistoryMessages
+        - worldBookBudgetTokens
+        - scanDepth
+        - contextWindowTokens
+        - outputReserveTokens
+
+    SessionSettingsPatch:
+      type: object
+      description: |
+        会话运行时设置局部更新（T-M6-04 支撑端点）。全字段可选，**至少一项**——
+        空对象 → 400。未传字段保持会话原值。
+      minProperties: 1
+      properties:
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        maxHistoryMessages:
+          type: integer
+          minimum: 1
+        worldBookBudgetTokens:
+          type: integer
+          minimum: 0
+        scanDepth:
+          type: integer
+          minimum: 1
+        contextWindowTokens:
+          type: integer
+          minimum: 1
+        outputReserveTokens:
+          type: integer
+          minimum: 1
 
     Session:
       type: object
@@ -1031,8 +1711,8 @@ components:
           type: string
         moduleRef:
           type: string
-          description: 模组 id + version
-          examples: [mountains-of-madness@1.0.0]
+          description: 模组 id（+ version，§3.6）；当前由 session:start 的 moduleId 直接填入
+          examples: [mountains-of-madness]
         startedAt:
           type: string
           format: date-time
@@ -1053,11 +1733,36 @@ components:
           default: ''
       required: [id, roomId, moduleRef, startedAt, endedAt, stateBoardVersion, settings, synopsis]
 
+    Member:
+      type: object
+      description: 房间成员（members.json，TDD §3.1 / shared/domain.ts MemberSchema）
+      properties:
+        id:
+          type: string
+          description: 成员 ID，断线重连时可用它复用身份
+          examples: [m_alice]
+        name:
+          type: string
+          description: 房内展示昵称
+        role:
+          $ref: '#/components/schemas/MemberRole'
+        joinedAt:
+          type: string
+          format: date-time
+      required: [id, name, role, joinedAt]
+
+    MemberRole:
+      type: string
+      enum: [host, player, observer]
+      description: 'host=建房者（凭 hostToken）· player=玩家 · observer=旁观（v1 不可发言）'
+
     # ---- Message（六类，TDD §3.2）----
 
     BaseMsg:
       type: object
-      description: 消息公共字段。消息不可变（append-only），seq 在 Session 内严格单调递增
+      description: |
+        消息公共字段。消息不可变（append-only），seq 在 Session 内严格单调递增；
+        服务端重启后从恢复出的 lastSeq 续，绝不回退（NFR-06 / FR-11）。
       properties:
         seq:
           type: integer
@@ -1101,7 +1806,7 @@ components:
             visibility:
               type: string
               enum: [all, host, whisper]
-              description: all=全员可见 / host=仅主持人 / whisper=私聊
+              description: all=全员可见 / host=仅 Host / whisper=私聊（带 targetId）
             targetId:
               type: string
               description: visibility=whisper 时的私聊对象成员 ID
@@ -1118,7 +1823,9 @@ components:
             subtype:
               type: string
               enum: [ai_directive_result, join, leave, notice]
-              description: ai_directive_result = 检定闭环回注的引擎结果
+              description: |
+                ai_directive_result=检定闭环回注的引擎结果；
+                join/leave=进出房系统播报；notice=如「会话已开始（模块 id）」
             content:
               type: string
           required: [type, subtype, content]
@@ -1136,7 +1843,8 @@ components:
             hidden:
               type: boolean
               description: |
-                true = 暗骰（FR-14），结果仅广播给 Host（决议 D-10：仅 Host 可用）
+                true = 暗骰（FR-14），结果仅广播给 Host（决议 D-10：仅 Host 可用）。
+                **REST 历史接口会剔除暗骰**，Host 只能从实时流看到。
           required: [type, roll, hidden]
 
     NarrationMsg:
@@ -1336,25 +2044,23 @@ components:
             - 侦查: 60
               图书馆使用: 50
       required:
-        [
-          playerName,
-          occupation,
-          str,
-          con,
-          siz,
-          dex,
-          app,
-          int,
-          pow,
-          edu,
-          luck,
-          hp,
-          mp,
-          san,
-          db,
-          build,
-          skills,
-        ]
+        - playerName
+        - occupation
+        - str
+        - con
+        - siz
+        - dex
+        - app
+        - int
+        - pow
+        - edu
+        - luck
+        - hp
+        - mp
+        - san
+        - db
+        - build
+        - skills
       examples:
         - playerName: 爱丽丝
           occupation: 考古学家
@@ -1430,7 +2136,7 @@ components:
 
     WorldBookEntry:
       type: object
-      description: 世界书条目（字段语义与 SillyTavern 对齐，TDD §3.4）
+      description: '世界书条目（字段语义与 SillyTavern 对齐，TDD §3.4；手编指南见 docs/worldbook.md）'
       properties:
         uid:
           type: integer
@@ -1479,18 +2185,16 @@ components:
                 模组真相条目：注入 prompt 让 AI 知道，
                 但不得出现在非 Host 可见输出（TDD §8）
       required:
-        [
-          uid,
-          key,
-          keysecondary,
-          selectiveLogic,
-          content,
-          position,
-          order,
-          weight,
-          constant,
-          disabled,
-        ]
+        - uid
+        - key
+        - keysecondary
+        - selectiveLogic
+        - content
+        - position
+        - order
+        - weight
+        - constant
+        - disabled
 
     WorldBook:
       type: object
@@ -1559,14 +2263,18 @@ components:
         rulebook:
           type: string
           enum: [coc7, dnd5e]
+          nullable: true
+          description: |
+            卡内 `extensions.aidle.rulebook`。社区卡常不带该扩展 → **null**（实现不编造规则书，
+            由 UI 提示用户补；猜错规则书会让判定口径跟着错）。
         kind:
           type: string
           enum: [kp, pc]
-          description: KP 人格卡 / 玩家角色卡
+          description: KP 人格卡 / 玩家角色卡（带 pcSheet 即 pc）
         source:
           type: string
           enum: [json, png]
-          description: 来源格式（FR-08 双格式）
+          description: 来源格式（FR-08 双格式），按真实字节判定而非扩展名
         updatedAt:
           type: string
           format: date-time
@@ -1574,16 +2282,33 @@ components:
 
     UploadCardRequest:
       type: object
+      description: |
+        上传走 base64 JSON 而非 multipart（2026-09-26 实现时定的偏差）：
+        省一个 multipart 依赖，PNG 与 JSON 共用同一入口。
       properties:
-        file:
+        fileName:
           type: string
-          format: binary
-          description: ccv3 卡片文件（.json 或内嵌 chara 块的 .png）
-        defaultRulebook:
+          description: 原始文件名（只保留安全字符、剥离路径分隔符；同名自动追加 `_2`）
+          examples: [keeper.png]
+        contentBase64:
           type: string
-          enum: [coc7, dnd5e]
-          description: 卡片未携带 extensions.aidle 时采用的默认规则书
-      required: [file]
+          description: 卡片文件内容的 base64（.json 原文，或内嵌 ccv3/chara 块的 .png）
+      required: [fileName, contentBase64]
+
+    RoomPublic:
+      type: object
+      description: 玩家侧房间信息（不含邀请码/hostToken，2026-09-25 路由分离新增）
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        memberLimit:
+          type: integer
+        activeSessionId:
+          type: string
+          nullable: true
+      required: [id, name, memberLimit, activeSessionId]
 
     ModuleInfo:
       type: object
@@ -1609,3 +2334,20 @@ components:
           minimum: 0
           description: 引用该模组的活跃会话数（> 0 时拒绝卸载，D-09）
       required: [id, name, version, rulebook, apiVersion, activeSessions]
+
+    PcDeclaration:
+      type: object
+      description: 房间级 PC 声明（T-M5-04，key = memberId，开团时装配进状态板初始 pcs）
+      properties:
+        memberId:
+          type: string
+        sheet:
+          $ref: '#/components/schemas/PCSheet'
+        source:
+          type: string
+          enum: [card, manual]
+          description: card=卡库玩家卡 pcSheet 装配；manual=速建表直填
+        cardId:
+          type: string
+          description: source=card 时的卡库文件名
+      required: [memberId, sheet, source]
