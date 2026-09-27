@@ -5,13 +5,19 @@ import { generateMemberId } from './ids.js';
 
 /**
  * Member 仓库（T-M1-01，TDD §3.1/§6）：members.json 整文件读写。
- * v1 单进程串行写（REST/网关都在同一事件循环），无并发竞争窗口。
+ *
+ * 并发：同一进程内多玩家同时进房会并发触发 addMember（跨 await 的读改写），
+ * 该操作已收进 JsonStore.update() 的文件锁内；其余调用只读或整写，无需额外保护。
  */
 
 /** members.json 缺失（未有人进房）或损坏时按空名单处理（损坏告警由启动恢复覆盖 room 级） */
 export async function readMembers(layout: DataLayout, roomId: string): Promise<Member[]> {
   const json = await new JsonStore(layout.membersFile(roomId)).read();
-  if (json === null) return [];
+  return parseMembers(json);
+}
+
+/** 逐条过 Schema，坏条目跳过（与 readMembers 容错口径一致） */
+function parseMembers(json: unknown | null): Member[] {
   if (!Array.isArray(json)) return [];
   const members: Member[] = [];
   for (const item of json) {
@@ -48,14 +54,17 @@ export async function addMember(
   roomId: string,
   input: AddMemberInput,
 ): Promise<Member> {
-  const members = await readMembers(layout, roomId);
   const member: Member = {
     id: generateMemberId(),
     name: input.name,
     role: input.role,
     joinedAt: new Date().toISOString(),
   };
-  members.push(member);
-  await saveMembers(layout, roomId, members);
+  // 读改写整段进锁：两玩家同时进房也不会互相覆盖（2026-09-25 代码审查修复）
+  await new JsonStore(layout.membersFile(roomId)).update((current) => {
+    const members = parseMembers(current);
+    members.push(member);
+    return members;
+  });
   return member;
 }

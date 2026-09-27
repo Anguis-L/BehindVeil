@@ -16,11 +16,18 @@ import { readMessagesPage } from '../../domain/session/messages.js';
 /**
  * 管理面 REST（T-M1-02/09，决议 D-03 + docs/openapi.yaml + 2026-09-25 四项拍板）。
  *
- * 鉴权（决议 ②）：环境变量 AIDLE_ADMIN_TOKEN 设置后，除 /healthz 外的全部管理接口
- * 必须携带 `X-Admin-Token` 头（缺失/错误 → 401）；未设置则不启用（零配置，依托网络边界）。
+ * 鉴权（决议 ② + 2026-09-25 代码审查修复）：环境变量 AIDLE_ADMIN_TOKEN 设置后，
+ * **管理类接口**必须携带 `X-Admin-Token` 头（缺失/错误 → 401）；未设置则不启用
+ * （零配置，依托网络边界）。
+ *
+ * 路由分离（本次修复的要点）：管理端点与玩家所需端点原本挂在同一批路由上、共用一把门禁，
+ * 导致「设了令牌 → 前端两个免令牌调用直接 401」。现拆成两组：
+ * - 管理组（建房/列房/改配置/重置邀请码/会话管理/历史之外的一切）：需令牌；
+ * - 玩家组（`GET /rooms/:roomId/public`、`GET /rooms/:roomId/messages`）：不带令牌，
+ *   且**不返回邀请码**——玩家拿到房间名与活跃会话即可，邀请码只经建房响应给 Host。
+ *
  * hostToken（决议 ①）只随建房响应下发一次、进房时证明 Host 身份，不参与管理面鉴权，
- * 且任何其他响应不得回带。
- * 响应体统一 AppError 形状 { code, message }。
+ * 且任何其他响应不得回带。响应体统一 AppError 形状 { code, message }。
  */
 
 export interface RestDeps {
@@ -118,9 +125,27 @@ export function registerRoomRoutes(app: FastifyInstance, deps: RestDeps): void {
     return sessions;
   });
 
+  // ---- 以下为玩家组：免令牌（前端不带 X-Admin-Token），且不泄露邀请码 ----
+
+  /**
+   * 玩家侧房间信息（2026-09-25 路由分离新增）：只给 id/name/memberLimit/activeSessionId。
+   * 前端刷新活跃会话走这里；邀请码与 hostToken 一律不给。
+   */
+  app.get('/rooms/:roomId/public', async (req, reply) => {
+    const { roomId } = req.params as { roomId: string };
+    const room = await readRoomFile(layout, roomId);
+    if (!room) return reply.code(404).send({ code: 'E-ROOM-01', message: '房间不存在' });
+    return {
+      id: room.id,
+      name: room.name,
+      memberLimit: room.memberLimit,
+      activeSessionId: room.activeSessionId,
+    };
+  });
+
   // 历史拉取（决议 ④：走 REST，T-M1-09；与 Socket 补发互补——
   // 断线重连的缺口走 room:join 的 lastSeq 补发，本接口用于主动翻历史）
-  app.get('/rooms/:roomId/messages', { preHandler: requireAdmin }, async (req, reply) => {
+  app.get('/rooms/:roomId/messages', async (req, reply) => {
     const { roomId } = req.params as { roomId: string };
     const query = req.query as { sessionId?: string; beforeSeq?: string; limit?: string };
     const beforeSeq = query.beforeSeq !== undefined ? Number(query.beforeSeq) : undefined;

@@ -236,3 +236,44 @@ describe('GET /rooms/:roomId/messages（决议 ④）', () => {
     expect(messages.map((m) => m.seq)).toEqual([1]); // 暗骰被剔除
   });
 });
+
+/**
+ * 路由分离（2026-09-25 代码审查修复）：管理端点与玩家端点不再共用一把门禁。
+ * 设了 AIDLE_ADMIN_TOKEN 后，玩家侧两个端点仍须免令牌可用——否则前端（不带令牌）
+ * 会静默 401，进房后既拉不到历史也刷不出活跃会话。
+ */
+describe('路由分离：玩家端点免令牌', () => {
+  it('GET /rooms/:id/public 免令牌可访问，且不泄露邀请码/hostToken', async () => {
+    const room = await newRoom('玩家可见房');
+
+    const res = await secured.inject({ method: 'GET', url: `/rooms/${room.id}/public` });
+    expect(res.statusCode).toBe(200);
+
+    const body = res.json() as Record<string, unknown>;
+    expect(body.name).toBe('玩家可见房');
+    expect(body.inviteCode).toBeUndefined();
+    expect(body.hostToken).toBeUndefined();
+    expect(Object.keys(body).sort()).toEqual(['activeSessionId', 'id', 'memberLimit', 'name']);
+  });
+
+  it('GET /rooms/:id/messages 免令牌可访问（历史不含暗骰）', async () => {
+    const room = await newRoom();
+
+    const res = await secured.inject({ method: 'GET', url: `/rooms/${room.id}/messages` });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual([]);
+  });
+
+  it('管理端点仍需令牌（GET /rooms/:id 不给邀请码给陌生人）', async () => {
+    const room = await newRoom();
+    expect((await secured.inject({ method: 'GET', url: `/rooms/${room.id}` })).statusCode).toBe(
+      401,
+    );
+  });
+
+  it('未知房间的玩家端点 → 404', async () => {
+    expect((await secured.inject({ method: 'GET', url: '/rooms/nope/public' })).statusCode).toBe(
+      404,
+    );
+  });
+});

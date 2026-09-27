@@ -53,4 +53,15 @@ git tag v0.1.0 && git push --tags    # 触发 .github/workflows/release.yml
 
 公网部署务必配合反向代理 + TLS，或直接使用 Tailscale 组网。
 
+### 环境变量
+
+| 变量 | 作用 | 不设置会怎样 |
+|---|---|---|
+| `AIDLE_LLM_KEY` | LLM 的 API Key（只走环境变量，不写进 `data/config.yaml`） | 真实 provider 装配失败，AI 功能停用（服务主体不受影响） |
+| `AIDLE_ADMIN_TOKEN` | **管理面门禁**：设置后，管理类接口必须带 `X-Admin-Token` 头 | **管理面完全开放**——任何能访问该端口的人都能建房、改配置、删角色卡。启动时日志会打一条告警 |
+
+⚠️ 自托管务必设置 `AIDLE_ADMIN_TOKEN`，尤其是端口对局域网/公网可见时。设置了它**不会**影响玩家正常使用：翻历史、`/rooms/{id}/public` 这类玩家端点是免令牌的（详见 [docs/API.md](docs/API.md)）。
+
+完整部署与运维口径（data/ 目录布局、备份与恢复、公网暴露检查清单、审计流水校验、日志导出）见 [docs/deployment.md](docs/deployment.md)。
+
 当前仓库为工程骨架，上述产物尚不包含可用的服务端进程；M0 落地后同一条流水线即可产出可运行版本。

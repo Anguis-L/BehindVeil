@@ -94,6 +94,12 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
     }
   }
 
+  // 2026-09-25 代码审查修复：未设 AIDLE_ADMIN_TOKEN 时管理面是全开放的，
+  // 自托管用户往往不知情——启动时明确告警一行（README 同步写明）
+  if (cfg.adminToken === undefined) {
+    app.log.warn('未设置 AIDLE_ADMIN_TOKEN：管理面（建房/改配置/卡库等）对可达本端口的任何人开放');
+  }
+
   registerRoomRoutes(app, { layout, adminToken: cfg.adminToken });
   registerExportRoutes(app, { layout, adminToken: cfg.adminToken });
   attachGateway(app, {

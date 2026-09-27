@@ -94,3 +94,23 @@ describe('addMember / findMember / saveMembers（T-M1-03 进房名册）', () =>
     expect(members.map((m) => m.id)).toEqual([b.id, a.id]);
   });
 });
+
+/**
+ * 并发回归（2026-09-25 代码审查修复）：两玩家同时进房曾触发读改写竞态，
+ * 后写的覆盖先写的，members.json 永久丢成员且不可自愈。
+ */
+describe('addMember 并发安全', () => {
+  it('12 人同时进房不丢成员', async () => {
+    const layout = await makeLayout();
+
+    const added = await Promise.all(
+      Array.from({ length: 12 }, (_, i) =>
+        addMember(layout, 'room-1', { name: `玩家${i}`, role: 'player' }),
+      ),
+    );
+
+    const members = await readMembers(layout, 'room-1');
+    expect(members).toHaveLength(12);
+    expect(members.map((m) => m.id).sort()).toEqual(added.map((m) => m.id).sort());
+  });
+});
