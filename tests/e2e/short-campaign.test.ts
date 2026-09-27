@@ -18,9 +18,7 @@ import { io, type Socket } from 'socket.io-client';
 
 const SERVER_DIST = fileURLToPath(new URL('../../packages/server/dist', import.meta.url));
 
-const { createServer } = (await import(
-  pathToFileURL(path.join(SERVER_DIST, 'index.js')).href
-)) as {
+const { createServer } = (await import(pathToFileURL(path.join(SERVER_DIST, 'index.js')).href)) as {
   createServer(opts: Record<string, unknown>): Promise<AppLike>;
 };
 const { createDataLayout } = (await import(
@@ -88,8 +86,20 @@ function emitAck(socket: Socket, event: string, payload: unknown): Promise<AnyRe
 const SHEET = {
   playerName: '爱丽丝',
   occupation: '记者',
-  str: 50, con: 60, siz: 55, dex: 70, app: 50, int: 75, pow: 55, edu: 80, luck: 40,
-  hp: 11, mp: 11, san: 55, db: '0', build: '0',
+  str: 50,
+  con: 60,
+  siz: 55,
+  dex: 70,
+  app: 50,
+  int: 75,
+  pow: 55,
+  edu: 80,
+  luck: 40,
+  hp: 11,
+  mp: 11,
+  san: 55,
+  db: '0',
+  build: '0',
   skills: { 侦查: 60 },
 };
 
@@ -136,7 +146,15 @@ async function writeModule(dataDir: string): Promise<void> {
 /** Mock 剧本：KP 开场叙事 → 侦查检定指令 → 回注后续写（stop 分段，T-M3-06 口径） */
 const SCRIPT: MockScriptStep[] = [
   { delta: '【开场】门轴吱呀作响，你们推门而入。\n' },
-  { directive: { op: 'check', target: 'pc:爱丽丝', skill: '侦查', difficulty: 'normal', label: '打量门厅' } },
+  {
+    directive: {
+      op: 'check',
+      target: 'pc:爱丽丝',
+      skill: '侦查',
+      difficulty: 'normal',
+      label: '打量门厅',
+    },
+  },
   { stop: true },
   { delta: '借着灯光，你看清墙上的抓痕一路延伸向楼梯。' },
   { stop: true },
@@ -182,13 +200,15 @@ describe('完整短团 E2E（T-M5-11，TC-FR-11-003）', () => {
     const previews: AnyRecord[] = [];
 
     const host = await connect(port);
-    for (const [socket, bucket] of [
-      [host, messages],
-    ] as Array<[Socket, AnyRecord[]]>) {
-      socket.on('msg:broadcast', (payload: unknown) => bucket.push((payload as AnyRecord).msg as AnyRecord));
+    for (const [socket, bucket] of [[host, messages]] as Array<[Socket, AnyRecord[]]>) {
+      socket.on('msg:broadcast', (payload: unknown) =>
+        bucket.push((payload as AnyRecord).msg as AnyRecord),
+      );
     }
     host.on('error:app', (payload: unknown) => errors.push(payload as AnyRecord));
-    host.on('state:broadcast', (payload: unknown) => states.push((payload as AnyRecord).stateBoard as AnyRecord));
+    host.on('state:broadcast', (payload: unknown) =>
+      states.push((payload as AnyRecord).stateBoard as AnyRecord),
+    );
     host.on('kp:promptPreview', (payload: unknown) => previews.push(payload as AnyRecord));
 
     const hostAck = await emitAck(host, 'room:join', {
@@ -276,14 +296,13 @@ describe('完整短团 E2E（T-M5-11，TC-FR-11-003）', () => {
       expectedVersion: 0,
     });
     await waitUntil(() => states.some((b) => b['version'] === 1), '状态板广播 v1');
-    expect(states.some((b) => (b['facts'] as string[]).includes('楼梯上的抓痕是新鲜的'))).toBe(true);
+    expect(states.some((b) => (b['facts'] as string[]).includes('楼梯上的抓痕是新鲜的'))).toBe(
+      true,
+    );
 
     // ---- 快照（FR-09）：SnapshotMsg 入流，prompt 常驻注入 ----
     host.emit('state:snapshot', {});
-    await waitUntil(
-      () => messages.some((m) => m['type'] === 'state_snapshot'),
-      '快照消息入流',
-    );
+    await waitUntil(() => messages.some((m) => m['type'] === 'state_snapshot'), '快照消息入流');
     host.emit('kp:previewPrompt', {});
     await waitUntil(() => previews.length > 0, 'prompt 预览回包');
     const trace = (previews.at(-1) as AnyRecord)['pipeline'] as AnyRecord;

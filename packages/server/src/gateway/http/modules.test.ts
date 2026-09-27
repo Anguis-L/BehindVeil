@@ -26,6 +26,8 @@ const settings = {
   maxHistoryMessages: 40,
   worldBookBudgetTokens: 2000,
   scanDepth: 4,
+  contextWindowTokens: 32_768,
+  outputReserveTokens: 2_048,
 };
 
 async function writeModule(dirName: string): Promise<void> {
