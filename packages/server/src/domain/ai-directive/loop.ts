@@ -1,6 +1,7 @@
 import type { ErrorCode, RollCheck } from '@behindveil/shared';
 import type { ParsedRoll } from '../dice/evaluator.js';
-import { createCsprngRandom, type RandomSource } from '../dice/random.js';
+// 缺省 CSPRNG 由 executeCheck 兜底（executor.ts），本层只透传测试注入的确定性源
+import type { RandomSource } from '../dice/random.js';
 import type { LlmAdapter, LlmMessage } from '../llm.js';
 import type { RuleBook } from '../rulebook/types.js';
 import type { DirectiveSuccessTracker } from './degrade.js';
@@ -64,6 +65,12 @@ export interface AiTurnPorts {
   finishNarration(triggerSeq: number, content: string, aborted: boolean): Promise<void>;
   /** KP 端告警（E-AI-01，玩家无感；定向 Host） */
   alertKp(code: ErrorCode, message: string): void;
+  /**
+   * 失败指令块留档（可选端口；测试文档 §12.4：失败块原始文本自动落 data/logs/ 供回归分析）。
+   * 仅 parse-error / rejected 调用——截断块不构成一次解析尝试，循环上限拦截不是解析失败，
+   * 二者都不入分母（§12.4）也不留档。
+   */
+  recordDirective?(ev: DirectiveScanEvent): void;
   /** 二级降级的玩家提示（TDD §5.4：提示玩家 .r 手动骰） */
   notifyFallback(): Promise<void>;
 }
@@ -130,6 +137,7 @@ export async function runAiTurn(triggerSeq: number, ports: AiTurnPorts): Promise
         ports.tracker.record(false);
         failedHere = true;
         ports.alertKp(ev.code, ev.reason);
+        ports.recordDirective?.(ev);
       }
 
       // 二级降级：少样本在本请求生效仍失败 → 本回合停用协议 + 提示玩家 .r（TDD §5.4 降级链末级）

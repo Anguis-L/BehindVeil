@@ -14,6 +14,7 @@ import {
   type AiTurnPorts,
 } from './loop.js';
 import type { CheckDirective } from './schema.js';
+import type { DirectiveScanEvent } from './scan.js';
 
 /**
  * T-M3-04/05：闭环编排器（TDD §5.4 处理循环 / ADR-02）。
@@ -60,6 +61,8 @@ interface Harness {
   narrations: { triggerSeq: number; content: string; aborted: boolean }[];
   fallbacks: number;
   tracker: DirectiveSuccessTracker;
+  /** 留档端口收到的失败块（T-M3-07，测试文档 §12.4） */
+  records: DirectiveScanEvent[];
 }
 
 function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Harness {
@@ -70,6 +73,7 @@ function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Har
   const alerts: { code: ErrorCode; message: string }[] = [];
   const deltas: string[] = [];
   const narrations: { triggerSeq: number; content: string; aborted: boolean }[] = [];
+  const records: DirectiveScanEvent[] = [];
   let fallbacks = 0;
 
   const llm: LlmAdapter = {
@@ -114,6 +118,9 @@ function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Har
     alertKp: (code, message) => {
       alerts.push({ code, message });
     },
+    recordDirective: (ev) => {
+      records.push(ev);
+    },
     notifyFallback: async () => {
       fallbacks += 1;
     },
@@ -132,6 +139,7 @@ function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Har
       return fallbacks;
     },
     tracker,
+    records,
   };
 }
 
@@ -267,7 +275,9 @@ describe('失败事件 → E-AI-01 只达 KP（玩家无感）', () => {
   });
 
   it('白名单拒绝（未知 op）：原因可读，不掷骰', async () => {
-    const h = harness([{ chunks: [fence('{"op": "roll", "target": "pc:alice", "skill": "侦查"}')] }]);
+    const h = harness([
+      { chunks: [fence('{"op": "roll", "target": "pc:alice", "skill": "侦查"}')] },
+    ]);
     await runAiTurn(1, h.ports);
 
     expect(h.dice).toHaveLength(0);
@@ -295,6 +305,48 @@ describe('失败事件 → E-AI-01 只达 KP（玩家无感）', () => {
     expect(h.dice).toHaveLength(0);
     expect(h.alerts).toHaveLength(0);
     expect(h.tracker.attempts).toBe(0); // 分母不含截断块
+  });
+});
+
+describe('失败块留档（T-M3-07，测试文档 §12.4）', () => {
+  it('解析失败：原始文本与原因一并交给留档端口', async () => {
+    const h = harness([{ chunks: ['你翻找。\n', fence('{"op": "check" 未闭合'), '什么也没有。'] }]);
+    await runAiTurn(1, h.ports);
+
+    expect(h.records).toHaveLength(1);
+    expect(h.records[0]).toMatchObject({
+      kind: 'parse-error',
+      raw: expect.stringContaining('未闭合'),
+      reason: expect.any(String),
+    });
+  });
+
+  it('白名单拒绝：同样留档（未知 op 是常见失败形态）', async () => {
+    const h = harness([
+      { chunks: [fence('{"op": "roll", "target": "pc:alice", "skill": "侦查"}')] },
+    ]);
+    await runAiTurn(1, h.ports);
+
+    expect(h.records).toHaveLength(1);
+    expect(h.records[0]).toMatchObject({ kind: 'rejected', raw: expect.any(String) });
+  });
+
+  it('截断块与循环上限拦截都不留档：二者不计入 R-01 分母', async () => {
+    const truncated = harness([{ chunks: ['```aidle\n{"op": "check"'] }]);
+    await runAiTurn(1, truncated.ports);
+    expect(truncated.records).toHaveLength(0);
+
+    const limit = harness([
+      {
+        chunks: [fence(checkJson()), fence(checkJson()), fence(checkJson()), fence(checkJson())],
+      },
+      { chunks: ['收尾。'] },
+    ]);
+    await runAiTurn(1, limit.ports);
+
+    // 4 块：3 块执行成功，第 4 块被上限拦截——成功与拦截都不属于「解析失败」
+    expect(limit.dice).toHaveLength(3);
+    expect(limit.records).toHaveLength(0);
   });
 });
 
@@ -329,9 +381,7 @@ describe('降级链（T-M3-05，R-01）', () => {
 
 describe('异常与中断（E-LLM-01 / E-LLM-02）', () => {
   it('LLM 抛错 → 告警后终止回合，叙事标记中断', async () => {
-    const h = harness([
-      { error: new LlmError('E-LLM-01', '上游超时', { retryable: false }) },
-    ]);
+    const h = harness([{ error: new LlmError('E-LLM-01', '上游超时', { retryable: false }) }]);
     await runAiTurn(3, h.ports);
 
     expect(h.alerts).toEqual([{ code: 'E-LLM-01', message: '上游超时' }]);
@@ -344,7 +394,9 @@ describe('异常与中断（E-LLM-01 / E-LLM-02）', () => {
     const h = harness([{ chunks: ['你推开', '门。'], aborted: true }]);
     await runAiTurn(2, h.ports);
 
-    expect(h.narrations).toEqual([{ triggerSeq: 2, content: '你推开门。\n（生成中断）', aborted: true }]);
+    expect(h.narrations).toEqual([
+      { triggerSeq: 2, content: '你推开门。\n（生成中断）', aborted: true },
+    ]);
     expect(h.alerts).toHaveLength(0); // 中断不是指令协议错误
   });
 

@@ -8,7 +8,9 @@ import { join } from 'node:path';
  * ├── rooms/<roomId>/{room.json, members.json, worldbook.json, sessions/<sessionId>/{session.json, messages.jsonl, state.json}}
  * ├── cards/                      # 角色卡库（M5）
  * ├── modules/<moduleId>/          # 模组包（M5）
- * └── logs/audit-dice.jsonl       # 全局骰子审计流水（M4）
+ * └── logs/
+ *     ├── audit-dice.jsonl        # 全局骰子审计流水（M4）
+ *     └── ai-directive.jsonl      # AI 指令失败块留档（T-M3-07，测试文档 §12.4）
  */
 export interface DataLayout {
   readonly root: string;
@@ -18,6 +20,8 @@ export interface DataLayout {
   readonly modulesDir: string;
   readonly logsDir: string;
   readonly auditDiceFile: string;
+  /** AI 指令失败块留档（T-M3-07：解析失败/白名单拒绝的原始文本，供回归分析） */
+  readonly directiveLogFile: string;
   roomDir(roomId: string): string;
   roomFile(roomId: string): string;
   membersFile(roomId: string): string;
@@ -40,6 +44,7 @@ export function createDataLayout(root: string): DataLayout {
     modulesDir: join(root, 'modules'),
     logsDir: join(root, 'logs'),
     auditDiceFile: join(root, 'logs', 'audit-dice.jsonl'),
+    directiveLogFile: join(root, 'logs', 'ai-directive.jsonl'),
     roomDir: (roomId) => join(roomsDir, roomId),
     roomFile: (roomId) => join(roomsDir, roomId, 'room.json'),
     membersFile: (roomId) => join(roomsDir, roomId, 'members.json'),

@@ -36,7 +36,10 @@ export type MockScriptStep =
 export interface MockLlmOptions {
   /**
    * 指令块格式错误注入率 0..1（R-01 / 降级链 / F-04 畸形语料用）。
-   * 命中时指令块 JSON 被确定性破坏（尾逗号），errorRate=1 恒为畸形。
+   * 命中时指令块 JSON 被确定性破坏（删掉字段分隔逗号），errorRate=1 恒为畸形。
+   *
+   * 破坏形态必须是 repairJson 修不回来的：尾逗号会被容错层修好、照样解析成功，
+   * 注入就失去意义（50 轮回归 TC-FR-05-011 依赖它真实产生失败样本）。
    */
   errorRate?: number;
 }
@@ -81,7 +84,10 @@ class MockLlmAdapterImpl implements MockLlmAdapter {
       // directive 步骤：产出 aidle 栅栏块（2 空格缩进，与测试断言格式一致）
       let json = JSON.stringify(step.directive, null, 2);
       if (this.errorRate > 0 && Math.random() < this.errorRate) {
-        json = `${json.slice(0, -1)},}`; // 确定性破坏：尾逗号（F-04 语料形态之一）
+        // 确定性破坏：删掉首个字段分隔逗号（F-04 语料形态之一）。
+        // 刻意不用尾逗号——repairJson 专门修尾逗号（T-M3-01），那种畸形到扫描层
+        // 会被修好、解析成功，注入等于没注入；缺分隔符是它修不回来的形态。
+        json = json.replace(/,\n/, '\n');
       }
       const block = `\`\`\`aidle\n${json}\n\`\`\``;
       onDelta(block);

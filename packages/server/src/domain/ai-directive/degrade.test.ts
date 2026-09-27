@@ -105,3 +105,18 @@ describe('跨回合共享（tracker 挂在房间/会话上）', () => {
     expect(tracker.needsFewShot).toBe(true);
   });
 });
+
+describe('累计口径（T-M3-07：50 轮回归与可观测取用）', () => {
+  it('totals 统计全程，不受滑动窗口挤出影响', () => {
+    const tracker = new DirectiveSuccessTracker(3);
+    fill(tracker, true, 5);
+    fill(tracker, false, 1);
+
+    expect(tracker.attempts).toBe(3); // 窗口只剩最近 3 条
+    expect(tracker.totals).toEqual({ attempts: 6, successes: 5, rate: 5 / 6 });
+  });
+
+  it('无尝试时累计成功率视为 1：尚无失败证据，与窗口口径一致', () => {
+    expect(new DirectiveSuccessTracker().totals).toEqual({ attempts: 0, successes: 0, rate: 1 });
+  });
+});

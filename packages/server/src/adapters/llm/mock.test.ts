@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { repairJson } from '../../domain/ai-directive/repair.js';
 import { createMockLlm } from './mock.js';
 
 /**
@@ -77,6 +78,33 @@ describe('MockLlm 指令块注入（FR-05 回归用）', () => {
 
     expect(block).toContain('```aidle');
     expect(() => JSON.parse(block.replace(/```aidle|```/g, '').trim())).toThrow();
+  });
+
+  it('注入的畸形是容错层修不回来的：经 repairJson 后仍解析失败', async () => {
+    // 回归要点：早期实现破坏成尾逗号，而 repairJson 正是修尾逗号的（T-M3-01），
+    // 结果畸形块到扫描层被修好、解析成功——注入等于没注入，50 轮回归拿不到失败样本。
+    const adapter = createMockLlm({
+      script: [{ directive: { op: 'check', target: 'pc:alice', skill: '侦查' } }],
+      errorRate: 1,
+    });
+
+    const res = await adapter.chat(req, () => undefined);
+    const raw = res.content
+      .slice(res.content.indexOf('```aidle'))
+      .replace(/```aidle|```/g, '')
+      .trim();
+
+    expect(() => JSON.parse(repairJson(raw))).toThrow();
+    // 对照组：合法块经容错层后照常可用（证明上面的失败不是容错层本身坏了）
+    const clean = createMockLlm({
+      script: [{ directive: { op: 'check', target: 'pc:alice', skill: '侦查' } }],
+    });
+    const ok = await clean.chat(req, () => undefined);
+    const okRaw = ok.content
+      .slice(ok.content.indexOf('```aidle'))
+      .replace(/```aidle|```/g, '')
+      .trim();
+    expect(JSON.parse(repairJson(okRaw))).toMatchObject({ op: 'check' });
   });
 });
 

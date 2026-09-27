@@ -12,16 +12,34 @@ const FEW_SHOT_THRESHOLD = 0.95;
 
 export class DirectiveSuccessTracker {
   private readonly results: boolean[] = [];
+  /** 累计口径（不滑动）：50 轮回归（TC-FR-05-011）与后续可观测指标用 */
+  private totalAttempts = 0;
+  private totalSuccesses = 0;
 
   constructor(private readonly windowSize: number = DEGRADE_WINDOW_SIZE) {}
 
   record(success: boolean): void {
     this.results.push(success);
     if (this.results.length > this.windowSize) this.results.shift();
+    this.totalAttempts += 1;
+    if (success) this.totalSuccesses += 1;
   }
 
   get attempts(): number {
     return this.results.length;
+  }
+
+  /**
+   * 全程累计成功率（分母口径同 §12.4：成功 + 解析失败 + 白名单拒绝；截断块不计）。
+   * 无尝试时为 1——尚无失败证据，与窗口口径保持一致。
+   */
+  get totals(): { attempts: number; successes: number; rate: number } {
+    if (this.totalAttempts === 0) return { attempts: 0, successes: 0, rate: 1 };
+    return {
+      attempts: this.totalAttempts,
+      successes: this.totalSuccesses,
+      rate: this.totalSuccesses / this.totalAttempts,
+    };
   }
 
   /** 当前窗口成功率（无尝试时为 1——尚无失败证据，不降级） */

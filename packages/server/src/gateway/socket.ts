@@ -1,3 +1,4 @@
+import { appendFile, mkdir } from 'node:fs/promises';
 import { Server, type Socket } from 'socket.io';
 import {
   CLIENT_EVENT_SCHEMAS,
@@ -25,6 +26,7 @@ import { createCsprngRandom } from '../domain/dice/random.js';
 import { createDiceAuditor } from '../domain/dice/audit.js';
 import { Coc7RuleBook } from '../domain/rulebook/coc7.js';
 import { DirectiveSuccessTracker } from '../domain/ai-directive/degrade.js';
+import type { DirectiveScanEvent } from '../domain/ai-directive/scan.js';
 import { runAiTurn } from '../domain/ai-directive/loop.js';
 import type { LlmAdapter } from '../domain/llm.js';
 import { appendMessage, readMessagesAfter } from '../domain/session/messages.js';
@@ -76,6 +78,11 @@ export interface GatewayDeps {
 
 export interface GatewayHandle {
   close(): Promise<void>;
+  /**
+   * 指令协议全程累计统计（T-M3-07，R-01）。汇总所有会话 tracker 的累计口径，
+   * 供 50 轮回归（TC-FR-05-011）与后续 /metrics 取用；滑动窗口仍在各自 tracker 内。
+   */
+  directiveStats(): { attempts: number; successes: number; rate: number };
 }
 
 interface Presence {
@@ -625,6 +632,29 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   }
 
   /**
+   * 指令失败块留档（T-M3-07，测试文档 §12.4）：解析失败 / 白名单拒绝的原始文本
+   * 追加到 `data/logs/ai-directive.jsonl`，供回归分析「KP 到底吐错了什么」。
+   * 留档失败不影响回合（可观测旁路，绝不能反过来打断跑团）。
+   */
+  function recordDirectiveFailure(roomId: string, sessionId: string, ev: DirectiveScanEvent): void {
+    if (ev.kind !== 'parse-error' && ev.kind !== 'rejected') return;
+    const line = `${JSON.stringify({
+      ts: new Date().toISOString(),
+      roomId,
+      sessionId,
+      kind: ev.kind,
+      block: ev.block,
+      reason: ev.reason,
+      raw: ev.raw,
+    })}\n`;
+    void mkdir(layout.logsDir, { recursive: true })
+      .then(() => appendFile(layout.directiveLogFile, line, 'utf8'))
+      .catch((err: unknown) => {
+        console.error('[gateway] 指令留档失败：', err);
+      });
+  }
+
+  /**
    * 排程一个 AI 回合（T-M3-06，D-07）：进入房间级 AI 串行队列；回合完成后开启新「轮」。
    * 触发源：玩家 IC 消息（triggerSeq=该消息 seq）或 ai:invoke（triggerSeq=当前 lastSeq）。
    */
@@ -675,6 +705,9 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
             for (const socketId of roomHostSockets.get(roomId) ?? []) {
               emitError(io.to(socketId), code, message);
             }
+          },
+          recordDirective: (ev) => {
+            recordDirectiveFailure(roomId, sessionId, ev);
           },
           notifyFallback: async () => {
             await enqueue(roomId, () =>
@@ -795,6 +828,16 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     async close(): Promise<void> {
       io.disconnectSockets(true);
       io.removeAllListeners();
+    },
+    directiveStats(): { attempts: number; successes: number; rate: number } {
+      let attempts = 0;
+      let successes = 0;
+      for (const tracker of trackers.values()) {
+        const totals = tracker.totals;
+        attempts += totals.attempts;
+        successes += totals.successes;
+      }
+      return { attempts, successes, rate: attempts === 0 ? 1 : successes / attempts };
     },
   };
 }
