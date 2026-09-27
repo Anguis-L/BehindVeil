@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { executeCheck, type CheckExecutorDeps, type PcRoster } from './executor.js';
 import type { CheckDirective } from './schema.js';
 import type { RandomSource } from '../dice/random.js';
-import { createRosterStub } from '../stateboard/roster.stub.js';
+import { createStateBoardRoster } from '../stateboard/roster.js';
+import type { StateBoard } from '@behindveil/shared';
 
 /**
  * T-M3-03：检定执行器（TDD §5.4）。
@@ -119,8 +120,38 @@ describe('名册查询失败 → E-AI-01（不计入 R-01 成功）', () => {
 });
 
 describe('默认依赖装配', () => {
-  it('缺省即名册 stub + CSPRNG + COC7：产物形状完整（不校验具体骰值）', () => {
-    const result = executeCheck(directive(), { roster: createRosterStub() });
+  it('缺省即真实名册（状态板实现）+ CSPRNG + COC7：产物形状完整（不校验具体骰值）', () => {
+    const board: StateBoard = {
+      version: 0,
+      pcs: {
+        alice: {
+          sheet: {
+            playerName: '爱丽丝',
+            occupation: '',
+            str: 0,
+            con: 0,
+            siz: 0,
+            dex: 0,
+            app: 0,
+            int: 0,
+            pow: 0,
+            edu: 0,
+            luck: 0,
+            hp: 0,
+            mp: 0,
+            san: 0,
+            db: '0',
+            build: '0',
+            skills: { 侦查: 60 },
+          },
+          conditions: [],
+        },
+      },
+      scene: { name: '', time: '', publicDesc: '' },
+      facts: [],
+      updatedAt: '1970-01-01T00:00:00.000Z',
+    };
+    const result = executeCheck(directive(), { roster: createStateBoardRoster(board) });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.roll.expr).toBe('1d100<=60');

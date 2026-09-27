@@ -8,6 +8,7 @@ import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { JsonStore } from '../../adapters/storage/json-store.js';
 import type { DataLayout } from '../../adapters/storage/layout.js';
+import { readRoomRoster } from '../stateboard/declare.js';
 import { readRoomFile, saveRoomFile } from './rooms.js';
 import { generateSessionId } from './ids.js';
 
@@ -28,6 +29,7 @@ async function saveSession(layout: DataLayout, roomId: string, session: Session)
 /**
  * 开新会话：自动结束当前活跃会话（endedAt 落今），写 session.json + 初始 state.json，
  * 并把 room.activeSessionId 指向新会话。
+ * 初始 pcs 装自房间级 PC 声明（T-M5-04，SDD §5.1：声明 → 开团 → pcSheet 进状态板初始）。
  */
 export async function createSession(
   layout: DataLayout,
@@ -57,9 +59,15 @@ export async function createSession(
   });
   await saveSession(layout, roomId, session);
 
+  const roster = await readRoomRoster(layout, roomId);
   const stateBoard = StateBoardSchema.parse({
     version: 0,
-    pcs: {},
+    pcs: Object.fromEntries(
+      Object.entries(roster.pcs).map(([memberId, declared]) => [
+        memberId,
+        { sheet: declared.sheet, conditions: [] },
+      ]),
+    ),
     scene: { name: '', time: '', publicDesc: '' },
     facts: [],
     updatedAt: now,

@@ -25,6 +25,17 @@ const { createDataLayout } = (await import(
   pathToFileURL(path.join(SERVER_DIST, 'adapters/storage/layout.js')).href
 )) as { createDataLayout(root: string): DataLayout };
 
+const { saveStateBoard } = (await import(
+  pathToFileURL(path.join(SERVER_DIST, 'domain/stateboard/board.js')).href
+)) as {
+  saveStateBoard(
+    layout: DataLayout,
+    roomId: string,
+    sessionId: string,
+    board: unknown,
+  ): Promise<void>;
+};
+
 const { createMockLlm } = (await import(
   pathToFileURL(path.join(SERVER_DIST, 'adapters/llm/mock.js')).href
 )) as { createMockLlm(options: { script?: MockScriptStep[] }): MockLlmAdapter };
@@ -294,9 +305,42 @@ async function startHarness(script: MockScriptStep[]): Promise<Harness> {
     ),
   );
   if (!hostAck.ok) throw new Error('Host 进房失败');
-  await new Promise<{ ok: boolean }>((resolve) =>
+  const sessionAck = await new Promise<{ ok: boolean; session?: { id: string } }>((resolve) =>
     host.emit('session:start', { moduleId: 'f-03', settings: SETTINGS }, resolve),
   );
+  if (!sessionAck.ok || !sessionAck.session) throw new Error('开团失败');
+  // T-M5-04 真实名册：检定取值来自状态板（不再有 stub 的硬编码 alice）——
+  // 装配一块含 alice 的初始板，供 50 轮剧本 pc:alice 检定取值。
+  await saveStateBoard(layout, room.id, sessionAck.session.id, {
+    version: 0,
+    pcs: {
+      alice: {
+        sheet: {
+          playerName: '爱丽丝',
+          occupation: '记者',
+          str: 50,
+          con: 60,
+          siz: 55,
+          dex: 70,
+          app: 50,
+          int: 75,
+          pow: 55,
+          edu: 80,
+          luck: 40,
+          hp: 11,
+          mp: 11,
+          san: 55,
+          db: '0',
+          build: '0',
+          skills: { 侦查: 60, 聆听: 45, 图书馆使用: 50 },
+        },
+        conditions: [],
+      },
+    },
+    scene: { name: '', time: '', publicDesc: '' },
+    facts: [],
+    updatedAt: new Date().toISOString(),
+  });
   const player = await connect();
   const playerAck = await new Promise<{ ok: boolean }>((resolve) =>
     player.emit(

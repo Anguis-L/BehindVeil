@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDataLayout } from '../../adapters/storage/layout.js';
 import { JsonStore } from '../../adapters/storage/json-store.js';
+import { declarePc } from '../stateboard/declare.js';
 import { createRoom, readRoomFile } from './rooms.js';
 import {
   createSession,
@@ -85,6 +86,49 @@ describe('createSession（T-M1-01/07）', () => {
 
     const roomAfter = await readRoomFile(layout, room.id);
     expect(roomAfter?.activeSessionId).toBe(second.id);
+  });
+
+  it('T-M5-04：开团前声明的 PC 装配进状态板初始 pcs（SDD §5.1）', async () => {
+    const layout = await makeLayout();
+    const room = await createRoom(layout, { name: 'A' });
+    await declarePc(layout, room.id, 'm1', {
+      sheet: {
+        playerName: '爱丽丝',
+        occupation: '记者',
+        str: 50,
+        con: 60,
+        siz: 55,
+        dex: 70,
+        app: 50,
+        int: 75,
+        pow: 55,
+        edu: 80,
+        luck: 40,
+        hp: 11,
+        mp: 11,
+        san: 55,
+        db: '0',
+        build: '0',
+        skills: { 侦查: 60 },
+      },
+      source: 'manual',
+    });
+
+    const session = await createSession(layout, room.id, { moduleId: 'mod-1', settings });
+
+    const stateBoard = await new JsonStore(layout.stateFile(room.id, session.id)).read();
+    expect(stateBoard).toMatchObject({
+      version: 0,
+      pcs: { m1: { sheet: { playerName: '爱丽丝' }, conditions: [] } },
+    });
+  });
+
+  it('无声明开团：初始 pcs 为空（速建表未录不影响开团）', async () => {
+    const layout = await makeLayout();
+    const room = await createRoom(layout, { name: 'A' });
+    const session = await createSession(layout, room.id, { moduleId: 'mod-1', settings });
+    const stateBoard = await new JsonStore(layout.stateFile(room.id, session.id)).read();
+    expect(stateBoard).toMatchObject({ version: 0, pcs: {} });
   });
 });
 

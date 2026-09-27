@@ -10,6 +10,8 @@ import { createDataLayout, type DataLayout } from '../adapters/storage/layout.js
 import { createMockLlm, type MockLlmAdapter, type MockScriptStep } from '../adapters/llm/mock.js';
 import type { LlmAdapter } from '../domain/llm.js';
 import { createRoom } from '../domain/session/rooms.js';
+import { saveStateBoard } from '../domain/stateboard/board.js';
+import type { StateBoard } from '@behindveil/shared';
 import { attachGateway } from './socket.js';
 
 /**
@@ -90,9 +92,43 @@ async function startAiServer(
     ),
   );
   if (!hostAck.ok) throw new Error('Host 进房失败');
-  await new Promise<{ ok: boolean }>((resolve) =>
+  const sessionAck = await new Promise<{ ok: boolean; session?: { id: string } }>((resolve) =>
     host.emit('session:start', { moduleId: 'mod-1', settings }, resolve),
   );
+  if (!sessionAck.ok || !sessionAck.session) throw new Error('开团失败');
+  // T-M5-04 真实名册：检定取值来自状态板（不再有 stub 的硬编码 alice）——
+  // 装配一块含 alice 的初始板，供 Mock 剧本 pc:alice 检定取值。
+  const aliceBoard: StateBoard = {
+    version: 0,
+    pcs: {
+      alice: {
+        sheet: {
+          playerName: '爱丽丝',
+          occupation: '记者',
+          str: 50,
+          con: 60,
+          siz: 55,
+          dex: 70,
+          app: 50,
+          int: 75,
+          pow: 55,
+          edu: 80,
+          luck: 40,
+          hp: 11,
+          mp: 11,
+          san: 55,
+          db: '0',
+          build: '0',
+          skills: { 侦查: 60, 图书馆使用: 50, 聆听: 45, 急救: 50, 攀爬: 65 },
+        },
+        conditions: [],
+      },
+    },
+    scene: { name: '', time: '', publicDesc: '' },
+    facts: [],
+    updatedAt: new Date().toISOString(),
+  };
+  await saveStateBoard(layout, room.id, sessionAck.session.id, aliceBoard);
   const player = await connect();
   const playerAck = await new Promise<{ ok: boolean }>((resolve) =>
     player.emit(

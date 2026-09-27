@@ -29,17 +29,20 @@ import { DirectiveSuccessTracker } from '../domain/ai-directive/degrade.js';
 import type { DirectiveScanEvent } from '../domain/ai-directive/scan.js';
 import { runAiTurn } from '../domain/ai-directive/loop.js';
 import type { LlmAdapter } from '../domain/llm.js';
+import { applyStatePatch, readStateBoard, saveStateBoard } from '../domain/stateboard/board.js';
+import { createStateBoardRoster } from '../domain/stateboard/roster.js';
 import { appendMessage, readMessagesAfter } from '../domain/session/messages.js';
 import { addMember, readMembers } from '../domain/session/members.js';
 import { findByInviteCode, readRoomFile } from '../domain/session/rooms.js';
 import { createSession } from '../domain/session/sessions.js';
-import { createRosterStub } from '../domain/stateboard/roster.stub.js';
 import { buildPreviewTrace } from '../observability/preview.js';
 import type {
   DiceRollPayload,
   MsgSendPayload,
   RoomJoinPayload,
   SessionStartPayload,
+  StateBoard,
+  StateUpdatePayload,
 } from '@behindveil/shared';
 
 /**
@@ -56,8 +59,11 @@ import type {
  *   「轮」= 相邻两次 AI 回合之间的窗口）；AI 回合独立串行队列，不阻塞消息主链路。
  * - 玩家骰（T-M4-02/03，FR-06/14）：dice:roll → 解析 → 掷骰 → 落审计 → 广播；
  *   暗骰按决议 D-10 仅投递 Host 与掷骰者；非法骰式回 E-DICE-01（行内提示，不广播）。
- * - M5 事件（state:update/state:snapshot）：payload 校验通过后暂不处理
- *   （未到里程碑不提前实现），到点在 dispatch 落位。
+ * - 状态板写路径（T-M5-06，FR-09）：state:update → 仅 Host → 房间队列内乐观锁校验
+ *   （E-ST-01 拒绝并广播最新版）→ 原子落盘 → state:broadcast 全员广播。
+ *   状态板内存态按会话懒加载，检定名册（T-M5-04）同步读内存板。
+ * - M5 事件（state:snapshot）：payload 校验通过后暂不处理（未到里程碑不提前实现），
+ *   到点在 dispatch 落位。
  */
 
 const MSG_RATE_LIMIT = 10;
@@ -144,7 +150,12 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   const trackers = new Map<string, DirectiveSuccessTracker>();
   const sendWindows = new Map<string, number[]>();
   const jsonlStores = new Map<string, JsonlStore>();
-  const roster = createRosterStub();
+  /**
+   * 状态板内存态（T-M5-06）：key = sessionId，首次访问从 state.json 懒加载，
+   * 写路径在房间队列内同步维护。检定名册（createStateBoardRoster）按会话读此板，
+   * PcRoster 端口保持同步签名。
+   */
+  const stateBoards = new Map<string, StateBoard>();
   /** 骰子审计流水（T-M4-01）：所有掷骰先落审计再广播 */
   const auditor = createDiceAuditor(layout);
   const random = createCsprngRandom();
@@ -219,6 +230,9 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       case 'dice:roll':
         await handleDiceRoll(socket, payload as DiceRollPayload);
         return;
+      case 'state:update':
+        await handleStateUpdate(socket, payload as StateUpdatePayload);
+        return;
       default:
         return;
     }
@@ -274,6 +288,16 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       jsonlStores.set(key, store);
     }
     return store;
+  }
+
+  /** 状态板内存态懒加载（T-M5-06）；须在房间队列内调用以与写路径串行 */
+  async function boardFor(roomId: string, sessionId: string): Promise<StateBoard> {
+    let board = stateBoards.get(sessionId);
+    if (!board) {
+      board = await readStateBoard(layout, roomId, sessionId);
+      stateBoards.set(sessionId, board);
+    }
+    return board;
   }
 
   function buildMessage(sessionId: string, appendable: AppendableMessage, seq: number): Message {
@@ -632,6 +656,45 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   }
 
   /**
+   * 状态板写路径（T-M5-06，TDD §5.5，TC-FR-09-001~003）：仅 Host 可写（引擎写路径走
+   * engine-writes，不经 socket）；整个「校验 → 乐观锁 → 落盘 → 广播」在房间串行队列内，
+   * 与消息主链路同一把队（读改写并发安全）。expectedVersion 过期 → E-ST-01 拒绝 +
+   * 广播当前最新版，让发起者与全员对齐后再重试。
+   */
+  async function handleStateUpdate(socket: Socket, data: StateUpdatePayload): Promise<void> {
+    const me = presence.get(socket.id);
+    if (!me) {
+      emitError(socket, 'E-ROOM-01', '尚未加入房间');
+      return;
+    }
+    if (me.role !== 'host') {
+      emitError(socket, 'E-ROOM-01', '仅 Host 可编辑状态板');
+      return;
+    }
+    const room = await readRoomFile(layout, me.roomId);
+    const sessionId = room?.activeSessionId;
+    if (!room || !sessionId) {
+      emitError(socket, 'E-ROOM-01', '尚未开团，暂无状态板可编辑');
+      return;
+    }
+
+    await enqueue(me.roomId, async () => {
+      const board = await boardFor(me.roomId, sessionId);
+      const result = applyStatePatch(board, data.patch, data.expectedVersion);
+      if (!result.ok) {
+        emitError(socket, 'E-ST-01', '状态板已被他人更新，请以最新版为准重试');
+        emitChecked(io.to(`room:${me.roomId}`), 'state:broadcast', {
+          stateBoard: result.current,
+        });
+        return;
+      }
+      stateBoards.set(sessionId, result.next);
+      await saveStateBoard(layout, me.roomId, sessionId, result.next);
+      emitChecked(io.to(`room:${me.roomId}`), 'state:broadcast', { stateBoard: result.next });
+    });
+  }
+
+  /**
    * 指令失败块留档（T-M3-07，测试文档 §12.4）：解析失败 / 白名单拒绝的原始文本
    * 追加到 `data/logs/ai-directive.jsonl`，供回归分析「KP 到底吐错了什么」。
    * 留档失败不影响回合（可观测旁路，绝不能反过来打断跑团）。
@@ -666,10 +729,14 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       const tracker = trackers.get(sessionId) ?? new DirectiveSuccessTracker();
       trackers.set(sessionId, tracker);
       try {
+        // 预热状态板懒加载（T-M5-04）：AI 回合可能先于任何 state:update 发生，
+        // 不预热则名册查无 PC，检定全落 E-AI-01。读盘走 JsonStore 文件锁，无竞态损坏。
+        await boardFor(roomId, sessionId);
         await runAiTurn(triggerSeq, {
           llm,
           chat,
-          roster,
+          // 真实名册（T-M5-04）：按本会话状态板取技能值（含 roster 声明装配的初始板）
+          roster: createStateBoardRoster(stateBoards.get(sessionId)),
           tracker,
           buildMessages: async () => (await buildPreviewTrace(layout, roomId, sessionId)).messages,
           emitDice: async (roll) => {

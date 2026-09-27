@@ -1,14 +1,8 @@
-import {
-  MessageSchema,
-  StateBoardSchema,
-  type CharacterCardV3,
-  type Message,
-  type StateBoard,
-} from '@behindveil/shared';
-import { JsonStore } from '../adapters/storage/json-store.js';
+import { MessageSchema, type CharacterCardV3, type Message } from '@behindveil/shared';
 import { JsonlStore } from '../adapters/storage/jsonl-store.js';
 import type { DataLayout } from '../adapters/storage/layout.js';
 import { loadWorldBook } from '../domain/worldbook/validate.js';
+import { readStateBoard } from '../domain/stateboard/board.js';
 import { readSession } from '../domain/session/sessions.js';
 import { buildPrompt } from '../pipeline/index.js';
 import { createHeuristicTokenizer } from '../pipeline/tokenizer.js';
@@ -18,9 +12,9 @@ import type { PipelineTrace } from '../pipeline/types.js';
  * KP prompt 预览（T-M2-05，FR-13 / TDD §9）：以当前落盘状态组装 PipelineInput 并跑
  * 完整管线，返回全阶段 trace（kp:promptPreview 事件承载，host only）。
  *
- * M2 输入源：session/messages 取自仓库，世界书取房间级手编文件（D-08，载入校验），
- * 状态板读 session 初始 state.json（M5 状态板仓库落地后替换）；KP 卡为内置默认卡
- * （M5 模组包落地后由 moduleRef 解析）；pcRoster 桩空串（T-M5-04）。
+ * 输入源：session/messages 取自仓库，世界书取房间级手编文件（D-08，载入校验），
+ * 状态板经状态板仓库读取（T-M5-06 board.ts，缺失/损坏空板兜底）；KP 卡为内置默认卡
+ * （模组包 KP 卡解析随 T-M5-05 收尾接入）；pcRoster 桩空串（PC 名册块随 T-M5-10 评估）。
  */
 
 /** M2 内置默认 KP 卡：卡库/模组系统（M5）落地前的人格兜底，规则书默认 COC7 */
@@ -84,23 +78,4 @@ async function readMessagesUpTo(
     }
   }
   return messages.sort((a, b) => a.seq - b.seq);
-}
-
-/** 读 session 的 state.json；缺失或损坏时以空板兜底（M5 仓库化，预览不因状态板挂掉） */
-async function readStateBoard(
-  layout: DataLayout,
-  roomId: string,
-  sessionId: string,
-): Promise<StateBoard> {
-  const parsed = StateBoardSchema.safeParse(
-    await new JsonStore(layout.stateFile(roomId, sessionId)).read(),
-  );
-  if (parsed.success) return parsed.data;
-  return {
-    version: 0,
-    pcs: {},
-    scene: { name: '', time: '', publicDesc: '' },
-    facts: [],
-    updatedAt: '1970-01-01T00:00:00.000Z',
-  };
 }
