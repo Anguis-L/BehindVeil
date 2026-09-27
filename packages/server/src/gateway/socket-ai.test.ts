@@ -10,7 +10,7 @@ import { createDataLayout, type DataLayout } from '../adapters/storage/layout.js
 import { createMockLlm, type MockLlmAdapter, type MockScriptStep } from '../adapters/llm/mock.js';
 import type { LlmAdapter } from '../domain/llm.js';
 import { createRoom } from '../domain/session/rooms.js';
-import { attachGateway, type GatewayHandle } from './socket.js';
+import { attachGateway } from './socket.js';
 
 /**
  * T-M3-06：AI 触发与检定闭环的网关集成测试（TDD §4.1/§5.4，D-07）。

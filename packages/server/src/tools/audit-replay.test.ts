@@ -129,7 +129,15 @@ describe('篡改必被检出（防「算错也看不出来」）', () => {
   it('改 rolls（换一组骰值）', async () => {
     const entries = makeEntries(20);
     const victim = entries[5];
-    if (victim) victim.rolls = victim.rolls.map((group) => group.map(() => 1));
+    if (victim) {
+      // victim 循环到 4dF（dF 值域 {-1,0,+1}）：全 +1 重算 total=4，而原始 total
+      // 恰好也是 4 的概率 1/81——那种情况下篡改被 total 比对漏掉，用例 flaky。
+      // 原始 total=4 时改投全 -1（重算 -4），构造性保证「只改 rolls」必被检出。
+      victim.rolls =
+        victim.total === 4
+          ? victim.rolls.map((group) => group.map(() => -1))
+          : victim.rolls.map((group) => group.map(() => 1));
+    }
 
     const report = await replayAuditFile(await writeAuditFile(entries));
 

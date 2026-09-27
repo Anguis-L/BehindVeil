@@ -1,0 +1,2 @@
+# 统一 LF：仓库 prettier endOfLine=lf；Windows autocrlf 检出转 CRLF 会让本地 format:check 假红
+* text=auto eol=lf
