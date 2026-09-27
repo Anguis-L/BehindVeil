@@ -180,9 +180,19 @@ export const AidleCardExtensionsSchema = z.object({
 });
 export type AidleCardExtensions = z.infer<typeof AidleCardExtensionsSchema>;
 
+/**
+ * ccv3 卡（M5/T-M5-01 细化）。
+ *
+ * 两个刻意的选择（FR-08「直接兼容社区存量资产」）：
+ * 1. `spec_version` 显式保留——ccv3 规范字段，strip 掉会让导出回社区的卡残缺；
+ * 2. `data` 用 looseObject——社区卡的 personality / creator_notes / tags / alternate_greetings
+ *    等标准字段我们不消费，但导出时必须原样带回，否则「导入→导出」是有损的。
+ *    我们依赖的那几个字段仍然严格校验（TC-FR-08-001）。
+ */
 export const CharacterCardV3Schema = z.object({
   spec: z.literal('chara_card_v3'),
-  data: z.object({
+  spec_version: z.string().optional(),
+  data: z.looseObject({
     name: z.string(),
     /** KP 卡：行为准则 + 判定规则 */
     description: z.string(),

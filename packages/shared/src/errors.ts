@@ -15,6 +15,8 @@ export const ERROR_CODES = [
   'E-ROOM-01',
   'E-MOD-01',
   'E-SRV-01',
+  // M5（FR-08）：角色卡导入失败——三步导入流任一步不通过，错误信息定位到步
+  'E-CARD-01',
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -38,6 +40,10 @@ export const ERROR_DETAILS: Record<ErrorCode, ErrorDetail> = {
   // 2026-09-25 拍板新增：服务端内部错误（TC-FR-02-001 故障变体——WAP 链路写盘失败时
   // 该消息不广播并回业务错误；也覆盖 dispatch 其他未预期失败）
   'E-SRV-01': { scene: '服务端持久化/内部错误', userMessage: '服务器开小差了，请稍后重试' },
+  'E-CARD-01': {
+    scene: '角色卡导入失败（检测/转换/验证）',
+    userMessage: '角色卡无法导入，请检查格式',
+  },
 };
 
 /** `error:app` 事件 / REST 错误响应的统一载荷（TDD §4.2） */
