@@ -91,10 +91,47 @@ function join(client: Socket, payload: Record<string, unknown>): Promise<JoinAck
   return new Promise((resolve) => client.emit('room:join', payload, resolve));
 }
 
-function startSession(
+/** T-M5-05：开团前置是模组包存在——按需放置最小合法包（manifest + 三件套） */
+async function placeModule(moduleId: string): Promise<void> {
+  const dir = path.join(layout.modulesDir, moduleId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, 'manifest.json'),
+    JSON.stringify({
+      id: moduleId,
+      name: moduleId,
+      version: '1.0.0',
+      rulebook: 'coc7',
+      apiVersion: '1',
+      entry: { kpCard: 'kp-card.json', worldBook: 'worldbook.json', initState: 'init-state.json' },
+    }),
+  );
+  await writeFile(
+    path.join(dir, 'kp-card.json'),
+    JSON.stringify({
+      spec: 'chara_card_v3',
+      data: {
+        name: '守秘人',
+        description: '只叙述，不宣告判定。',
+        scenario: '',
+        first_mes: '',
+        mes_example: '',
+        extensions: { aidle: { rulebook: 'coc7' } },
+      },
+    }),
+  );
+  await writeFile(path.join(dir, 'worldbook.json'), JSON.stringify({ entries: [] }));
+  await writeFile(
+    path.join(dir, 'init-state.json'),
+    JSON.stringify({ scene: { name: '', time: '', publicDesc: '' } }),
+  );
+}
+
+async function startSession(
   client: Socket,
   moduleId = 'mod-1',
 ): Promise<{ ok: boolean; session?: { id: string }; message?: string }> {
+  await placeModule(moduleId);
   return new Promise((resolve) => client.emit('session:start', { moduleId, settings }, resolve));
 }
 

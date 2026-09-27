@@ -85,6 +85,42 @@ function join(
   return new Promise((resolve) => client.emit('room:join', payload, resolve));
 }
 
+/** T-M5-05：开团前置是模组包存在——放置最小合法包（manifest + 三件套） */
+async function placeModule(dataDir: string, moduleId: string): Promise<void> {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const dir = path.join(dataDir, 'modules', moduleId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, 'manifest.json'),
+    JSON.stringify({
+      id: moduleId,
+      name: moduleId,
+      version: '1.0.0',
+      rulebook: 'coc7',
+      apiVersion: '1',
+      entry: { kpCard: 'kp-card.json', worldBook: 'worldbook.json', initState: 'init-state.json' },
+    }),
+  );
+  await writeFile(
+    path.join(dir, 'kp-card.json'),
+    JSON.stringify({
+      spec: 'chara_card_v3',
+      data: {
+        name: '守秘人',
+        description: '只叙述，不宣告判定。',
+        scenario: '',
+        first_mes: '',
+        mes_example: '',
+        extensions: { aidle: { rulebook: 'coc7' } },
+      },
+    }),
+  );
+  await writeFile(path.join(dir, 'worldbook.json'), JSON.stringify({ entries: [] }));
+  await writeFile(
+    path.join(dir, 'init-state.json'),
+    JSON.stringify({ scene: { name: '', time: '', publicDesc: '' } }),
+  );
+}
 describe(`TC-NFR-05-003：3 端 soak（${SOAK_MS / 1000}s，AIDLE_SOAK_MS 可拉满 30 分钟）`, () => {
   it(
     `3 客户端压测 ${SOAK_MS / 1000}s：0 error:app、seq 连续、RSS 增长 <100MB`,
@@ -141,6 +177,7 @@ describe(`TC-NFR-05-003：3 端 soak（${SOAK_MS / 1000}s，AIDLE_SOAK_MS 可拉
         hostToken: room.hostToken,
       });
       expect(hostJoin.ok, hostJoin.message).toBe(true);
+      await placeModule(dataDir, 'mod-soak');
       const startAck = await new Promise<{ ok: boolean; message?: string }>((resolve) =>
         host.emit(
           'session:start',

@@ -45,6 +45,7 @@ interface Harness {
   protocol: string;
   dataDir: string;
   inviteCode: string;
+  sessionId: string;
   host: Socket;
   playerA: Socket;
   playerB: Socket;
@@ -94,6 +95,43 @@ function emitAck(socket: Socket, event: string, payload: unknown): Promise<AnyRe
   );
 }
 
+/** T-M5-05：开团前置是模组包存在——放置最小合法包（manifest + 三件套） */
+async function placeModule(dataDir: string, moduleId: string): Promise<void> {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const dir = path.join(dataDir, 'modules', moduleId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, 'manifest.json'),
+    JSON.stringify({
+      id: moduleId,
+      name: moduleId,
+      version: '1.0.0',
+      rulebook: 'coc7',
+      apiVersion: '1',
+      entry: { kpCard: 'kp-card.json', worldBook: 'worldbook.json', initState: 'init-state.json' },
+    }),
+  );
+  await writeFile(
+    path.join(dir, 'kp-card.json'),
+    JSON.stringify({
+      spec: 'chara_card_v3',
+      data: {
+        name: '守秘人',
+        description: '只叙述，不宣告判定。',
+        scenario: '',
+        first_mes: '',
+        mes_example: '',
+        extensions: { aidle: { rulebook: 'coc7' } },
+      },
+    }),
+  );
+  await writeFile(path.join(dir, 'worldbook.json'), JSON.stringify({ entries: [] }));
+  await writeFile(
+    path.join(dir, 'init-state.json'),
+    JSON.stringify({ scene: { name: '', time: '', publicDesc: '' } }),
+  );
+}
+
 /** 建一个「Host + 两名玩家在场、已开团」的房间 */
 async function setupRoom(): Promise<Harness> {
   const { port, dataDir, protocol } = await startServer();
@@ -139,6 +177,7 @@ async function setupRoom(): Promise<Harness> {
   expect(aAck['ok']).toBe(true);
   expect(bAck['ok']).toBe(true);
 
+  await placeModule(dataDir, 'mod-dice');
   const sessionAck = await emitAck(host, 'session:start', {
     moduleId: 'mod-dice',
     settings: SETTINGS,
@@ -151,6 +190,7 @@ async function setupRoom(): Promise<Harness> {
     protocol,
     dataDir,
     inviteCode: room.inviteCode,
+    sessionId: String((sessionAck['session'] as AnyRecord)['id']),
     host,
     playerA,
     playerB,
@@ -203,6 +243,12 @@ describe('玩家骰 dice:roll（T-M4-02，FR-06）', () => {
     expect(roll['total']).toBeLessThanOrEqual(15);
     expect((roll['rolls'] as number[][]).flat()).toHaveLength(2);
     expect((roll['audit'] as AnyRecord)['seq'] as string).toMatch(/^\d{6}$/);
+    expect(String((roll['audit'] as AnyRecord)['rollId'] ?? '')).not.toBe('');
+
+    // 消息信封（BaseMsgSchema：seq / ts / sessionId；roomId 不在契约里，广播本就在房间内）
+    expect(msg['sessionId']).toBe(h.sessionId);
+    expect(msg['seq'] as number).toBeGreaterThan(0);
+    expect(String(msg['ts'])).not.toBe('');
 
     // 同一颗骰子，三方看到的审计号必须一致（凭据唯一）
     const seqOf = (socket: Socket): unknown =>
@@ -224,8 +270,16 @@ describe('玩家骰 dice:roll（T-M4-02，FR-06）', () => {
     expect(diceMessages(h, h.playerB)).toHaveLength(0);
 
     const mine = diceMessages(h, h.playerA)[0] as AnyRecord;
+    const mineRoll = mine['roll'] as AnyRecord;
+    const mineAudit = mineRoll['audit'] as AnyRecord;
     expect(mine['hidden']).toBe(true);
-    expect(((mine['roll'] as AnyRecord)['audit'] as AnyRecord)['seq'] as string).toMatch(/^\d{6}$/);
+    expect(String(mineAudit['seq'])).toMatch(/^\d{6}$/);
+    // 隐藏的是广播范围，不是内容：掷骰者本人看到的骰值/结果必须完整
+    expect(mineRoll['expr']).toBe('1d100');
+    expect(mineRoll['total'] as number).toBeGreaterThanOrEqual(1);
+    expect(mineRoll['total'] as number).toBeLessThanOrEqual(100);
+    expect((mineRoll['rolls'] as number[][]).flat()).toHaveLength(1);
+    expect(String(mineAudit['rollId'] ?? '')).not.toBe('');
   });
 
   it('observer 不能掷骰', async () => {
@@ -291,6 +345,11 @@ describe('审计留痕（T-M4-01，NFR-04）', () => {
     expect(entries.map((e) => e['seq'])).toEqual(['000001', '000002']);
     expect(entries.map((e) => e['hidden'])).toEqual([false, true]); // 隐藏的是广播范围，不是凭据
     expect(entries[0]?.['actor']).toBe(h.memberA);
+
+    // rollId 是审计凭据的主键：有号且互不相同，否则无法唯一定位一颗骰子
+    const rollIds = entries.map((e) => e['rollId']);
+    for (const id of rollIds) expect(String(id ?? '')).not.toBe('');
+    expect(new Set(rollIds).size).toBe(2);
   });
 });
 

@@ -253,6 +253,43 @@ async function waitFor(cond: () => boolean, ms: number, label: string): Promise<
   }
 }
 
+/** T-M5-05：开团前置是模组包存在——放置最小合法包（manifest + 三件套） */
+async function placeModule(dataDir: string, moduleId: string): Promise<void> {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const dir = path.join(dataDir, 'modules', moduleId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, 'manifest.json'),
+    JSON.stringify({
+      id: moduleId,
+      name: moduleId,
+      version: '1.0.0',
+      rulebook: 'coc7',
+      apiVersion: '1',
+      entry: { kpCard: 'kp-card.json', worldBook: 'worldbook.json', initState: 'init-state.json' },
+    }),
+  );
+  await writeFile(
+    path.join(dir, 'kp-card.json'),
+    JSON.stringify({
+      spec: 'chara_card_v3',
+      data: {
+        name: '守秘人',
+        description: '只叙述，不宣告判定。',
+        scenario: '',
+        first_mes: '',
+        mes_example: '',
+        extensions: { aidle: { rulebook: 'coc7' } },
+      },
+    }),
+  );
+  await writeFile(path.join(dir, 'worldbook.json'), JSON.stringify({ entries: [] }));
+  await writeFile(
+    path.join(dir, 'init-state.json'),
+    JSON.stringify({ scene: { name: '', time: '', publicDesc: '' } }),
+  );
+}
+
 async function startHarness(script: MockScriptStep[]): Promise<Harness> {
   // 不递归删除临时目录：沙箱的批量删除守卫会挂住钩子（与被测行为无关），
   // 目录落在系统临时区由 OS 回收。
@@ -305,6 +342,7 @@ async function startHarness(script: MockScriptStep[]): Promise<Harness> {
     ),
   );
   if (!hostAck.ok) throw new Error('Host 进房失败');
+  await placeModule(dataDir, 'f-03');
   const sessionAck = await new Promise<{ ok: boolean; session?: { id: string } }>((resolve) =>
     host.emit('session:start', { moduleId: 'f-03', settings: SETTINGS }, resolve),
   );

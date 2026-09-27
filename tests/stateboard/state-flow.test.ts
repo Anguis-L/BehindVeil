@@ -107,6 +107,43 @@ async function waitUntil(cond: () => boolean, desc: string, timeoutMs = 3000): P
   throw new Error(`等待超时：${desc}`);
 }
 
+/** T-M5-05：开团前置是模组包存在——放置最小合法包（manifest + 三件套） */
+async function placeModule(dataDir: string, moduleId: string): Promise<void> {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const dir = path.join(dataDir, 'modules', moduleId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, 'manifest.json'),
+    JSON.stringify({
+      id: moduleId,
+      name: moduleId,
+      version: '1.0.0',
+      rulebook: 'coc7',
+      apiVersion: '1',
+      entry: { kpCard: 'kp-card.json', worldBook: 'worldbook.json', initState: 'init-state.json' },
+    }),
+  );
+  await writeFile(
+    path.join(dir, 'kp-card.json'),
+    JSON.stringify({
+      spec: 'chara_card_v3',
+      data: {
+        name: '守秘人',
+        description: '只叙述，不宣告判定。',
+        scenario: '',
+        first_mes: '',
+        mes_example: '',
+        extensions: { aidle: { rulebook: 'coc7' } },
+      },
+    }),
+  );
+  await writeFile(path.join(dir, 'worldbook.json'), JSON.stringify({ entries: [] }));
+  await writeFile(
+    path.join(dir, 'init-state.json'),
+    JSON.stringify({ scene: { name: '', time: '', publicDesc: '' } }),
+  );
+}
+
 /** 建一个「Host + 一名玩家在场、已开团」的房间；开团前以速建表声明玩家 PC */
 async function setupRoom(): Promise<Harness> {
   const { port, dataDir, protocol } = await startServer();
@@ -186,6 +223,7 @@ async function setupRoom(): Promise<Harness> {
   });
   expect(declare.status).toBe(201);
 
+  await placeModule(dataDir, 'mod-state');
   const sessionAck = await emitAck(host, 'session:start', {
     moduleId: 'mod-state',
     settings: SETTINGS,

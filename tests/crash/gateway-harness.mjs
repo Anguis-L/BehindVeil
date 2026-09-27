@@ -88,6 +88,44 @@ async function main() {
     );
     event({ event: 'join-ack', ok: joinAck.ok, role: joinAck.role });
 
+    // T-M5-05：开团前置是模组包存在——放置最小合法包（manifest + 三件套）
+    const { mkdirSync, writeFileSync: wFileSync } = await import('node:fs');
+    const modDir = path.join(dataDir, 'modules', 'mod-wap');
+    mkdirSync(modDir, { recursive: true });
+    wFileSync(
+      path.join(modDir, 'manifest.json'),
+      JSON.stringify({
+        id: 'mod-wap',
+        name: 'mod-wap',
+        version: '1.0.0',
+        rulebook: 'coc7',
+        apiVersion: '1',
+        entry: {
+          kpCard: 'kp-card.json',
+          worldBook: 'worldbook.json',
+          initState: 'init-state.json',
+        },
+      }),
+    );
+    wFileSync(
+      path.join(modDir, 'kp-card.json'),
+      JSON.stringify({
+        spec: 'chara_card_v3',
+        data: {
+          name: '守秘人',
+          description: '只叙述，不宣告判定。',
+          scenario: '',
+          first_mes: '',
+          mes_example: '',
+          extensions: { aidle: { rulebook: 'coc7' } },
+        },
+      }),
+    );
+    wFileSync(path.join(modDir, 'worldbook.json'), JSON.stringify({ entries: [] }));
+    wFileSync(
+      path.join(modDir, 'init-state.json'),
+      JSON.stringify({ scene: { name: '', time: '', publicDesc: '' } }),
+    );
     const sessionAck = await new Promise((resolve) =>
       socket.emit(
         'session:start',

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -92,6 +92,39 @@ async function startAiServer(
     ),
   );
   if (!hostAck.ok) throw new Error('Host 进房失败');
+  // T-M5-05：开团前置是模组包存在——放置最小合法包（manifest + 三件套）
+  const modDir = path.join(layout.modulesDir, 'mod-1');
+  await mkdir(modDir, { recursive: true });
+  await writeFile(
+    path.join(modDir, 'manifest.json'),
+    JSON.stringify({
+      id: 'mod-1',
+      name: 'mod-1',
+      version: '1.0.0',
+      rulebook: 'coc7',
+      apiVersion: '1',
+      entry: { kpCard: 'kp-card.json', worldBook: 'worldbook.json', initState: 'init-state.json' },
+    }),
+  );
+  await writeFile(
+    path.join(modDir, 'kp-card.json'),
+    JSON.stringify({
+      spec: 'chara_card_v3',
+      data: {
+        name: '守秘人',
+        description: '只叙述，不宣告判定。',
+        scenario: '',
+        first_mes: '',
+        mes_example: '',
+        extensions: { aidle: { rulebook: 'coc7' } },
+      },
+    }),
+  );
+  await writeFile(path.join(modDir, 'worldbook.json'), JSON.stringify({ entries: [] }));
+  await writeFile(
+    path.join(modDir, 'init-state.json'),
+    JSON.stringify({ scene: { name: '', time: '', publicDesc: '' } }),
+  );
   const sessionAck = await new Promise<{ ok: boolean; session?: { id: string } }>((resolve) =>
     host.emit('session:start', { moduleId: 'mod-1', settings }, resolve),
   );
