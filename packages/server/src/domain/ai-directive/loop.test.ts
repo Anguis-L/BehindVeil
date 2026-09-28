@@ -201,7 +201,9 @@ describe('检定闭环（TC-FR-05-001 编排侧）', () => {
     await runAiTurn(1, h.ports);
 
     expect(h.dice).toHaveLength(1);
-    expect(h.deltas.join('')).toContain(checkJson());
+    // 指令块是内部协议：识别照常，但不得流入广播增量（TDD §5.4）
+    expect(h.deltas.join('')).not.toContain(checkJson());
+    expect(h.deltas.join('')).not.toContain('```aidle');
   });
 });
 
@@ -258,6 +260,48 @@ describe('检定循环上限（TC-FR-05-006/007）', () => {
     expect(h.dice).toHaveLength(3);
     expect(h.alerts).toHaveLength(2); // 第一请求拦 1 次 + 收尾请求再拦 1 次
     expect(h.calls).toHaveLength(2); // 收尾请求 executedHere=0 → 结束
+  });
+});
+
+describe('指令块剥离（TDD §5.4：内部协议不出现在玩家可见输出）', () => {
+  it('叙事落盘不含指令块：块前/块后文本保留，广播增量同样无块内容', async () => {
+    const h = harness([
+      { chunks: ['你翻查书桌。\n', fence(checkJson()), '抽屉卡住了。'] },
+      { chunks: ['你使劲一拉。'] },
+    ]);
+    await runAiTurn(1, h.ports);
+
+    expect(h.narrations[0]!.content).toContain('你翻查书桌。');
+    expect(h.narrations[0]!.content).toContain('抽屉卡住了。');
+    expect(h.narrations[0]!.content).not.toContain('aidle');
+    expect(h.narrations[0]!.content).not.toContain(checkJson());
+    expect(h.deltas.join('')).not.toContain(checkJson());
+  });
+
+  it('解析失败 / 白名单拒绝的原始块同样不进叙事', async () => {
+    const h = harness([{ chunks: ['前文。\n', fence('{"op": "check" 坏'), '后文。'] }]);
+    await runAiTurn(1, h.ports);
+
+    expect(h.alerts).toHaveLength(1); // E-AI-01 照常告警
+    expect(h.narrations[0]!.content).toContain('前文。');
+    expect(h.narrations[0]!.content).toContain('后文。');
+    expect(h.narrations[0]!.content).not.toContain('op');
+  });
+
+  it('截断块（流终未闭合）不进叙事，块前文本保留', async () => {
+    // 块前文本独立成行；```aidle 行后直到流终都未闭合 → 截断丢弃
+    const h = harness([{ chunks: ['你翻找。\n', '```aidle\n{"op": "check"'] }]);
+    await runAiTurn(1, h.ports);
+
+    expect(h.narrations[0]!.content).toBe('你翻找。\n');
+  });
+
+  it('行中伪栅栏不是指令块：整体按普通文本广播与落盘', async () => {
+    // '你翻找。```aidle' 行首不是 ```，不构成开栅栏——剥离不得误伤普通文本
+    const h = harness([{ chunks: ['你翻找。', '```aidle\n{"op": "check"'] }]);
+    await runAiTurn(1, h.ports);
+
+    expect(h.narrations[0]!.content).toBe('你翻找。```aidle\n{"op": "check"');
   });
 });
 

@@ -1015,6 +1015,12 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       online.delete(me.memberId);
       if (online.size === 0) roomMembers.delete(me.roomId);
     }
+    // ai:invoke 配额记录随成员离开清理，防 Map<memberId, round> 长期驻留内存
+    const invoked = memberInvokeRound.get(me.roomId);
+    if (invoked) {
+      invoked.delete(me.memberId);
+      if (invoked.size === 0) memberInvokeRound.delete(me.roomId);
+    }
     const hosts = roomHostSockets.get(me.roomId);
     if (hosts) {
       hosts.delete(socket.id);

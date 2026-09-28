@@ -45,6 +45,7 @@ interface AiServer {
   layout: DataLayout;
   host: Socket;
   player: Socket;
+  playerMemberId: string;
   mock: MockLlmAdapter;
   cleanup(): Promise<void>;
 }
@@ -163,14 +164,14 @@ async function startAiServer(
   };
   await saveStateBoard(layout, room.id, sessionAck.session.id, aliceBoard);
   const player = await connect();
-  const playerAck = await new Promise<{ ok: boolean }>((resolve) =>
+  const playerAck = await new Promise<{ ok: boolean; memberId?: string }>((resolve) =>
     player.emit(
       'room:join',
       { inviteCode: room.inviteCode, name: '阿探', wantRole: 'player' },
       resolve,
     ),
   );
-  if (!playerAck.ok) throw new Error('玩家进房失败');
+  if (!playerAck.ok || !playerAck.memberId) throw new Error('玩家进房失败');
 
   return {
     port,
@@ -178,6 +179,7 @@ async function startAiServer(
     layout,
     host,
     player,
+    playerMemberId: playerAck.memberId,
     mock,
     cleanup: async () => {
       host.close();
@@ -363,6 +365,65 @@ describe('ai:invoke 显式触发与限流（TC-FR-05-010，D-07）', () => {
     srv.player.emit('ai:invoke', {}); // 新一轮 → 放行
     await waitFor(() => playerFeed.dones.length >= 2, 2000, '第二轮 done');
     expect(playerFeed.errors).toHaveLength(1); // 没有新增错误
+    await srv.cleanup();
+  });
+
+  it('玩家断开后配额记录清理：同轮重连可再次请求（memberInvokeRound 不驻留）', async () => {
+    // 可门控 LLM：回合卡在生成中，保证断开前后的两次 invoke 落在同一「轮」内——
+    // 若断开未清理配额，重连后的 invoke 会被「每人每轮 1 次」限流
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const gated: LlmAdapter = {
+      id: 'gated',
+      async chat(_req, onDelta) {
+        await gate;
+        onDelta('回合回应。');
+        return { content: '回合回应。', finishReason: 'stop', aborted: false };
+      },
+    };
+    const srv = await startAiServer([], { llm: gated });
+
+    srv.player.emit('ai:invoke', {});
+    await new Promise((r) => setTimeout(r, 120)); // 回合已启动、配额已记录
+
+    srv.player.close(); // 完全离开（单连接）→ handleDisconnect 应清理配额记录
+    await new Promise((r) => setTimeout(r, 120));
+
+    const rejoined = await new Promise<Socket>((resolve, reject) => {
+      const client = io(`http://127.0.0.1:${srv.port}`, {
+        auth: { protocol: PROTOCOL_VERSION },
+        transports: ['websocket'],
+        reconnection: false,
+        timeout: 5000,
+      });
+      client.on('connect', () => resolve(client));
+      client.on('connect_error', reject);
+    });
+    const feed = collect(rejoined);
+    const ack = await new Promise<{ ok: boolean }>((resolve) =>
+      rejoined.emit(
+        'room:join',
+        {
+          inviteCode: srv.inviteCode,
+          name: '阿探',
+          wantRole: 'player',
+          memberId: srv.playerMemberId,
+        },
+        resolve,
+      ),
+    );
+    expect(ack.ok).toBe(true);
+
+    rejoined.emit('ai:invoke', {}); // 同一轮：配额已清理 → 放行（而非 E-ROOM-01 限流）
+    await new Promise((r) => setTimeout(r, 120));
+    expect(feed.errors).toHaveLength(0);
+
+    release(); // 回合 1 完成 → 回合 2（重连后的 invoke）执行
+    await waitFor(() => feed.dones.length >= 2, 4000, '两轮回合完成');
+    expect(feed.errors).toHaveLength(0);
+    rejoined.close();
     await srv.cleanup();
   });
 

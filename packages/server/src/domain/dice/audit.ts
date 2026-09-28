@@ -102,16 +102,19 @@ export function createDiceAuditor(layout: DataLayout, opts: DiceAuditorOptions =
 }
 
 /**
- * 恢复流水号：追加文件语义上「最后一条可解析行」即最大值；
- * 从后向前回溯可容忍崩溃留下的尾部撕裂行（NFR-06 同口径）。
+ * 恢复流水号：正常追加写入下 seq 单调，取「最后一条可解析行」即可；
+ * 但文件可能被手工编辑或局部损坏导致 seq 非单调——取全量最大值，
+ * 保证恢复后的新 seq 不与任何已有行撞号（TDD §5.3 seq 全局单调）。
+ * 从后向前扫无收益（最大值可能在任意位置），直接全量比较。
  */
 async function readLastSeq(store: JsonlStore): Promise<number> {
   const { records } = await store.readAll();
-  for (let i = records.length - 1; i >= 0; i -= 1) {
-    const parsed = DiceAuditEntrySchema.safeParse(records[i]);
+  let max = 0;
+  for (const record of records) {
+    const parsed = DiceAuditEntrySchema.safeParse(record);
     if (!parsed.success) continue;
     const value = Number(parsed.data.seq);
-    if (Number.isFinite(value)) return value;
+    if (Number.isFinite(value) && value > max) max = value;
   }
-  return 0;
+  return max;
 }

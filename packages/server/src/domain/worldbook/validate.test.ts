@@ -129,6 +129,27 @@ describe('validateWorldBook', () => {
     expect(result.warnings.join('\n')).toContain('key 为空');
     expect(result.warnings.join('\n')).toContain('非法正则');
   });
+
+  it('数组内空白关键词 → 告警放行（扫描层将忽略，防 includes("") 无条件命中）', () => {
+    const result = validateWorldBook({
+      entries: [
+        {
+          uid: 1,
+          key: ['教堂', ''],
+          keysecondary: [' '],
+          selectiveLogic: 0,
+          content: '',
+          position: 'after_char',
+          order: 0,
+          constant: false,
+          disabled: false,
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings.join('\n')).toContain('空白关键词');
+  });
 });
 
 describe('loadWorldBook', () => {

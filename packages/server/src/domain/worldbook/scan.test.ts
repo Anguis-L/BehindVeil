@@ -153,3 +153,46 @@ describe('世界书扫描（TDD §5.2）', () => {
     expect(hits[0]?.matchedSecondary).toEqual(['钟楼']);
   });
 });
+
+describe('扫描防御性上限（2026-09-27 代码评审修复）', () => {
+  it('空字符串关键词不再无条件命中（includes("") 恒真缺陷）', () => {
+    // 修复前：key: [""] 会让条目对任何文本命中
+    expect(scanWorldBook(['毫不相关的文本'], book(entry({ key: [''] })))).toHaveLength(0);
+    expect(
+      scanWorldBook(['毫不相关的文本'], book(entry({ key: ['教堂'], keysecondary: [''] }))),
+    ).toHaveLength(0); // secondary 全空白 → AND_ANY 视为未命中
+    // 纯空白同理
+    expect(scanWorldBook(['毫不相关'], book(entry({ key: ['   '] })))).toHaveLength(0);
+  });
+
+  it('recursionDepth 超大值被钳制，不会按传入轮数放大扫描', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // A→B→C 链：depth=2 才能命中 C；传入 999 与传入 2 结果一致
+      const a = entry({ uid: 1, key: ['起点'], content: '线索指向中继站' });
+      const b = entry({ uid: 2, key: ['中继站'], content: '线索指向终点' });
+      const c = entry({ uid: 3, key: ['终点'], content: '终点条目' });
+      const chain = book(a, b, c);
+      expect(scanWorldBook(['故事的起点'], chain, { recursionDepth: 2 })).toHaveLength(3);
+      expect(scanWorldBook(['故事的起点'], chain, { recursionDepth: 999 })).toHaveLength(3);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('递归语料超过硬上限时提前停止并告警（防无界膨胀）', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const big = entry({ uid: 1, key: ['起点'], content: '长'.repeat(60_000) });
+      // b 的关键词在 big 的 content 里：第二轮 b 命中后语料 120k 超限 → 递归停止
+      const b = entry({ uid: 2, key: ['长'], content: '桥'.repeat(60_000) });
+      const c = entry({ uid: 3, key: ['桥'], content: 'end' });
+      const hits = scanWorldBook(['起点'], book(big, b, c), { recursionDepth: 3 });
+      expect(hits.map((h) => h.entry.uid)).toEqual([1, 2]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('上限'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

@@ -140,6 +140,15 @@ describe('SessionSchema（TDD §3.1）', () => {
       }).success,
     ).toBe(false);
   });
+
+  it('contextWindowTokens ≤ outputReserveTokens → 拒绝（S7 硬顶不可为负/零）', () => {
+    expect(
+      SessionSchema.safeParse({
+        ...session,
+        settings: { ...session.settings, contextWindowTokens: 2_048 },
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe('StateBoardSchema（TDD §3.7）', () => {

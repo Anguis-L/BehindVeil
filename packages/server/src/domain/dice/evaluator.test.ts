@@ -242,6 +242,15 @@ describe('可复现性（D-04：expr + rolls 可重算）', () => {
     expect(() => replayRoll('2d6', [[1]])).toThrow(/原始骰值不足以重放该表达式/);
   });
 
+  it('骰值超出骰面值域：复现报越界（防篡改流水凑出相同 total）', () => {
+    // 1d100 给了 150：即便 total 碰巧一致也不允许通过
+    expect(() => replayRoll('1d100', [[150]])).toThrow(/超出 1–100 值域/);
+    // dF 值域 {-1,0,1}，给了 2 同样越界
+    expect(() => replayRoll('4dF', [[1, 0, 2, -1]])).toThrow(/超出 -1–1 值域/);
+    // 边界值合法
+    expect(() => replayRoll('1d100', [[100]])).not.toThrow();
+  });
+
   it('total 可由 rolls 与表达式重算（审计复现的前提）', () => {
     const roll = rollDice('2d6kh1+3', { random: seq(5, 2) });
 

@@ -78,6 +78,14 @@ export class DirectiveStreamScanner {
     return events;
   }
 
+  /**
+   * 当前是否处于未闭合指令块内（闭环编排器消费）：块内增量不得广播给前端，
+   * 编排器据此做流式剥离（scan 事件只带块区间，开栅栏行完成时无事件，须查此状态）。
+   */
+  get isInBlock(): boolean {
+    return this.inBlock;
+  }
+
   private consume(final: boolean): DirectiveScanEvent[] {
     const events: DirectiveScanEvent[] = [];
     for (;;) {

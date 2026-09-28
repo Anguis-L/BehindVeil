@@ -53,6 +53,31 @@ describe('TC-FR-04-010：大成功', () => {
       );
     }
   });
+
+  it('房规数值/表达式校验：大失败阈值越界、矛盾配置、非法理智表达式均拒绝', () => {
+    expect(() => new Coc7RuleBook({ fumbleLowSkill: 0 })).toThrow(RangeError);
+    expect(() => new Coc7RuleBook({ fumbleHighSkill: 101 })).toThrow(RangeError);
+    // 矛盾配置：低技能大失败阈值高于高技能
+    expect(() => new Coc7RuleBook({ fumbleLowSkill: 100, fumbleHighSkill: 50 })).toThrow(
+      /fumbleLowSkill/,
+    );
+    // 理智损失表表达式须为合法骰式（实际损失由引擎掷骰）
+    expect(
+      () =>
+        new Coc7RuleBook({
+          sanityLossTable: { ...DEFAULT_COC7_HOUSE_RULES.sanityLossTable, fail: '1d6+重伤' },
+        }),
+    ).toThrow(/sanityLossTable\.fail/);
+    // 合法房规照常接受
+    expect(
+      () =>
+        new Coc7RuleBook({
+          fumbleLowSkill: 95,
+          fumbleHighSkill: 100,
+          sanityLossTable: { ...DEFAULT_COC7_HOUSE_RULES.sanityLossTable, fail: '2d6' },
+        }),
+    ).not.toThrow();
+  });
 });
 
 describe('TC-FR-04-011：极难成功（roll ≤ 技能/5）', () => {

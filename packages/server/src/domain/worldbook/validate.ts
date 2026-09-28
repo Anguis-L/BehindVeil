@@ -47,6 +47,11 @@ export function validateWorldBook(raw: unknown): WorldBookValidation {
       warnings.push(`${at}: 非常驻条目 key 为空，永远不会命中`);
     }
     for (const keyword of [...entry.key, ...entry.keysecondary]) {
+      // 空串关键词在 includes 语义下会无条件命中，扫描层将其忽略——载入时提醒手编者
+      if (keyword.trim() === '') {
+        warnings.push(`${at}: 存在空白关键词，扫描时将被忽略`);
+        continue;
+      }
       if (!isRegexForm(keyword)) continue;
       try {
         new RegExp(keyword.slice(1, -1));

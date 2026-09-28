@@ -186,11 +186,18 @@ function replaySource(rolls: number[][]): RandomSource & { consumed: number } {
     get consumed(): number {
       return consumed;
     },
-    int(): number {
+    int(min, max): number {
       const current = rolls[group];
       const value = current?.[index];
       if (current === undefined || value === undefined) {
         throw new DiceExpressionError('审计复现失败：原始骰值不足以重放该表达式');
+      }
+      // 值域校验（TDD §5.3）：流水里的骰值必须落在本骰的 [min, max] 内，
+      // 否则「拿别的骰值凑 total」的伪造流水也能蒙混过关
+      if (!Number.isInteger(value) || value < min || value > max) {
+        throw new DiceExpressionError(
+          `审计复现失败：骰值 ${value} 超出 ${min}–${max} 值域，流水可能被篡改`,
+        );
       }
       consumed += 1;
       index += 1;

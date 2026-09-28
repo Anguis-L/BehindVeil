@@ -26,9 +26,11 @@ export const CHECK_OUTCOMES = ['critical', 'success', 'fail', 'fumble'] as const
 export type CheckOutcome = (typeof CHECK_OUTCOMES)[number];
 
 /**
- * 成功子等级（COC7 普通成功/困难成功/极难成功，TDD §5.3 判定表）。
- * critical / fail / fumble 的 grade 恒为 normal——四分类 outcome 不足以表达
- * COC7 六档判定表，故以 outcome+grade 组合承载（困难/极难成功是 success 的子等级）。
+ * 成功子等级（COC7 六档判定表承载，TDD §3.5 v1.2「对齐实现」）。
+ * success 时表达达成的档位（normal/hard/extreme）；fail 时保留已达成的自然档位
+ * （KP 要求的难度档未达，如「极难」要求下掷出困难区间——实现见 rulebook/coc7.ts）；
+ * critical / fumble 恒为 normal。四分类 outcome 不足以表达 COC7 六档判定表，
+ * 故以 outcome+grade 组合承载（困难/极难成功是 success 的子等级）。
  */
 export const CHECK_GRADES = ['normal', 'hard', 'extreme'] as const;
 export type CheckGrade = (typeof CHECK_GRADES)[number];
@@ -54,7 +56,7 @@ export const RollCheckSchema = z.object({
   target: z.number(),
   difficulty: z.enum(CHECK_DIFFICULTIES),
   outcome: z.enum(CHECK_OUTCOMES),
-  /** 成功子等级：COC7 困难/极难成功时携带；critical/fail/fumble 可省略（视为 normal） */
+  /** 成功子等级：success 表达成档位、fail 保留自然档位；可省略（缺省视为 normal，布尔判定不带） */
   grade: z.enum(CHECK_GRADES).optional(),
   /**
    * 判定运算符（2026-09-25 拍板方案 a，T-M4-02 落地）：缺省即 `<=`（走规则书判定表）。

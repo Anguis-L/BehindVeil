@@ -15,6 +15,8 @@ import { DirectiveStreamScanner, type DirectiveScanEvent } from './scan.js';
  * 一次 AI 回合（turn）= 若干次 LLM 请求链：
  *   组装 prompt → 流式请求（增量边广播边喂扫描器）→ 指令块 → 掷骰 → DiceMsg 广播
  *   → SystemMsg{ai_directive_result} 回注 → 以最新落盘态重建 prompt 续写。
+ * 指令块为内部协议，流式增量与落盘叙事均按扫描区间剥离（TDD §5.4）：
+ * 块外增量即到即发；块内增量不广播，块区间 [start, end) 整段剔除。
  * 续写仅由「本请求执行了检定」或「第 4 次检定被拦截需强制收尾」触发；
  * 每轮检定上限 3 次（MAX_CHECKS_PER_TURN），超限请求被拦并注入禁止再检定元指令
  * （TC-FR-05-006/007）。回注消息经落盘进入下一次 buildMessages——上下文即消息流。
@@ -98,14 +100,43 @@ export async function runAiTurn(triggerSeq: number, ports: AiTurnPorts): Promise
     }
 
     const scanner = new DirectiveStreamScanner();
-    const content: string[] = [];
+    // 流式剥离状态（TDD §5.4：指令块是 AI 与引擎间的内部协议，不得出现在玩家可见输出）：
+    // fullText 为原始全量；emitted 为已广播偏移；narrative 为剥离后叙事（落盘用）。
+    let fullText = '';
+    let emitted = 0;
+    const narrative: string[] = [];
+    const emitTo = (end: number): void => {
+      if (end <= emitted) return;
+      const chunk = fullText.slice(emitted, end);
+      narrative.push(chunk);
+      ports.emitNarrationDelta(triggerSeq, chunk);
+      emitted = end;
+    };
+    /** 广播到下一个安全点：块外已完成行可发；未完成行去掉缩进后仍是 ```aidle 前缀的，可能是开栅栏雏形，保守等行完 */
+    const flushSafeTail = (): void => {
+      if (scanner.isInBlock) return;
+      const nl = fullText.lastIndexOf('\n');
+      const pending = fullText.slice(nl + 1);
+      if (!'```aidle'.startsWith(pending.trimStart())) {
+        emitTo(fullText.length);
+        return;
+      }
+      emitTo(nl + 1);
+    };
     let executedHere = 0;
     let failedHere = false;
     const effects: Promise<void>[] = [];
 
     const handle = (ev: DirectiveScanEvent): void => {
-      // 截断块不计入 R-01（非完整解析尝试，§12.4 分母不含）
-      if (ev.kind === 'truncated') return;
+      // 截断块不计入 R-01（非完整解析尝试，§12.4 分母不含）；块内残留同样不进叙事
+      if (ev.kind === 'truncated') {
+        emitTo(ev.start);
+        emitted = fullText.length;
+        return;
+      }
+      // 指令块本体（含解析失败 / 白名单拒绝的原始块）从叙事剥离：[start, end) 不广播
+      emitTo(ev.start);
+      emitted = ev.end;
 
       if (ev.kind === 'directive') {
         // 二级降级停用后忽略指令块：既不执行也不计数（协议对该请求已不生效）
@@ -157,9 +188,9 @@ export async function runAiTurn(triggerSeq: number, ports: AiTurnPorts): Promise
           maxTokens: ports.chat.maxTokens,
         },
         (delta) => {
-          content.push(delta);
-          ports.emitNarrationDelta(triggerSeq, delta);
+          fullText += delta;
           for (const ev of scanner.feed(delta)) handle(ev);
+          flushSafeTail();
         },
       );
       aborted = response.aborted;
@@ -171,10 +202,12 @@ export async function runAiTurn(triggerSeq: number, ports: AiTurnPorts): Promise
     }
 
     for (const ev of scanner.flush()) handle(ev);
+    // 流终：剩余叙事全部广播（truncated 已把 emitted 推到末尾时此处 no-op）
+    emitTo(fullText.length);
     await Promise.all(effects);
     await ports.finishNarration(
       triggerSeq,
-      `${content.join('')}${aborted ? '\n（生成中断）' : ''}`,
+      `${narrative.join('')}${aborted ? '\n（生成中断）' : ''}`,
       aborted,
     );
 

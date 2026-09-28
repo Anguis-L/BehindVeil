@@ -24,23 +24,28 @@ export const MemberSchema = z.object({
 export type Member = z.infer<typeof MemberSchema>;
 
 /** 会话级 LLM/管线设置（TDD §3.1 settings）。全字段必填：裁剪窗/预算/扫描深度缺失会让管线行为失义 */
-export const SessionSettingsSchema = z.object({
-  provider: z.string(),
-  model: z.string(),
-  temperature: z.number().min(0).max(2),
-  /** 历史裁剪窗（默认 40，由创建方填入） */
-  maxHistoryMessages: z.number().int().positive(),
-  /** 世界书预算（默认 2000，由创建方填入） */
-  worldBookBudgetTokens: z.number().int().nonnegative(),
-  /** 世界书扫描深度（默认 4，由创建方填入） */
-  scanDepth: z.number().int().positive(),
-  /**
-   * 模型上下文窗口与输出预留（S7 硬顶 = contextWindowTokens - outputReserveTokens，
-   * TDD §5.1 S7；硬顶须随黄金用例输入驱动回退，故进会话级设置。默认按 32K 级模型）。
-   */
-  contextWindowTokens: z.number().int().positive().default(32_768),
-  outputReserveTokens: z.number().int().positive().default(2_048),
-});
+export const SessionSettingsSchema = z
+  .object({
+    provider: z.string(),
+    model: z.string(),
+    temperature: z.number().min(0).max(2),
+    /** 历史裁剪窗（默认 40，由创建方填入） */
+    maxHistoryMessages: z.number().int().positive(),
+    /** 世界书预算（默认 2000，由创建方填入） */
+    worldBookBudgetTokens: z.number().int().nonnegative(),
+    /** 世界书扫描深度（默认 4，由创建方填入） */
+    scanDepth: z.number().int().positive(),
+    /**
+     * 模型上下文窗口与输出预留（S7 硬顶 = contextWindowTokens - outputReserveTokens，
+     * TDD §5.1 S7；硬顶须随黄金用例输入驱动回退，故进会话级设置。默认按 32K 级模型）。
+     */
+    contextWindowTokens: z.number().int().positive().default(32_768),
+    outputReserveTokens: z.number().int().positive().default(2_048),
+  })
+  // S7 硬顶 = context - reserve（TDD §5.1）：配置颠倒会让硬顶为负、历史裁空仍超限
+  .refine((s) => s.contextWindowTokens > s.outputReserveTokens, {
+    message: 'contextWindowTokens 必须大于 outputReserveTokens（S7 硬顶 = 二者之差）',
+  });
 export type SessionSettings = z.infer<typeof SessionSettingsSchema>;
 
 export const RoomSchema = z.object({

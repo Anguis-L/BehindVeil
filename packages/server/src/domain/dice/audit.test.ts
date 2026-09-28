@@ -234,4 +234,29 @@ describe('坏行容错（NFR-06 同口径）', () => {
     expect(next.seq).toBe('000003'); // 撕裂行未被计入，续写不跳号
     await restarted.close();
   });
+
+  it('seq 非单调（手工编辑/损坏）时恢复取全量最大值，防撞号', async () => {
+    const layout = await makeLayout();
+    const first = createDiceAuditor(layout);
+    await first.record(input());
+    await first.record(input());
+    await first.record(input()); // 尾部 seq=000003
+    await first.close();
+
+    // 手工塞进一条更小 seq 的合法行：文件尾不是最大值
+    const { DiceAuditEntrySchema } = await import('./audit.js');
+    const stale = DiceAuditEntrySchema.parse({
+      ...input(),
+      seq: '000002',
+      ts: new Date(0).toISOString(),
+      rollId: 'stale-line',
+    });
+    await writeFile(layout.auditDiceFile, `${JSON.stringify(stale)}\n`, { flag: 'a' });
+
+    const restarted = createDiceAuditor(layout);
+    const next = await restarted.record(input());
+
+    expect(next.seq).toBe('000004'); // 取最大值 3 续写，而不是尾部的 2
+    await restarted.close();
+  });
 });

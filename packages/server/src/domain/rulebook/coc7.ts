@@ -64,9 +64,30 @@ export class Coc7RuleBook implements RuleBook {
 
   constructor(rules: Partial<Coc7HouseRules> = {}) {
     this.rules = { ...DEFAULT_COC7_HOUSE_RULES, ...rules };
-    const { criticalMax } = this.rules;
+    const { criticalMax, fumbleLowSkill, fumbleHighSkill, sanityLossTable } = this.rules;
     if (!Number.isInteger(criticalMax) || criticalMax < 1 || criticalMax > 5) {
       throw new RangeError('COC7 房规 criticalMax 须为 1–5 的整数');
+    }
+    for (const [key, value] of [
+      ['fumbleLowSkill', fumbleLowSkill],
+      ['fumbleHighSkill', fumbleHighSkill],
+    ] as const) {
+      if (!Number.isInteger(value) || value < 1 || value > 100) {
+        throw new RangeError(`COC7 房规 ${key} 须为 1–100 的整数`);
+      }
+    }
+    if (fumbleLowSkill > fumbleHighSkill) {
+      throw new RangeError('COC7 房规 fumbleLowSkill 不得大于 fumbleHighSkill（矛盾阈值）');
+    }
+    for (const [level, expr] of Object.entries(sanityLossTable) as [SanityLevelKey, string][]) {
+      if (typeof expr !== 'string') {
+        throw new RangeError(`COC7 房规 sanityLossTable.${level} 缺失`);
+      }
+      try {
+        parseDiceExpr(expr);
+      } catch {
+        throw new RangeError(`COC7 房规 sanityLossTable.${level} 不是合法骰式：${expr}`);
+      }
     }
   }
 

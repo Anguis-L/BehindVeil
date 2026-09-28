@@ -23,8 +23,17 @@ export interface ScanOptions {
   recursionDepth?: number;
 }
 
+/** 递归轮数硬上限：传入更大值一律钳到这里（TDD §5.2 recursionDepth=1 防循环） */
+export const MAX_RECURSION_DEPTH = 5;
+/** 扫描语料硬上限（字符）：递归并入条目 content 无界增长会让每轮全量重扫复杂度失控 */
+export const MAX_CORPUS_CHARS = 100_000;
+
 export function scanWorldBook(texts: string[], book: WorldBook, opts: ScanOptions = {}): ScanHit[] {
-  const depth = opts.recursionDepth ?? 1;
+  const raw = opts.recursionDepth ?? 1;
+  const depth = Math.min(
+    Math.max(Math.floor(Number.isFinite(raw) ? raw : 1), 0),
+    MAX_RECURSION_DEPTH,
+  );
   const hits = new Map<number, ScanHit>();
   let corpus = texts.join('\n');
 
@@ -39,7 +48,12 @@ export function scanWorldBook(texts: string[], book: WorldBook, opts: ScanOption
       }
     }
     if (fresh.length === 0) break;
-    corpus = `${corpus}\n${fresh.map((h) => h.entry.content).join('\n')}`;
+    const merged = `${corpus}\n${fresh.map((h) => h.entry.content).join('\n')}`;
+    if (merged.length > MAX_CORPUS_CHARS) {
+      console.warn(`[worldbook] 递归语料超过 ${MAX_CORPUS_CHARS} 字符上限，提前停止递归扫描`);
+      break;
+    }
+    corpus = merged;
   }
 
   return [...hits.values()];
@@ -75,6 +89,8 @@ function evaluateEntry(entry: WorldBookEntry, corpus: string): ScanHit | null {
 
 /** 关键词匹配：`/regex/` 形式走正则，其余子串包含（均大小写敏感，确定性优先） */
 function matchKeyword(keyword: string, corpus: string): boolean {
+  // 空/纯空白关键词不参与匹配：corpus.includes('') 恒为 true，等于无条件命中
+  if (keyword.trim() === '') return false;
   if (keyword.length > 2 && keyword.startsWith('/') && keyword.endsWith('/')) {
     try {
       return new RegExp(keyword.slice(1, -1)).test(corpus);
