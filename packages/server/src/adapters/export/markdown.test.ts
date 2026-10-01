@@ -37,6 +37,7 @@ const members: Member[] = [
 ];
 
 const sheet = {
+  rulebook: 'coc7' as const,
   playerName: '爱丽丝·陈',
   occupation: '记者',
   str: 50,

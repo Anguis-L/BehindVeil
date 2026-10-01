@@ -1,5 +1,5 @@
 import type { ExportEntry, ExportInput, JudgeLevel } from './render.js';
-import { toExportEntries } from './render.js';
+import { hpTextOf, statTextOf, toExportEntries } from './render.js';
 
 /**
  * 染色 HTML 日志导出（T-M6-02，FR-12 / TDD §8；TC-FR-12-002）。
@@ -66,8 +66,8 @@ function renderSnapshot(entry: ExportEntry): string {
     .map(
       (pc) =>
         `        <tr><td>${escapeHtml(pc.playerName)}</td><td>${escapeHtml(pc.memberName)}</td>` +
-        `<td class="num">${pc.hp}</td><td class="num">${pc.san}</td>` +
-        `<td class="num">${pc.mp}</td><td class="num">${pc.luck}</td>` +
+        `<td class="num">${hpTextOf(pc)}</td><td class="num">${statTextOf(pc.san)}</td>` +
+        `<td class="num">${statTextOf(pc.mp)}</td><td class="num">${statTextOf(pc.luck)}</td>` +
         `<td>${escapeHtml(pc.conditions.join('、') || '—')}</td></tr>`,
     )
     .join('\n');

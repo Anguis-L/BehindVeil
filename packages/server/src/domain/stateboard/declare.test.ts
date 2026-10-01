@@ -15,6 +15,7 @@ let layout: DataLayout;
 
 const declaredOf = (over: Partial<DeclaredPc> = {}): DeclaredPc => ({
   sheet: {
+    rulebook: 'coc7',
     playerName: '爱丽丝',
     occupation: '记者',
     str: 50,

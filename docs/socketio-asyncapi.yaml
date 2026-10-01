@@ -109,8 +109,12 @@ channels:
       - 自动结束当前活跃会话（`endedAt` 落今），房间 `activeSessionId` 指向新会话
       - 初始化空状态板（version=0）
       - 追加一条 `system/notice`「会话已开始（模块 id）」并全房广播
+      - 规则书由模组决定（KP 卡 `extensions.aidle.rulebook` 优先，回退 manifest.rulebook，
+        缺省 coc7）并写入 `Session.rulebook`；**一房一规则书**：本房已有活跃会话且规则书
+        不同 → 拒绝开团（活跃会话不变）
 
-      **ack**：成功 `{ ok: true, session }`；非 Host `{ ok: false, code: 'E-ROOM-01', message: '仅 Host 可开团' }`。
+      **ack**：成功 `{ ok: true, session }`；非 Host `{ ok: false, code: 'E-ROOM-01', message: '仅 Host 可开团' }`；
+      规则书冲突 `{ ok: false, code: 'E-MOD-01' }`。
     messages:
       start:
         $ref: '#/components/messages/SessionStart'
@@ -167,8 +171,14 @@ channels:
       dice    := count? "d" sides modifier?      # sides: 数字 | "F"(命运骰)
       modifier := ("kh"|"kl"|"dh"|"dl") number
       check   := expr ("<=" | ">=" | "=") number
+      advdis  := ("adv" | "dis")?   # 骰式末尾；v2 FR-23，展开为 2d20kh1 / 2d20kl1
       ```
       骰式非法 → `E-DICE-01`。
+
+      判定规则随会话规则书（v2）：COC7 走 `<=` 六档判定表；5e 走 `>=` DC 比较，
+      并按 `nat20Rule`（会话设置，默认 attack_only）判定 nat20 必中 / nat1 必失——
+      判定对象是 d20 **面值**而非加修正后的 total。判定种类（kind）缺省随规则书
+      （COC7 = skill，5e = ability）。
 
       **当前状态：implemented（M4）** —— 解析 → 服务端 CSPRNG 掷骰 → 先落审计流水
       （`data/logs/audit-dice.jsonl`，fsync 后）→ 再广播。骰式非法回 `E-DICE-01`
@@ -1092,7 +1102,7 @@ components:
       properties:
         ok: { type: boolean }
         session: { $ref: '#/components/schemas/Session' }
-        code: { type: string, enum: [E-ROOM-01] }
+        code: { type: string, enum: [E-ROOM-01, E-MOD-01] }
         message: { type: string }
       required: [ok]
       examples:
@@ -1162,46 +1172,88 @@ components:
       required: [id, roomId, moduleRef, startedAt, endedAt, stateBoardVersion, settings, synopsis]
 
     PCSheet:
-      type: object
-      description: COC7 调查员速览
-      properties:
-        playerName: { type: string }
-        occupation: { type: string }
-        str: { type: number }
-        con: { type: number }
-        siz: { type: number }
-        dex: { type: number }
-        app: { type: number }
-        int: { type: number }
-        pow: { type: number }
-        edu: { type: number }
-        luck: { type: number }
-        hp: { type: number }
-        mp: { type: number }
-        san: { type: number }
-        db: { type: string }
-        build: { type: string }
-        skills:
-          type: object
-          additionalProperties: { type: number }
-      required:
-        - playerName
-        - occupation
-        - str
-        - con
-        - siz
-        - dex
-        - app
-        - int
-        - pow
-        - edu
-        - luck
-        - hp
-        - mp
-        - san
-        - db
-        - build
-        - skills
+      description: |
+        角色卡判别联合（T-M8-01）：按 `rulebook` 分流 COC7 / D&D 5e 两套字段体系；
+        缺 `rulebook` 字段的存量数据按 coc7 解析（零迁移）。
+      oneOf:
+        - type: object
+          description: COC7 调查员卡
+          properties:
+            rulebook: { type: string, enum: [coc7], default: coc7 }
+            playerName: { type: string }
+            occupation: { type: string }
+            str: { type: number }
+            con: { type: number }
+            siz: { type: number }
+            dex: { type: number }
+            app: { type: number }
+            int: { type: number }
+            pow: { type: number }
+            edu: { type: number }
+            luck: { type: number }
+            hp: { type: number }
+            mp: { type: number }
+            san: { type: number }
+            db: { type: string }
+            build: { type: string }
+            skills:
+              type: object
+              additionalProperties: { type: number }
+          required:
+            - playerName
+            - occupation
+            - str
+            - con
+            - siz
+            - dex
+            - app
+            - int
+            - pow
+            - edu
+            - luck
+            - hp
+            - mp
+            - san
+            - db
+            - build
+            - skills
+        - type: object
+          description: D&D 5e 角色卡（六维为属性值，修正值服务端现算）
+          properties:
+            rulebook: { type: string, enum: [dnd5e] }
+            playerName: { type: string }
+            occupation: { type: string }
+            abilities:
+              type: object
+              properties:
+                str: { type: number }
+                dex: { type: number }
+                con: { type: number }
+                int: { type: number }
+                wis: { type: number }
+                cha: { type: number }
+              required: [str, dex, con, int, wis, cha]
+            proficiencyBonus: { type: number }
+            ac: { type: number }
+            hp:
+              type: object
+              properties:
+                max: { type: number }
+                current: { type: number }
+              required: [max, current]
+            proficientSkills:
+              type: array
+              items: { type: string }
+            proficientSaves:
+              type: array
+              items: { type: string, enum: [str, dex, con, int, wis, cha] }
+          required:
+            - rulebook
+            - playerName
+            - abilities
+            - proficiencyBonus
+            - ac
+            - hp
 
     StateBoardPc:
       type: object

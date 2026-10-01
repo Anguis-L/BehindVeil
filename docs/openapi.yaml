@@ -999,6 +999,116 @@ paths:
         '500':
           $ref: '#/components/responses/Internal'
 
+  /rooms/{roomId}/host-transfer:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    post:
+      operationId: transferHost
+      tags: [房间]
+      summary: Host 转让（T-M8-06，FR-26）
+      description: |
+        当前 Host 出示 hostToken，把 Host 身份让给同房间另一名**在线**成员。
+        效果：members.json 角色换位；hostToken 立即轮换（旧 token 失效）；
+        房间 hostAuth 标为 'member'（新 Host 以后凭成员角色标记 + memberId 重连恢复，
+        无需再持 token）；原 Host 即刻降为玩家；全房 notice 广播。
+        鉴权用 hostToken（Host 自助操作，不走 X-Admin-Token）。
+      x-status: implemented
+      x-milestone: M8
+      x-source: packages/server/src/gateway/http/host.ts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hostToken, toMemberId]
+              properties:
+                hostToken:
+                  type: string
+                  description: 当前 hostToken（建房时下发；错误 → 401）
+                toMemberId:
+                  type: string
+                  description: 接任成员 ID（必须在线、非观察者、非现任 Host）
+      responses:
+        '200':
+          description: 转让成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memberId:
+                    type: string
+                    description: 新 Host 成员 ID
+        '401':
+          description: hostToken 不匹配
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+        '400':
+          description: 房间不存在 / 目标不存在或离线 / 观察者或现任 Host
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/co-host:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    put:
+      operationId: setCoHost
+      tags: [房间]
+      summary: 设置/撤销副 Host（T-M8-06，FR-26）
+      description: |
+        房间级角色标记（coHostMemberId，一名）：副 Host 与 Host 同享快照 + 状态编辑权限
+        （Host 掉线可代行），不发新 token。memberId 传 null 即撤销（撤销不要求目标在线）。
+        鉴权用 hostToken。
+      x-status: implemented
+      x-milestone: M8
+      x-source: packages/server/src/gateway/http/host.ts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [hostToken, memberId]
+              properties:
+                hostToken:
+                  type: string
+                  description: 当前 hostToken（错误 → 401）
+                memberId:
+                  type: [string, 'null']
+                  description: 副 Host 成员 ID（在线、非观察者、非现任 Host）；null = 撤销
+      responses:
+        '200':
+          description: 设置/撤销成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memberId:
+                    type: [string, 'null']
+                    description: 副 Host 成员 ID（撤销时为 null）
+        '401':
+          description: hostToken 不匹配
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+        '400':
+          description: 房间不存在 / 目标不存在或离线 / 观察者或现任 Host
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+        '500':
+          $ref: '#/components/responses/Internal'
+
   /rooms/{roomId}/state:
     parameters:
       - $ref: '#/components/parameters/RoomId'
@@ -1548,6 +1658,16 @@ components:
           minimum: 1
           description: 成员上限（默认 8，建房时可设 2–64）
           default: 8
+        hostAuth:
+          type: string
+          enum: [token, member]
+          description: |
+            Host 身份锚定方式（T-M8-06）：token=建房者凭 hostToken（v1 缺省）；
+            member=转让后凭成员角色标记 + memberId 重连（旧 token 已轮换失效）。
+          examples: [token]
+        coHostMemberId:
+          type: [string, 'null']
+          description: 副 Host 成员 ID（T-M8-06，一名；与 Host 同享快照/状态编辑权限）；无副 Host 为 null
         defaultSessionSettings:
           $ref: '#/components/schemas/SessionSettings'
       required: [id, name, createdAt, inviteCode, activeSessionId, memberLimit]
@@ -1636,6 +1756,15 @@ components:
           minimum: 0
           maximum: 2
           default: 0.8
+        nat20Rule:
+          type: string
+          enum: [attack_only, all_d20]
+          description: |
+            nat20 / nat1 的适用面（v2 FR-22，仅 5e 消费）。
+            attack_only（默认）= 官方口径：仅攻击骰强制 nat20 必中、nat1 必失；
+            all_d20 = 常见桌面房规：所有 d20 检定都适用。
+            该开关随判定记录落审计流水，否则非默认房规的骰子无法复现。
+          default: attack_only
         maxHistoryMessages:
           type: integer
           minimum: 1
@@ -1684,6 +1813,10 @@ components:
           type: number
           minimum: 0
           maximum: 2
+        nat20Rule:
+          type: string
+          enum: [attack_only, all_d20]
+          description: nat20 / nat1 适用面（v2 FR-22，5e 消费）
         maxHistoryMessages:
           type: integer
           minimum: 1
@@ -1719,6 +1852,14 @@ components:
         endedAt:
           type: [string, 'null']
           description: 结束时间；活跃会话为 null
+        rulebook:
+          type: string
+          enum: [coc7, dnd5e]
+          description: |
+            本会话采用的规则书（v2 FR-20，一房一规则书）：开团时由模组决定
+            （KP 卡 extensions.aidle.rulebook 优先，回退 manifest.rulebook），缺省 coc7。
+            v1 存量数据无此字段，按 coc7 处理。
+          default: coc7
         stateBoardVersion:
           type: integer
           minimum: 0
@@ -1995,92 +2136,164 @@ components:
     # ---- 角色卡 / 状态板 / 世界书 ----
 
     PCSheet:
-      type: object
-      description: COC7 调查员速览（注入名册用，TDD §3.3）
-      properties:
-        playerName:
-          type: string
-        occupation:
-          type: string
-          description: 职业
-        str:
-          type: number
-        con:
-          type: number
-        siz:
-          type: number
-        dex:
-          type: number
-        app:
-          type: number
-        int:
-          type: number
-        pow:
-          type: number
-        edu:
-          type: number
-        luck:
-          type: number
-        hp:
-          type: number
-        mp:
-          type: number
-        san:
-          type: number
-        db:
-          type: string
-          description: 伤害加值
-          examples: ['0']
-        build:
-          type: string
-          description: 体格
-          examples: ['0']
-        skills:
-          type: object
-          additionalProperties:
-            type: number
-          description: 技能名 → 技能值
+      description: |
+        角色卡判别联合（T-M8-01，FR-24 / 设计文档 v2 §5.3）：按 `rulebook` 分流两套字段体系。
+        **旧数据零迁移**：缺 `rulebook` 字段的存量卡/存档按 coc7 解析（zod default）。
+        5e 卡只存原始数值——修正值由服务端现算（名册取值器），AI 与客户端都不传数值。
+      oneOf:
+        - type: object
+          description: COC7 调查员卡（v1 字段原样 + 判别字段）
+          properties:
+            rulebook:
+              type: string
+              enum: [coc7]
+              default: coc7
+              description: 判别字段；旧数据无此字段时按 coc7 补
+            playerName:
+              type: string
+            occupation:
+              type: string
+              description: 职业
+            str:
+              type: number
+            con:
+              type: number
+            siz:
+              type: number
+            dex:
+              type: number
+            app:
+              type: number
+            int:
+              type: number
+            pow:
+              type: number
+            edu:
+              type: number
+            luck:
+              type: number
+            hp:
+              type: number
+            mp:
+              type: number
+            san:
+              type: number
+            db:
+              type: string
+              description: 伤害加值
+              examples: ['0']
+            build:
+              type: string
+              description: 体格
+              examples: ['0']
+            skills:
+              type: object
+              additionalProperties:
+                type: number
+              description: 技能名 → 技能值
+              examples:
+                - 侦查: 60
+                  图书馆使用: 50
+          required:
+            - playerName
+            - occupation
+            - str
+            - con
+            - siz
+            - dex
+            - app
+            - int
+            - pow
+            - edu
+            - luck
+            - hp
+            - mp
+            - san
+            - db
+            - build
+            - skills
           examples:
-            - 侦查: 60
-              图书馆使用: 50
-      required:
-        - playerName
-        - occupation
-        - str
-        - con
-        - siz
-        - dex
-        - app
-        - int
-        - pow
-        - edu
-        - luck
-        - hp
-        - mp
-        - san
-        - db
-        - build
-        - skills
-      examples:
-        - playerName: 爱丽丝
-          occupation: 考古学家
-          str: 50
-          con: 60
-          siz: 55
-          dex: 70
-          app: 65
-          int: 80
-          pow: 60
-          edu: 85
-          luck: 50
-          hp: 11
-          mp: 12
-          san: 60
-          db: '0'
-          build: '0'
-          skills:
-            侦查: 60
-            图书馆使用: 50
+            - rulebook: coc7
+              playerName: 爱丽丝
+              occupation: 考古学家
+              str: 50
+              con: 60
+              siz: 55
+              dex: 70
+              app: 65
+              int: 80
+              pow: 60
+              edu: 85
+              luck: 50
+              hp: 11
+              mp: 12
+              san: 60
+              db: '0'
+              build: '0'
+              skills:
+                侦查: 60
+                图书馆使用: 50
+        - type: object
+          description: D&D 5e 角色卡（T-M8-01）
+          properties:
+            rulebook:
+              type: string
+              enum: [dnd5e]
+            playerName:
+              type: string
+            occupation:
+              type: string
+              description: 职业与种族（展示与名册用）；缺省空串
+            abilities:
+              type: object
+              description: 六维属性值（非调整值——调整值服务端现算）
+              properties:
+                str: { type: number }
+                dex: { type: number }
+                con: { type: number }
+                int: { type: number }
+                wis: { type: number }
+                cha: { type: number }
+              required: [str, dex, con, int, wis, cha]
+            proficiencyBonus:
+              type: number
+              description: 熟练加值（随等级走，卡里写死，服务端不推导等级）
+            ac:
+              type: number
+              description: 护甲等级
+            hp:
+              type: object
+              properties:
+                max: { type: number }
+                current: { type: number }
+              required: [max, current]
+            proficientSkills:
+              type: array
+              items: { type: string }
+              description: 熟练技能名（缺省空数组；取值时按名匹配属性）
+            proficientSaves:
+              type: array
+              items:
+                type: string
+                enum: [str, dex, con, int, wis, cha]
+              description: 熟练豁免（缺省空数组）
+          required:
+            - rulebook
+            - playerName
+            - abilities
+            - proficiencyBonus
+            - ac
+            - hp
+          examples:
+            - rulebook: dnd5e
+              playerName: 艾恩
+              occupation: 游荡者
+              abilities: { str: 10, dex: 16, con: 12, int: 13, wis: 16, cha: 8 }
+              proficiencyBonus: 2
+              ac: 15
+              hp: { max: 22, current: 22 }
+              proficientSkills: [察觉]
+              proficientSaves: [dex, int]
 
     StateBoardPc:
       type: object

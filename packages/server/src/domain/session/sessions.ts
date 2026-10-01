@@ -3,6 +3,7 @@ import {
   SessionSettingsSchema,
   StateBoardSchema,
   type InitState,
+  type RuleBookId,
   type Session,
   type SessionSettings,
 } from '@behindveil/shared';
@@ -24,6 +25,8 @@ export interface CreateSessionInput {
   settings: SessionSettings;
   /** 模组 init-state（T-M5-05，TC-FR-10-003）：scene/facts 合入状态板初始值 */
   initState?: InitState;
+  /** 规则书（v2 FR-20）：开团时由模组 KP 卡/manifest 定，缺省 coc7 */
+  rulebook?: RuleBookId;
 }
 
 async function saveSession(layout: DataLayout, roomId: string, session: Session): Promise<void> {
@@ -58,6 +61,7 @@ export async function createSession(
     moduleRef: input.moduleId,
     startedAt: now,
     endedAt: null,
+    rulebook: input.rulebook ?? 'coc7',
     stateBoardVersion: 0,
     settings: input.settings,
   });

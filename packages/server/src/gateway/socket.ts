@@ -5,6 +5,7 @@ import {
   PROTOCOL_VERSION,
   SERVER_EVENT_SCHEMAS,
   isClientEvent,
+  readCardExtensions,
   type ClientEventName,
   type ErrorCode,
   type KpMetricsPayload,
@@ -15,6 +16,7 @@ import {
   type OocVisibility,
   type RollResult,
   type ServerEventName,
+  type Session,
   type SystemMsgSubtype,
 } from '@behindveil/shared';
 import type { FastifyInstance } from 'fastify';
@@ -25,7 +27,8 @@ import { rollDice } from '../domain/dice/evaluator.js';
 import { DiceExpressionError } from '../domain/dice/parser.js';
 import { createCsprngRandom } from '../domain/dice/random.js';
 import { createDiceAuditor } from '../domain/dice/audit.js';
-import { Coc7RuleBook } from '../domain/rulebook/coc7.js';
+import { createRuleBook, ruleBookIdOf } from '../domain/rulebook/index.js';
+import type { RuleBook } from '../domain/rulebook/types.js';
 import { DirectiveSuccessTracker } from '../domain/ai-directive/degrade.js';
 import type { DirectiveScanEvent } from '../domain/ai-directive/scan.js';
 import { runAiTurn } from '../domain/ai-directive/loop.js';
@@ -34,8 +37,9 @@ import { applyStatePatch, readStateBoard, saveStateBoard } from '../domain/state
 import { createStateBoardRoster } from '../domain/stateboard/roster.js';
 import { loadModule } from '../domain/module/library.js';
 import { appendMessage, readMessagesAfter } from '../domain/session/messages.js';
-import { addMember, readMembers } from '../domain/session/members.js';
-import { findByInviteCode, readRoomFile } from '../domain/session/rooms.js';
+import { addMember, readMembers, updateMemberRole } from '../domain/session/members.js';
+import { generateHostToken } from '../domain/session/ids.js';
+import { findByInviteCode, readRoomFile, saveRoomFile } from '../domain/session/rooms.js';
 import { createSession, readSession } from '../domain/session/sessions.js';
 import { buildPreviewTrace } from '../observability/preview.js';
 import { MetricsCollector } from '../observability/metrics.js';
@@ -78,8 +82,15 @@ const MSG_RATE_WINDOW_MS = 30_000;
 /** 快照提醒周期（T-M5-07，SDD §5.4：每 N=20 条消息提醒 Host 确认生成快照） */
 const SNAPSHOT_REMINDER_EVERY = 20;
 
-/** 规则书无状态，模块级单例避免每次掷骰重建 */
-const RULEBOOK = new Coc7RuleBook();
+/**
+ * 会话规则书（T-M7-04）：按会话落盘的规则书标识装配（缺省 coc7，v1 存量数据无该字段）。
+ * 规则书无状态，随用随建；一房一规则书由 session:start 把关（设计文档 v2 §5.1）。
+ */
+function sessionRuleBook(session: Session | null): RuleBook {
+  return createRuleBook(ruleBookIdOf(session?.rulebook), {
+    nat20Rule: session?.settings.nat20Rule,
+  });
+}
 
 export interface GatewayDeps {
   layout: DataLayout;
@@ -103,6 +114,18 @@ export interface GatewayHandle {
    * 供 50 轮回归（TC-FR-05-011）与后续 /metrics 取用；滑动窗口仍在各自 tracker 内。
    */
   directiveStats(): { attempts: number; successes: number; rate: number };
+  /** Host 转让（T-M8-06，FR-26）：REST 管理面路由经此进入网关（在线状态/presence 在网关内存态） */
+  transferHost(
+    roomId: string,
+    hostToken: string,
+    toMemberId: string,
+  ): Promise<{ ok: true; memberId: string } | { ok: false; code: ErrorCode; message: string }>;
+  /** 副 Host 设置（memberId=null 为撤销） */
+  setCoHost(
+    roomId: string,
+    hostToken: string,
+    memberId: string | null,
+  ): Promise<{ ok: true } | { ok: false; code: ErrorCode; message: string }>;
 }
 
 interface Presence {
@@ -410,17 +433,18 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       return;
     }
 
-    // 开放问题①默认方案：建房者以 hostToken 证明 Host 身份（D-02：Host 不可申请）
-    const role: MemberRole =
-      data.hostToken !== undefined && data.hostToken === roomFile.hostToken
-        ? 'host'
-        : data.wantRole;
-
+    // 开放问题①默认方案：建房者以 hostToken 证明 Host 身份（D-02：Host 不可申请）。
+    // T-M8-06 转让后（hostAuth='member'）：Host 身份锚定 members.json 角色标记，
+    // 凭 memberId 恢复（memberId 与 hostToken 同为客户端持有凭据，泄露面等价；旧 token 已轮换失效）。
     let member: Member | null = data.memberId
       ? await findExistingMember(roomFile.id, data.memberId)
       : null;
+    const tokenHost = data.hostToken !== undefined && data.hostToken === roomFile.hostToken;
+    const memberHost = roomFile.hostAuth === 'member' && member?.role === 'host';
+    const role: MemberRole = tokenHost || memberHost ? 'host' : data.wantRole;
+
     if (member && member.role === 'host' && role !== 'host') {
-      // Host 身份重连必须出示 hostToken，防止凭 memberId 冒领
+      // Host 身份重连必须出示 hostToken，防止凭 memberId 冒领（hostAuth='token' 口径不变）
       member = null;
     }
     if (!member) {
@@ -593,10 +617,27 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       ack?.({ ok: false, code: 'E-MOD-01', message: `模组无法装载：${loaded.message}` });
       return;
     }
+    // 规则书选择（T-M7-04，设计 v2 §5.1）：KP 卡 rulebook 优先，回退 manifest，缺省 coc7
+    const rulebook = ruleBookIdOf(
+      readCardExtensions(loaded.module.kpCard).rulebook ?? loaded.module.manifest.rulebook,
+    );
+    // 一房一规则书：本房已有活跃会话且规则书不同 → 拒绝开团（防混合态）
+    const room = await readRoomFile(layout, me.roomId);
+    const current = room?.activeSessionId
+      ? await readSession(layout, me.roomId, room.activeSessionId)
+      : null;
+    if (current && current.endedAt === null && ruleBookIdOf(current.rulebook) !== rulebook) {
+      const message = `本房当前会话使用 ${ruleBookIdOf(current.rulebook)} 规则，无法切换为 ${rulebook}（一房一规则书）`;
+      emitError(socket, 'E-MOD-01', message);
+      ack?.({ ok: false, code: 'E-MOD-01', message });
+      return;
+    }
+
     const session = await createSession(layout, me.roomId, {
       moduleId: data.moduleId,
       settings: data.settings,
       initState: loaded.module.initState,
+      rulebook,
     });
     seqCounters.set(session.id, 0);
     await enqueue(me.roomId, () =>
@@ -664,9 +705,13 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       return;
     }
 
+    // 规则书与默认判定种类随会话走（T-M7-04）：5e 房的手掷骰按属性检定判定
+    const session = await readSession(layout, me.roomId, sessionId);
+    const rulebook = sessionRuleBook(session);
+
     let roll: ParsedRoll;
     try {
-      roll = rollDice(data.expr, { random, rulebook: RULEBOOK, kind: 'skill' });
+      roll = rollDice(data.expr, { random, rulebook, kind: rulebook.defaultKind });
     } catch (err) {
       if (err instanceof DiceExpressionError) {
         emitError(socket, 'E-DICE-01', `${err.message}。${err.help}`);
@@ -713,11 +758,12 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       emitError(socket, 'E-ROOM-01', '尚未加入房间');
       return;
     }
-    if (me.role !== 'host') {
-      emitError(socket, 'E-ROOM-01', '仅 Host 可编辑状态板');
+    const room = await readRoomFile(layout, me.roomId);
+    // T-M8-06：副 Host（房间标记 coHostMemberId）与 Host 同权（快照/状态编辑；掉线代行）
+    if (me.role !== 'host' && me.memberId !== room?.coHostMemberId) {
+      emitError(socket, 'E-ROOM-01', '仅 Host/副 Host 可编辑状态板');
       return;
     }
-    const room = await readRoomFile(layout, me.roomId);
     const sessionId = room?.activeSessionId;
     if (!room || !sessionId) {
       emitError(socket, 'E-ROOM-01', '尚未开团，暂无状态板可编辑');
@@ -751,11 +797,11 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       emitError(socket, 'E-ROOM-01', '尚未加入房间');
       return;
     }
-    if (me.role !== 'host') {
-      emitError(socket, 'E-ROOM-01', '仅 Host 可生成快照');
+    const room = await readRoomFile(layout, me.roomId);
+    if (me.role !== 'host' && me.memberId !== room?.coHostMemberId) {
+      emitError(socket, 'E-ROOM-01', '仅 Host/副 Host 可生成快照');
       return;
     }
-    const room = await readRoomFile(layout, me.roomId);
     const sessionId = room?.activeSessionId;
     if (!room || !sessionId) {
       emitError(socket, 'E-ROOM-01', '尚未开团，暂无状态板可快照');
@@ -827,6 +873,18 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     void enqueueAi(roomId, async () => {
       const tracker = trackers.get(sessionId) ?? new DirectiveSuccessTracker();
       trackers.set(sessionId, tracker);
+      // KP 侧告警目标（T-M8-06）：副 Host 在线 sockets——掉线代行场景副 Host 也须知情。
+      // 作用域在 try 外：catch 侧同样要用；读盘失败时按无副 Host 兜底。
+      let coHostIds: string | null | undefined;
+      try {
+        coHostIds = (await readRoomFile(layout, roomId))?.coHostMemberId;
+      } catch {
+        coHostIds = undefined;
+      }
+      const alertTargets = (): string[] => [
+        ...(roomHostSockets.get(roomId) ?? []),
+        ...(coHostIds ? (memberSockets.get(coHostIds) ?? []) : []),
+      ];
       try {
         // 预热状态板懒加载（T-M5-04）：AI 回合可能先于任何 state:update 发生，
         // 不预热则名册查无 PC，检定全落 E-AI-01。读盘走 JsonStore 文件锁，无竞态损坏。
@@ -842,6 +900,30 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
           chat,
           // 真实名册（T-M5-04）：按本会话状态板取技能值（含 roster 声明装配的初始板）
           roster: createStateBoardRoster(stateBoards.get(sessionId)),
+          // 数值效果（T-M8-03/04）：damage/heal/sanity 的取值源与写板目标
+          getBoard: () => stateBoards.get(sessionId),
+          applyEnginePatch: async (patch) => {
+            await enqueue(roomId, async () => {
+              const board = stateBoards.get(sessionId);
+              if (!board) return;
+              const result = applyStatePatch(board, patch, board.version);
+              if (!result.ok) {
+                // Host 编辑抢先：引擎写入乐观锁冲突——广播最新版对齐，本次效果丢弃（KP 告警可重试）
+                for (const socketId of alertTargets()) {
+                  emitError(io.to(socketId), 'E-ST-01', '引擎写状态板时版本冲突，本次效果未落盘');
+                }
+                emitChecked(io.to(`room:${roomId}`), 'state:broadcast', {
+                  stateBoard: result.current,
+                });
+                return;
+              }
+              stateBoards.set(sessionId, result.next);
+              await saveStateBoard(layout, roomId, sessionId, result.next);
+              emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: result.next });
+            });
+          },
+          // 规则书随会话（T-M7-04）：AI 检定骰与玩家骰走同一套判定
+          rulebook: sessionRuleBook(session),
           tracker,
           buildMessages: async () => (await buildPreviewTrace(layout, roomId, sessionId)).messages,
           emitDice: async (roll) => {
@@ -873,8 +955,8 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
             emitChecked(io.to(`room:${roomId}`), 'narration:done', { seq });
           },
           alertKp: (code, message) => {
-            // E-AI-01 玩家无感：告警只定向 Host（TDD §11）
-            for (const socketId of roomHostSockets.get(roomId) ?? []) {
+            // E-AI-01 玩家无感：告警只定向 Host/副 Host（TDD §11；T-M8-06 副 Host 代行）
+            for (const socketId of alertTargets()) {
               emitError(io.to(socketId), code, message);
             }
           },
@@ -894,7 +976,7 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       } catch (err) {
         // buildMessages/持久化侧未预期失败：对 Host 告警，回合终止（消息主链路不受影响）
         console.error('[gateway] AI 回合失败：', err);
-        for (const socketId of roomHostSockets.get(roomId) ?? []) {
+        for (const socketId of alertTargets()) {
           emitError(io.to(socketId), 'E-SRV-01', 'AI 回合内部错误');
         }
       } finally {
@@ -1041,11 +1123,139 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     }
   }
 
+  /**
+   * Host 转让（T-M8-06，FR-26，设计 §5.5）：当前 Host 出示 hostToken，把 Host 身份
+   * 让给同房间另一名**在线**成员。效果链：members.json 角色换位 → 在线 presence 升降级 →
+   * hostToken 轮换（旧 token 立即失效，防离任 Host 凭旧凭据回收）→ room.hostAuth='member'
+   * （新 Host 重连凭成员角色标记 + memberId 恢复，无需再持 token）→ 全房 notice 广播。
+   * 目标若原为副 Host，副 Host 标记顺带清空（一身不二职）。
+   */
+  async function transferHost(
+    roomId: string,
+    hostToken: string,
+    toMemberId: string,
+  ): Promise<{ ok: true; memberId: string } | { ok: false; code: ErrorCode; message: string }> {
+    return enqueue(roomId, async () => {
+      const room = await readRoomFile(layout, roomId);
+      if (!room) return { ok: false, code: 'E-ROOM-01' as const, message: '房间不存在' };
+      if (hostToken !== room.hostToken) {
+        return { ok: false, code: 'E-ROOM-01' as const, message: 'hostToken 不匹配' };
+      }
+      const members = await readMembers(layout, roomId);
+      const target = members.find((m) => m.id === toMemberId);
+      if (!target) return { ok: false, code: 'E-ROOM-01' as const, message: '目标成员不存在' };
+      if (target.role === 'host') {
+        return { ok: false, code: 'E-ROOM-01' as const, message: '目标已是 Host' };
+      }
+      if (target.role === 'observer') {
+        return { ok: false, code: 'E-ROOM-01' as const, message: '观察者不能接任 Host' };
+      }
+      if (!roomMembers.get(roomId)?.has(toMemberId)) {
+        return { ok: false, code: 'E-ROOM-01' as const, message: '目标成员不在线' };
+      }
+
+      // 角色换位（先记住离任 Host，members.json 更新后用于 presence 降级）
+      const formerHostIds = members.filter((m) => m.role === 'host').map((m) => m.id);
+      for (const id of formerHostIds) await updateMemberRole(layout, roomId, id, 'player');
+      await updateMemberRole(layout, roomId, toMemberId, 'host');
+      for (const id of formerHostIds) setPresenceRole(roomId, id, 'player');
+      setPresenceRole(roomId, toMemberId, 'host');
+
+      await saveRoomFile(layout, {
+        ...room,
+        hostToken: generateHostToken(),
+        hostAuth: 'member',
+        ...(room.coHostMemberId === toMemberId ? { coHostMemberId: null } : {}),
+      });
+      const sessionId = room.activeSessionId;
+      if (sessionId) {
+        await persistAndDeliver(roomId, sessionId, {
+          type: 'system',
+          subtype: 'notice',
+          content: `Host 已转让给 ${target.name}`,
+        });
+      }
+      return { ok: true, memberId: toMemberId };
+    });
+  }
+
+  /**
+   * 副 Host 设置/撤销（T-M8-06，FR-26）：房间级角色标记（coHostMemberId），不发新 token。
+   * 权限面 = 快照 + 状态编辑（canModerateState）；Host 在线与否不影响（掉线代行即此）。
+   */
+  async function setCoHost(
+    roomId: string,
+    hostToken: string,
+    memberId: string | null,
+  ): Promise<{ ok: true } | { ok: false; code: ErrorCode; message: string }> {
+    return enqueue(roomId, async () => {
+      const room = await readRoomFile(layout, roomId);
+      if (!room) return { ok: false, code: 'E-ROOM-01' as const, message: '房间不存在' };
+      if (hostToken !== room.hostToken) {
+        return { ok: false, code: 'E-ROOM-01' as const, message: 'hostToken 不匹配' };
+      }
+      if (memberId !== null) {
+        const target = (await readMembers(layout, roomId)).find((m) => m.id === memberId);
+        if (!target) return { ok: false, code: 'E-ROOM-01' as const, message: '目标成员不存在' };
+        if (target.role === 'host') {
+          return { ok: false, code: 'E-ROOM-01' as const, message: 'Host 无需副 Host 标记' };
+        }
+        if (target.role === 'observer') {
+          return { ok: false, code: 'E-ROOM-01' as const, message: '观察者不能任副 Host' };
+        }
+        if (!roomMembers.get(roomId)?.has(memberId)) {
+          return { ok: false, code: 'E-ROOM-01' as const, message: '目标成员不在线' };
+        }
+      }
+      const previous = room.coHostMemberId ?? null;
+      await saveRoomFile(layout, { ...room, coHostMemberId: memberId });
+      const sessionId = room.activeSessionId;
+      if (sessionId && previous !== memberId) {
+        const nameOf = async (id: string): Promise<string> =>
+          (await readMembers(layout, roomId)).find((m) => m.id === id)?.name ?? id;
+        const content =
+          memberId === null
+            ? previous === null
+              ? '副 Host 状态未变化'
+              : `副 Host（${await nameOf(previous)}）已撤销`
+            : `${await nameOf(memberId)} 已任副 Host`;
+        if (content !== '副 Host 状态未变化') {
+          await persistAndDeliver(roomId, sessionId, {
+            type: 'system',
+            subtype: 'notice',
+            content,
+          });
+        }
+      }
+      return { ok: true };
+    });
+  }
+
+  /** 在线成员的 presence 角色升降级（T-M8-06 转让）：该成员的全部连接 + Host socket 表同步 */
+  function setPresenceRole(roomId: string, memberId: string, role: MemberRole): void {
+    const sockets = memberSockets.get(memberId);
+    if (!sockets) return;
+    for (const socketId of sockets) {
+      const p = presence.get(socketId);
+      if (p && p.roomId === roomId) p.role = role;
+    }
+    const hosts = roomHostSockets.get(roomId) ?? new Set<string>();
+    if (role === 'host') {
+      for (const socketId of sockets) hosts.add(socketId);
+    } else {
+      for (const socketId of sockets) hosts.delete(socketId);
+    }
+    if (hosts.size > 0) roomHostSockets.set(roomId, hosts);
+    else roomHostSockets.delete(roomId);
+  }
+
   return {
     async close(): Promise<void> {
       io.disconnectSockets(true);
       io.removeAllListeners();
     },
+    transferHost,
+    setCoHost,
     directiveStats(): { attempts: number; successes: number; rate: number } {
       let attempts = 0;
       let successes = 0;

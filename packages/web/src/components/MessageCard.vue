@@ -6,6 +6,12 @@ defineProps<{
   senderName: string;
   judgeLabel: string | null;
   judgeClass: string;
+  /** 判定种类中文名（v2 FR-21：属性检定 / 豁免 / 攻击 / 先攻 …） */
+  kindLabel: string | null;
+  /** 判定目标值标签：5e 攻击为 AC、其余为 DC（COC 的目标值已在骰式里，不重复展示） */
+  targetLabel: string | null;
+  /** nat20 / nat1 徽章（仅 5e：面值判定，COC 的大成功是骰值 1 而非 nat20） */
+  natBadge: string | null;
 }>();
 </script>
 
@@ -42,11 +48,16 @@ defineProps<{
   <article v-else-if="msg.type === 'dice'" class="bv-dice-card" :class="judgeClass">
     <div class="bv-dice-card__head">
       <span class="bv-dice-card__sender">{{ senderName }}</span>
+      <span v-if="kindLabel" class="bv-dice-card__kind">{{ kindLabel }}</span>
+      <span v-if="targetLabel" class="bv-dice-card__target">{{ targetLabel }}</span>
       <span class="bv-dice-card__expr">{{ msg.roll.expr }}</span>
       <span class="bv-dice-card__result">
         {{ msg.hidden ? '??' : msg.roll.total }}
       </span>
       <span v-if="judgeLabel" class="bv-dice-card__label">{{ judgeLabel }}</span>
+      <span v-if="natBadge" class="bv-dice-card__label bv-dice-card__label--nat">
+        {{ natBadge }}
+      </span>
       <span v-if="msg.hidden" class="bv-dice-card__label bv-dice-card__label--hidden">
         结果隐藏
       </span>
@@ -158,6 +169,14 @@ defineProps<{
   font-family: ui-monospace, monospace;
   color: var(--bv-text-secondary);
 }
+.bv-dice-card__kind,
+.bv-dice-card__target {
+  font-size: 12px;
+  color: var(--bv-text-tertiary);
+}
+.bv-dice-card__target {
+  font-family: ui-monospace, monospace;
+}
 .bv-dice-card__result {
   font-size: 20px;
   font-weight: 700;
@@ -174,6 +193,14 @@ defineProps<{
 .bv-dice-card__label--hidden {
   background: var(--bv-bg-sunken);
   color: var(--bv-text-tertiary);
+}
+/* nat20 / nat1：与判定色同色系但反白描边，避免与大成功/大失败徽章混淆 */
+.bv-dice-card__label--nat {
+  border: 1px solid var(--bv-judge);
+  background: transparent;
+  color: var(--bv-judge);
+  font-family: ui-monospace, monospace;
+  letter-spacing: 0.05em;
 }
 .bv-dice-card__audit {
   display: flex;

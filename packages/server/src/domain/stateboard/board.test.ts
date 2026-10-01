@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { StateBoard, StatePatch } from '@behindveil/shared';
+import type { Coc7Sheet, StateBoard, StatePatch } from '@behindveil/shared';
 import { createDataLayout, type DataLayout } from '../../adapters/storage/layout.js';
 import { applyStatePatch, readStateBoard, saveStateBoard } from './board.js';
 
@@ -23,7 +23,8 @@ const baseBoard = (over: Partial<StateBoard> = {}): StateBoard => ({
   ...over,
 });
 
-const sheetOf = (over: Partial<StateBoard['pcs'][string]['sheet']> = {}) => ({
+const sheetOf = (over: Partial<Coc7Sheet> = {}): Coc7Sheet => ({
+  rulebook: 'coc7',
   playerName: '爱丽丝',
   occupation: '记者',
   str: 50,
@@ -89,7 +90,7 @@ describe('applyStatePatch（乐观锁，TC-FR-09-001 领域侧）', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.next.version).toBe(3);
-    expect(result.next.pcs.m1?.sheet.san).toBe(40);
+    expect(result.next.pcs.m1?.sheet).toMatchObject({ san: 40 });
     expect(result.next.pcs.m1?.conditions).toEqual(['疯狂(临时)']);
     expect(result.next.scene.name).toBe('地下室');
     expect(result.next.updatedAt).not.toBe('2026-01-01T00:00:00.000Z');
@@ -100,7 +101,7 @@ describe('applyStatePatch（乐观锁，TC-FR-09-001 领域侧）', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.next.facts).toEqual(['新事实']);
-    expect(result.next.pcs.m1?.sheet.san).toBe(55);
+    expect(result.next.pcs.m1?.sheet).toMatchObject({ san: 55 });
     expect(result.next.scene.name).toBe('书房');
   });
 

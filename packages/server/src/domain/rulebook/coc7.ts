@@ -1,6 +1,7 @@
 import type { CheckGrade } from '@behindveil/shared';
 import { parseDiceExpr } from '../dice/parser.js';
 import type {
+  AdjudicateInput,
   CheckResult,
   CheckSpec,
   OpposedResult,
@@ -59,6 +60,7 @@ const SANITY_LEVEL_NAMES: Record<SanityLevelKey, string> = {
 
 export class Coc7RuleBook implements RuleBook {
   readonly id = 'coc7' as const;
+  readonly defaultKind = 'skill' as const;
 
   private readonly rules: Coc7HouseRules;
 
@@ -104,28 +106,42 @@ export class Coc7RuleBook implements RuleBook {
     };
   }
 
-  adjudicate(roll: number, spec: CheckSpec): CheckResult {
+  /**
+   * COC7 判定表。
+   * `<=`（或缺省，即规则书默认语义）走六档判定表；`>=` / `=` 无 COC7 语义，
+   * 按通用布尔比较处理（不带 grade 含义，由调用方决定是否落 grade——见 evaluator）。
+   */
+  adjudicate(roll: AdjudicateInput, spec: CheckSpec): CheckResult {
+    const value = roll.total;
+    if (spec.op === '>=' || spec.op === '=') {
+      const passed = spec.op === '>=' ? value >= spec.target : value === spec.target;
+      return { outcome: passed ? 'success' : 'fail', grade: 'normal' };
+    }
+
     const { target } = spec;
     const fumbleThreshold = target < 50 ? this.rules.fumbleLowSkill : this.rules.fumbleHighSkill;
 
-    if (roll <= this.rules.criticalMax) return { outcome: 'critical', grade: 'normal' };
-    if (roll >= fumbleThreshold) return { outcome: 'fumble', grade: 'normal' };
+    if (value <= this.rules.criticalMax) return { outcome: 'critical', grade: 'normal' };
+    if (value >= fumbleThreshold) return { outcome: 'fumble', grade: 'normal' };
 
-    const natural = naturalGrade(roll, target);
+    const natural = naturalGrade(value, target);
     if (!natural) return { outcome: 'fail', grade: 'normal' };
 
     // KP 要求的难度档未达 → 失败（grade 保留已达成的自然档位）
     const demandedThreshold = difficultyThreshold(spec.difficulty, target);
-    if (roll > demandedThreshold) return { outcome: 'fail', grade: natural };
+    if (value > demandedThreshold) return { outcome: 'fail', grade: natural };
     return { outcome: 'success', grade: natural };
   }
 
   sanityRule(roll: number, currentSan: number): SanityLoss {
-    const result = this.adjudicate(roll, {
-      kind: 'sanity',
-      target: currentSan,
-      difficulty: 'normal',
-    });
+    const result = this.adjudicate(
+      { total: roll, raw: null },
+      {
+        kind: 'sanity',
+        target: currentSan,
+        difficulty: 'normal',
+      },
+    );
     const key = sanityLevelKey(result.outcome, result.grade);
     const loss = this.rules.sanityLossTable[key];
     return { loss, desc: `${SANITY_LEVEL_NAMES[key]}：损失 ${loss}` };
@@ -133,10 +149,16 @@ export class Coc7RuleBook implements RuleBook {
 
   adjudicateOpposed(a: OpposedSide, b: OpposedSide): OpposedResult {
     const rankA = successRank(
-      this.adjudicate(a.roll, { kind: 'skill', target: a.skill, difficulty: 'normal' }),
+      this.adjudicate(
+        { total: a.roll, raw: null },
+        { kind: 'skill', target: a.skill, difficulty: 'normal' },
+      ),
     );
     const rankB = successRank(
-      this.adjudicate(b.roll, { kind: 'skill', target: b.skill, difficulty: 'normal' }),
+      this.adjudicate(
+        { total: b.roll, raw: null },
+        { kind: 'skill', target: b.skill, difficulty: 'normal' },
+      ),
     );
     if (rankA === 0 && rankB === 0) return { winner: 'tie' }; // 双方均失败
     if (rankA !== rankB) return { winner: rankA > rankB ? 'a' : 'b' };

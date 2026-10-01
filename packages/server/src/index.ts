@@ -12,6 +12,7 @@ import type { LlmAdapter } from './domain/llm.js';
 import { loadConfig } from './config.js';
 import { registerCardRoutes } from './gateway/http/cards.js';
 import { registerExportRoutes } from './gateway/http/export.js';
+import { registerHostRoutes } from './gateway/http/host.js';
 import { registerMetricsRoutes } from './gateway/http/metrics.js';
 import { registerModuleRoutes } from './gateway/http/modules.js';
 import { registerPcRoutes } from './gateway/http/pcs.js';
@@ -140,6 +141,8 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
     metrics,
     directives: () => gateway.directiveStats(),
   });
+  // Host 转让/副 Host（T-M8-06）：REST 面经惰性句柄进网关（在线状态/presence 在网关内存态）
+  registerHostRoutes(app, { gateway: () => gateway });
 
   const webDistDir =
     opts.webDistDir ?? resolve(fileURLToPath(new URL('../../web/dist', import.meta.url)));

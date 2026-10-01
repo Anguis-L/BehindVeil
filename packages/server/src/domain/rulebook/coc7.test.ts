@@ -12,11 +12,14 @@ import type { CheckSpec } from './types.js';
 
 const book = new Coc7RuleBook();
 
+/** 判定输入（设计文档 v2 §5.2）：total 参与比较，raw 供 nat20 类面值规则使用 */
+const asInput = (total: number) => ({ total, raw: null });
+
 const judge = (
   roll: number,
   target: number,
   difficulty: 'normal' | 'hard' | 'extreme' = 'normal',
-) => book.adjudicate(roll, { kind: 'skill', target, difficulty });
+) => book.adjudicate(asInput(roll), { kind: 'skill', target, difficulty });
 
 const fixed = (value: number): RandomSource => ({ int: (): number => value });
 
@@ -38,11 +41,11 @@ describe('TC-FR-04-010：大成功', () => {
   it('房规 criticalMax=5 时 02–05 亦为大成功，06 不再是大成功', () => {
     const house = new Coc7RuleBook({ criticalMax: 5 });
 
-    expect(house.adjudicate(5, { kind: 'skill', target: 60, difficulty: 'normal' })).toMatchObject({
-      outcome: 'critical',
-    });
     expect(
-      house.adjudicate(6, { kind: 'skill', target: 60, difficulty: 'normal' }),
+      house.adjudicate(asInput(5), { kind: 'skill', target: 60, difficulty: 'normal' }),
+    ).toMatchObject({ outcome: 'critical' });
+    expect(
+      house.adjudicate(asInput(6), { kind: 'skill', target: 60, difficulty: 'normal' }),
     ).not.toMatchObject({ outcome: 'critical' });
   });
 
@@ -116,12 +119,12 @@ describe('TC-FR-04-014：大失败', () => {
     const spec = (target: number): CheckSpec => ({ kind: 'skill', target, difficulty: 'normal' });
 
     const low = new Coc7RuleBook({ fumbleLowSkill: 90 });
-    expect(low.adjudicate(90, spec(40))).toEqual({ outcome: 'fumble', grade: 'normal' });
-    expect(low.adjudicate(89, spec(40))).toEqual({ outcome: 'fail', grade: 'normal' });
+    expect(low.adjudicate(asInput(90), spec(40))).toEqual({ outcome: 'fumble', grade: 'normal' });
+    expect(low.adjudicate(asInput(89), spec(40))).toEqual({ outcome: 'fail', grade: 'normal' });
 
     const high = new Coc7RuleBook({ fumbleHighSkill: 98 });
-    expect(high.adjudicate(98, spec(50))).toEqual({ outcome: 'fumble', grade: 'normal' });
-    expect(high.adjudicate(97, spec(50))).toEqual({ outcome: 'fail', grade: 'normal' });
+    expect(high.adjudicate(asInput(98), spec(50))).toEqual({ outcome: 'fumble', grade: 'normal' });
+    expect(high.adjudicate(asInput(97), spec(50))).toEqual({ outcome: 'fail', grade: 'normal' });
   });
 });
 

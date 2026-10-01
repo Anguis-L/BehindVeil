@@ -9,8 +9,9 @@ import { PROTOCOL_VERSION, type Message } from '@behindveil/shared';
 import { createDataLayout, type DataLayout } from '../adapters/storage/layout.js';
 import { createMockLlm, type MockLlmAdapter, type MockScriptStep } from '../adapters/llm/mock.js';
 import type { LlmAdapter } from '../domain/llm.js';
-import { createRoom } from '../domain/session/rooms.js';
-import { saveStateBoard } from '../domain/stateboard/board.js';
+import { createRoom, findByInviteCode } from '../domain/session/rooms.js';
+import { readStateBoard, saveStateBoard } from '../domain/stateboard/board.js';
+import { replayAuditFile } from '../tools/audit-replay.js';
 import type { StateBoard } from '@behindveil/shared';
 import { attachGateway } from './socket.js';
 
@@ -52,8 +53,9 @@ interface AiServer {
 
 async function startAiServer(
   script: MockScriptStep[],
-  opts: { llm?: LlmAdapter } = {},
+  opts: { llm?: LlmAdapter; rulebook?: 'coc7' | 'dnd5e' } = {},
 ): Promise<AiServer> {
+  const rulebook = opts.rulebook ?? 'coc7';
   const dataDir = await mkdtemp(path.join(tmpdir(), 'bv-socket-ai-'));
   created.push(dataDir);
   const layout = createDataLayout(dataDir);
@@ -102,7 +104,7 @@ async function startAiServer(
       id: 'mod-1',
       name: 'mod-1',
       version: '1.0.0',
-      rulebook: 'coc7',
+      rulebook,
       apiVersion: '1',
       entry: { kpCard: 'kp-card.json', worldBook: 'worldbook.json', initState: 'init-state.json' },
     }),
@@ -117,7 +119,7 @@ async function startAiServer(
         scenario: '',
         first_mes: '',
         mes_example: '',
-        extensions: { aidle: { rulebook: 'coc7' } },
+        extensions: { aidle: { rulebook } },
       },
     }),
   );
@@ -131,30 +133,44 @@ async function startAiServer(
   );
   if (!sessionAck.ok || !sessionAck.session) throw new Error('开团失败');
   // T-M5-04 真实名册：检定取值来自状态板（不再有 stub 的硬编码 alice）——
-  // 装配一块含 alice 的初始板，供 Mock 剧本 pc:alice 检定取值。
+  // 装配一块含 alice 的初始板，供 Mock 剧本 pc:alice 检定取值；5e 房给 5e 卡（T-M8-03 E2E）。
   const aliceBoard: StateBoard = {
     version: 0,
     pcs: {
       alice: {
-        sheet: {
-          playerName: '爱丽丝',
-          occupation: '记者',
-          str: 50,
-          con: 60,
-          siz: 55,
-          dex: 70,
-          app: 50,
-          int: 75,
-          pow: 55,
-          edu: 80,
-          luck: 40,
-          hp: 11,
-          mp: 11,
-          san: 55,
-          db: '0',
-          build: '0',
-          skills: { 侦查: 60, 图书馆使用: 50, 聆听: 45, 急救: 50, 攀爬: 65 },
-        },
+        sheet:
+          rulebook === 'dnd5e'
+            ? {
+                rulebook: 'dnd5e',
+                playerName: '爱丽丝',
+                occupation: '战士',
+                abilities: { str: 16, dex: 14, con: 14, int: 10, wis: 12, cha: 8 },
+                proficiencyBonus: 2,
+                ac: 16,
+                hp: { max: 22, current: 22 },
+                proficientSkills: [],
+                proficientSaves: ['str', 'con'],
+              }
+            : {
+                rulebook: 'coc7',
+                playerName: '爱丽丝',
+                occupation: '记者',
+                str: 50,
+                con: 60,
+                siz: 55,
+                dex: 70,
+                app: 50,
+                int: 75,
+                pow: 55,
+                edu: 80,
+                luck: 40,
+                hp: 11,
+                mp: 11,
+                san: 55,
+                db: '0',
+                build: '0',
+                skills: { 侦查: 60, 图书馆使用: 50, 聆听: 45, 急救: 50, 攀爬: 65 },
+              },
         conditions: [],
       },
     },
@@ -477,6 +493,95 @@ describe('AI 忙时排队串行（TC-FR-03-005）', () => {
       '回应二。\n',
     ]);
     expect(hostFeed.errors).toHaveLength(0);
+    await srv.cleanup();
+  });
+});
+
+// ---- damage/heal 闭环 E2E（T-M8-03，FR-25 / G-M8 门禁）----
+
+describe('damage 闭环 E2E（T-M8-03 / G-M8）', () => {
+  it('5e 房：AI 指令 → 服务端掷骰 DiceMsg → 状态板 HP 变更（广播+落盘）→ 审计回放零失配', async () => {
+    const srv = await startAiServer(
+      [
+        { delta: '哥布林挥刀砍来。\n' },
+        { directive: { op: 'damage', target: 'pc:alice', expr: '1d6+2', label: '弯刀' } },
+        { delta: '\n鲜血溅出。' },
+        { stop: true },
+        { delta: '你踉跄后退。' },
+      ],
+      { rulebook: 'dnd5e' },
+    );
+    const states: Array<{
+      version: number;
+      pcs: Record<string, { sheet: { hp: { current: number; max: number } } }>;
+    }> = [];
+    srv.host.on(
+      'state:broadcast',
+      (p: {
+        stateBoard: {
+          version: number;
+          pcs: Record<string, { sheet: { hp: { current: number; max: number } } }>;
+        };
+      }) => states.push(p.stateBoard),
+    );
+    const hostFeed = collect(srv.host);
+    const playerFeed = collect(srv.player);
+
+    srv.player.emit('msg:send', { type: 'ic', content: '我冲向哥布林。' });
+    await waitFor(() => hostFeed.dones.length >= 2, 4000, '两次 narration:done');
+
+    // 效果骰恰好一颗：expr 原样、无判定记录（audit-first 由 recordDice 落流水）
+    const dice = hostFeed.msgs.filter((m) => m.type === 'dice');
+    expect(dice).toHaveLength(1);
+    const roll = (dice[0] as { roll: { expr: string; total: number; check?: unknown } }).roll;
+    expect(roll.expr).toBe('1d6+2');
+    expect(roll.check ?? null).toBeNull(); // 效果骰无判定记录（消息体缺省该字段）
+
+    // 回注含 HP 前后值；状态板广播 HP = 22 − total（clamp 前后一致：total ≤ 22 不触边）
+    const system = hostFeed.msgs.filter(
+      (m) => m.type === 'system' && m.subtype === 'ai_directive_result',
+    );
+    expect(system).toHaveLength(1);
+    expect((system[0] as { content: string }).content).toContain(
+      `【伤害】爱丽丝（弯刀）：1d6+2 → ${roll.total}，HP 22 → ${22 - roll.total}`,
+    );
+    const hit = states.find((b) => b.pcs.alice?.sheet.hp.current === 22 - roll.total);
+    expect(hit).toBeDefined();
+
+    // 落盘验证：state.json 已持久化新 HP（数值权威在盘不在内存）
+    const room = await findByInviteCode(srv.layout, srv.inviteCode);
+    expect(room).not.toBeNull();
+    const board = await readStateBoard(srv.layout, room!.id, room!.activeSessionId!);
+    expect(board.pcs.alice?.sheet).toMatchObject({ hp: { current: 22 - roll.total, max: 22 } });
+
+    // 审计回放：伤害骰与检定骰同一通道，重算零失配（G-M8「E2E 剧本回放」项）
+    const report = await replayAuditFile(srv.layout.auditDiceFile);
+    expect(report.total).toBeGreaterThanOrEqual(1);
+    expect(report.mismatches).toEqual([]);
+
+    expect(playerFeed.errors).toHaveLength(0);
+    expect(hostFeed.errors).toHaveLength(0);
+    await srv.cleanup();
+  });
+
+  it('COC 房收到 damage → E-AI-01 防呆：不掷骰、状态板不变、玩家无感', async () => {
+    const srv = await startAiServer([
+      { delta: '哥布林挥刀。\n' },
+      { directive: { op: 'damage', target: 'pc:alice', expr: '1d6+2' } },
+      { delta: '\n但卡不是 5e 卡。' },
+    ]);
+    const states: unknown[] = [];
+    srv.host.on('state:broadcast', (p: unknown) => states.push(p));
+    const hostFeed = collect(srv.host);
+    const playerFeed = collect(srv.player);
+
+    srv.player.emit('msg:send', { type: 'ic', content: '我挨了一刀。' });
+    await waitFor(() => hostFeed.dones.length >= 1, 4000, '本段 narration:done');
+
+    expect(hostFeed.msgs.some((m) => m.type === 'dice')).toBe(false);
+    expect(states).toHaveLength(0);
+    expect(hostFeed.errors.some((e) => e.code === 'E-AI-01')).toBe(true);
+    expect(playerFeed.errors).toHaveLength(0); // E-AI-01 玩家无感
     await srv.cleanup();
   });
 });

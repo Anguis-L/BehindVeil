@@ -27,6 +27,65 @@ const store = useSessionStore();
 const moduleId = ref('');
 const tokenDraft = ref(store.adminToken);
 
+// ---- Host 转让 / 副 Host（T-M8-06，FR-26）----
+const hostTokenDraft = ref('');
+const transferTarget = ref('');
+const coHostTarget = ref('');
+const hostNotice = ref('');
+const hostError = ref('');
+
+/** 可接任/可授副 Host 的成员：玩家且非本人（观察者与 Host 不参与，服务端同样校验） */
+const transferableMembers = computed(() =>
+  store.members.filter((m) => m.role === 'player' && m.id !== store.memberId),
+);
+
+async function hostApi(path: string, method: 'POST' | 'PUT', body: unknown): Promise<void> {
+  const res = await fetch(`/rooms/${store.roomId}/${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const payload: unknown = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message =
+      typeof payload === 'object' &&
+      payload !== null &&
+      typeof (payload as { message?: unknown }).message === 'string'
+        ? (payload as { message: string }).message
+        : `请求失败（${res.status}）`;
+    throw new Error(message);
+  }
+}
+
+async function doTransfer(): Promise<void> {
+  if (!transferTarget.value || !hostTokenDraft.value) return;
+  hostError.value = '';
+  try {
+    await hostApi('host-transfer', 'POST', {
+      hostToken: hostTokenDraft.value,
+      toMemberId: transferTarget.value,
+    });
+    const name =
+      store.members.find((m) => m.id === transferTarget.value)?.name ?? transferTarget.value;
+    hostNotice.value = `已转让给 ${name}——你的 hostToken 已失效，本页现为玩家身份。`;
+    hostTokenDraft.value = '';
+    transferTarget.value = '';
+    store.role = 'player'; // 服务端已降级本连接 presence，前端同步
+  } catch (error) {
+    hostError.value = error instanceof Error ? error.message : '转让失败';
+  }
+}
+
+async function doSetCoHost(memberId: string | null): Promise<void> {
+  hostError.value = '';
+  try {
+    await hostApi('co-host', 'PUT', { hostToken: hostTokenDraft.value, memberId });
+    hostNotice.value = memberId === null ? '副 Host 已撤销' : '副 Host 已设置';
+  } catch (error) {
+    hostError.value = error instanceof Error ? error.message : '操作失败';
+  }
+}
+
 const activeSession = computed(
   () => store.sessions.find((session) => session.id === store.activeSessionId) ?? null,
 );
@@ -36,6 +95,7 @@ const draft = ref<SettingsDraft>({
   temperature: '',
   maxHistoryMessages: '',
   worldBookBudgetTokens: '',
+  nat20Rule: 'attack_only',
 });
 // 读到会话设置即回填表单；KP 手改后只有与当前值不同的字段会进 patch
 watch(
@@ -46,6 +106,7 @@ watch(
       temperature: String(settings.temperature),
       maxHistoryMessages: String(settings.maxHistoryMessages),
       worldBookBudgetTokens: String(settings.worldBookBudgetTokens),
+      nat20Rule: settings.nat20Rule ?? 'attack_only',
     };
   },
   { immediate: true },
@@ -112,6 +173,64 @@ async function refreshSessions(): Promise<void> {
         <p class="bv-kp__hint">
           {{ store.adminToken ? '令牌已填入，会话管理可用' : '未填令牌，会话管理不可用' }}
         </p>
+      </section>
+
+      <!-- Host 转让 / 副 Host（T-M8-06，FR-26）：hostToken 授权的一次性管理操作 -->
+      <section class="bv-kp__block">
+        <h3 class="bv-kp__title">Host 转让 / 副 Host</h3>
+        <label class="bv-kp__field">
+          <span>hostToken（建房时下发，授权用）</span>
+          <input
+            v-model="hostTokenDraft"
+            class="bv-kp__input bv-kp__mono"
+            type="password"
+            autocomplete="off"
+          />
+        </label>
+        <div class="bv-kp__row">
+          <select v-model="transferTarget" class="bv-kp__input">
+            <option value="" disabled>选择接任成员（在线）</option>
+            <option v-for="m in transferableMembers" :key="m.id" :value="m.id">{{ m.name }}</option>
+          </select>
+          <button
+            class="bv-kp__btn"
+            type="button"
+            :disabled="!transferTarget || !hostTokenDraft"
+            @click="doTransfer"
+          >
+            转让 Host
+          </button>
+        </div>
+        <p class="bv-kp__hint">
+          转让后你的 hostToken 立即轮换失效；对方凭成员身份重连即恢复 Host（本页同步变回玩家）。
+        </p>
+        <div class="bv-kp__row">
+          <select v-model="coHostTarget" class="bv-kp__input">
+            <option value="" disabled>选择副 Host（在线）</option>
+            <option v-for="m in transferableMembers" :key="m.id" :value="m.id">{{ m.name }}</option>
+          </select>
+          <button
+            class="bv-kp__btn bv-kp__btn--ghost"
+            type="button"
+            :disabled="!coHostTarget || !hostTokenDraft"
+            @click="doSetCoHost(coHostTarget)"
+          >
+            设为副 Host
+          </button>
+          <button
+            class="bv-kp__btn bv-kp__btn--ghost"
+            type="button"
+            :disabled="!hostTokenDraft"
+            @click="doSetCoHost(null)"
+          >
+            撤销副 Host
+          </button>
+        </div>
+        <p class="bv-kp__hint">
+          副 Host 与 Host 同享快照与状态编辑权限（掉线代行），不发新 token。
+        </p>
+        <p v-if="hostNotice" class="bv-kp__hint">{{ hostNotice }}</p>
+        <p v-if="hostError" class="bv-kp__err">{{ hostError }}</p>
       </section>
 
       <!-- 会话管理：开团 / 结束 / 切换活跃（连载复播） -->
@@ -309,6 +428,17 @@ async function refreshSessions(): Promise<void> {
         </label>
         <p v-if="parsed.errors.worldBookBudgetTokens" class="bv-kp__err">
           {{ parsed.errors.worldBookBudgetTokens }}
+        </p>
+
+        <label class="bv-kp__field">
+          <span>nat20 / nat1 适用面（5e）</span>
+          <select v-model="draft.nat20Rule" class="bv-kp__input">
+            <option value="attack_only">仅攻击骰（官方口径）</option>
+            <option value="all_d20">所有 d20 检定（桌面房规）</option>
+          </select>
+        </label>
+        <p class="bv-kp__hint">
+          COC 房改这项不影响判定；5e 房里它决定 nat20 必中 / nat1 必失是否覆盖属性检定与豁免。
         </p>
 
         <button class="bv-kp__btn" type="button" :disabled="!canSaveSettings" @click="saveSettings">

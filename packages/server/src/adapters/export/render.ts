@@ -39,11 +39,23 @@ export interface SnapshotPcExport {
   /** memberId 对应的显示名（缺失时回退为 id 本身） */
   memberName: string;
   playerName: string;
-  hp: number;
-  san: number;
-  mp: number;
-  luck: number;
+  /** COC 为当前值；5e 为 { max, current }（T-M8-00 消费清单 #4） */
+  hp: number | { max: number; current: number };
+  /** 5e 无理智/魔力/幸运 → null */
+  san: number | null;
+  mp: number | null;
+  luck: number | null;
   conditions: string[];
+}
+
+/** 快照 HP 展示：COC 当前值；5e `current/max` */
+export function hpTextOf(pc: SnapshotPcExport): string {
+  return typeof pc.hp === 'number' ? String(pc.hp) : `${pc.hp.current}/${pc.hp.max}`;
+}
+
+/** 5e 缺失项展示为 `—` */
+export function statTextOf(value: number | null): string {
+  return value === null ? '—' : String(value);
 }
 
 export interface SnapshotExport {
@@ -141,16 +153,18 @@ function toDiceExport(message: Extract<Message, { type: 'dice' }>): DiceExport {
 }
 
 function toSnapshotExport(board: StateBoard, nameOf: (id: string) => string): SnapshotExport {
-  const pcs: SnapshotPcExport[] = Object.entries(board.pcs).map(([memberId, pc]) => ({
-    memberId,
-    memberName: nameOf(memberId),
-    playerName: pc.sheet.playerName,
-    hp: pc.sheet.hp,
-    san: pc.sheet.san,
-    mp: pc.sheet.mp,
-    luck: pc.sheet.luck,
-    conditions: [...pc.conditions],
-  }));
+  const pcs: SnapshotPcExport[] = Object.entries(board.pcs).map(([memberId, pc]) => {
+    const { sheet } = pc;
+    return {
+      memberId,
+      memberName: nameOf(memberId),
+      playerName: sheet.playerName,
+      ...(sheet.rulebook === 'dnd5e'
+        ? { hp: { ...sheet.hp }, san: null, mp: null, luck: null }
+        : { hp: sheet.hp, san: sheet.san, mp: sheet.mp, luck: sheet.luck }),
+      conditions: [...pc.conditions],
+    };
+  });
   return {
     sceneName: board.scene.name,
     sceneTime: board.scene.time,

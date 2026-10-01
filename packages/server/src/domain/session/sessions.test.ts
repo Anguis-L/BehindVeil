@@ -93,6 +93,7 @@ describe('createSession（T-M1-01/07）', () => {
     const room = await createRoom(layout, { name: 'A' });
     await declarePc(layout, room.id, 'm1', {
       sheet: {
+        rulebook: 'coc7',
         playerName: '爱丽丝',
         occupation: '记者',
         str: 50,

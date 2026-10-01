@@ -2,6 +2,7 @@
 import { computed, ref, watch, nextTick } from 'vue';
 import { useSessionStore } from '../stores/session';
 import { parseDiceInput } from '../dice-input.js';
+import { diceKindLabel, diceNatBadge, diceTargetLabel } from '../dice-card.js';
 import type { Message } from '@behindveil/shared';
 import MessageCard from '../components/MessageCard.vue';
 import KpConsole from '../components/KpConsole.vue';
@@ -24,6 +25,16 @@ const railTabs: Array<{ key: RailTab; label: string }> = [
   { key: 'kp', label: 'KP 控制台' },
   { key: 'cards', label: '卡库' },
 ];
+
+/**
+ * 窄屏抽屉（T-M6-07，NFR-01）。
+ * 设计基线：「手机降为单栏 + 抽屉」——侧栏不能一藏了之，否则成员、角色卡、
+ * KP 控制台在手机上等于没有。宽屏下这个状态不参与渲染（CSS 只在窄屏认它）。
+ */
+const drawer = ref<'left' | 'right' | null>(null);
+function toggleDrawer(side: 'left' | 'right'): void {
+  drawer.value = drawer.value === side ? null : side;
+}
 
 const canSend = computed(() => store.role !== 'observer' && store.activeSessionId !== null);
 
@@ -125,15 +136,45 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
 <template>
   <main class="bv-room">
     <header class="bv-room__topbar">
+      <button
+        class="bv-room__drawer-btn"
+        type="button"
+        aria-label="打开成员与模组面板"
+        @click="toggleDrawer('left')"
+      >
+        ☰
+      </button>
       <span class="bv-room__title">{{ store.inviteCode }} · {{ store.name }}</span>
       <span class="bv-room__session">
         {{ store.activeSessionId ? `会话 ${store.activeSessionId}` : '尚未开团' }}
       </span>
       <span v-if="store.connectionLost" class="bv-room__offline">连接已断开，正在重连…</span>
+      <button
+        class="bv-room__drawer-btn bv-room__drawer-btn--tail"
+        type="button"
+        aria-label="打开角色与控制台面板"
+        @click="toggleDrawer('right')"
+      >
+        ⋯
+      </button>
     </header>
 
     <div class="bv-room__body">
-      <aside class="bv-room__rail bv-room__rail--left">
+      <aside
+        class="bv-room__rail bv-room__rail--left"
+        :class="{ 'bv-room__rail--open': drawer === 'left' }"
+      >
+        <div class="bv-room__rail-head">
+          <h2 class="bv-room__rail-title">成员（{{ store.members.length }}）</h2>
+          <button
+            class="bv-room__rail-close"
+            type="button"
+            aria-label="关闭面板"
+            @click="drawer = null"
+          >
+            ✕
+          </button>
+        </div>
         <h2 class="bv-room__rail-title">成员（{{ store.members.length }}）</h2>
         <ul class="bv-room__members">
           <li v-for="m in store.members" :key="m.id" class="bv-room__member">
@@ -154,6 +195,9 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
             :sender-name="senderName(msg)"
             :judge-label="judgeLabel(msg)"
             :judge-class="judgeClass(msg)"
+            :kind-label="diceKindLabel(msg)"
+            :target-label="diceTargetLabel(msg)"
+            :nat-badge="diceNatBadge(msg)"
           />
           <!-- KP 叙事流式占位（T-M3-08）：delta 期间显示，落盘广播 + done 后由完整消息取代 -->
           <blockquote v-if="store.streaming" class="bv-room__streaming">
@@ -225,21 +269,34 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
         </div>
       </section>
 
-      <aside class="bv-room__rail bv-room__rail--right">
-        <nav class="bv-room__tabs" role="tablist">
+      <aside
+        class="bv-room__rail bv-room__rail--right"
+        :class="{ 'bv-room__rail--open': drawer === 'right' }"
+      >
+        <div class="bv-room__rail-head">
+          <nav class="bv-room__tabs" role="tablist">
+            <button
+              v-for="tab in railTabs"
+              :key="tab.key"
+              class="bv-room__tab"
+              :class="{ 'bv-room__tab--active': railTab === tab.key }"
+              type="button"
+              role="tab"
+              :aria-selected="railTab === tab.key"
+              @click="railTab = tab.key"
+            >
+              {{ tab.label }}
+            </button>
+          </nav>
           <button
-            v-for="tab in railTabs"
-            :key="tab.key"
-            class="bv-room__tab"
-            :class="{ 'bv-room__tab--active': railTab === tab.key }"
+            class="bv-room__rail-close"
             type="button"
-            role="tab"
-            :aria-selected="railTab === tab.key"
-            @click="railTab = tab.key"
+            aria-label="关闭面板"
+            @click="drawer = null"
           >
-            {{ tab.label }}
+            ✕
           </button>
-        </nav>
+        </div>
 
         <StateBoardPanel v-if="railTab === 'board'" />
         <CardImportPanel v-else-if="railTab === 'cards'" />
@@ -306,6 +363,9 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
           {{ railTabs.find((t) => t.key === railTab)?.label }}（建设中）
         </p>
       </aside>
+
+      <!-- 抽屉遮罩：只在窄屏出现，点它即收起面板 -->
+      <div v-if="drawer" class="bv-room__scrim" role="presentation" @click="drawer = null"></div>
     </div>
   </main>
 </template>
@@ -568,13 +628,105 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* 抽屉按钮与关闭按钮：宽屏不需要（三栏常驻），窄屏才放出来 */
+.bv-room__drawer-btn {
+  display: none;
+  padding: var(--bv-space-1) var(--bv-space-2);
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: var(--bv-radius-control);
+  background: transparent;
+  color: var(--bv-text-secondary);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.bv-room__drawer-btn--tail {
+  margin-left: auto;
+}
+.bv-room__rail-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--bv-space-2);
+}
+.bv-room__rail-head .bv-room__tabs {
+  flex: 1;
+  margin-bottom: var(--bv-space-3);
+}
+.bv-room__rail-close {
+  display: none;
+  flex: none;
+  padding: var(--bv-space-1) var(--bv-space-2);
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: var(--bv-radius-control);
+  background: transparent;
+  color: var(--bv-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.bv-room__scrim {
+  display: none;
+}
+
 @media (max-width: 1024px) {
-  /* 手机单栏降级（设计基线：桌面优先，移动端收起两侧栏） */
+  /* 手机单栏 + 抽屉（设计基线：桌面优先，移动端侧栏改为可唤出，而不是直接藏掉） */
   .bv-room__body {
     grid-template-columns: 1fr;
   }
+  .bv-room__drawer-btn,
+  .bv-room__rail-close {
+    display: inline-flex;
+  }
+  .bv-room__scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 15;
+    background: rgba(0, 0, 0, 0.5);
+  }
   .bv-room__rail {
-    display: none;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    z-index: 20;
+    overflow-y: auto;
+    transition: transform 0.22s ease;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.45);
+  }
+  .bv-room__rail--left {
+    left: 0;
+    width: min(88vw, var(--bv-rail-left));
+    transform: translateX(-100%);
+  }
+  .bv-room__rail--right {
+    right: 0;
+    left: auto;
+    width: min(88vw, var(--bv-rail-right));
+    transform: translateX(100%);
+  }
+  .bv-room__rail--left.bv-room__rail--open,
+  .bv-room__rail--right.bv-room__rail--open {
+    transform: translateX(0);
+  }
+}
+
+@media (max-width: 600px) {
+  .bv-room__topbar {
+    flex-wrap: wrap;
+    gap: var(--bv-space-2);
+    padding: var(--bv-space-2) var(--bv-space-3);
+    font-size: 12px;
+  }
+  .bv-room__messages {
+    padding: var(--bv-space-3) var(--bv-space-2);
+  }
+  .bv-room__composer {
+    padding: var(--bv-space-2);
+  }
+  .bv-room__draft {
+    min-width: 0;
   }
 }
 </style>

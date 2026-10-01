@@ -1,8 +1,10 @@
 import type {
   CheckDifficulty,
   CheckGrade,
+  CheckOp,
   CheckOutcome,
   DiceKind,
+  Nat20Rule,
   RuleBookId,
 } from '@behindveil/shared';
 import type { ParsedDiceExpr } from '../dice/parser.js';
@@ -29,9 +31,25 @@ export interface ParsedCheck {
 
 export interface CheckSpec {
   kind: DiceKind;
-  /** 判定目标值（技能值 / SAN 值 / 幸运值 / 骰式后缀 target） */
+  /** 判定目标值（技能值 / SAN 值 / 幸运值 / 骰式后缀 target / 5e 的 DC 或 AC） */
   target: number;
   difficulty: CheckDifficulty;
+  /**
+   * 骰式判定后缀运算符（设计文档 v2 §5.2）。
+   * 缺省按规则书默认语义：COC7 走 `<=` 判定表，5e 走 `>=` DC 比较。
+   */
+  op?: CheckOp;
+}
+
+/**
+ * adjudicate 的判定输入（设计文档 v2 §5.2）。
+ * - total：参与比较的数值（普通骰取 total，TC-FR-04-009）；
+ * - raw：主骰原始面值（5e nat20/nat1 以面值判定，加修正后 25 不算 nat20）；
+ *   无明确主骰（多骰组或未取舍的多颗骰）时为 null。
+ */
+export interface AdjudicateInput {
+  total: number;
+  raw: number | null;
 }
 
 /** 判定表产物：outcome 四分类 + grade 成功子等级（COC7 极难/困难是 success 的子等级） */
@@ -62,10 +80,20 @@ export interface OpposedResult {
 
 export interface RuleBook {
   readonly id: RuleBookId;
+  /**
+   * 未显式给出判定种类时的默认种类（玩家手掷骰走这条）。
+   * COC7 = skill；5e = ability（FR-21：5e 手掷骰默认是属性检定，攻击/豁免由 AI 指令或后续显式指定）。
+   */
+  readonly defaultKind: DiceKind;
+  /**
+   * 影响判定结果的房规快照（复现用）：随 RollCheck 落审计流水，audit-replay 据此重算。
+   * 当前仅 5e 的 nat20 适用面；COC7 房规恒默认（未接线到会话），故可选。
+   */
+  readonly nat20Rule?: Nat20Rule;
   /** 从骰式解析判定规格（TDD §5.3）；表达式无判定后缀时返回 null */
   parseCheck(expr: string, ctx: RollContext): ParsedCheck | null;
-  /** 判定表（TDD §5.3）：roll 为参与比对的数值（普通骰取 total，TC-FR-04-009） */
-  adjudicate(roll: number, spec: CheckSpec): CheckResult;
+  /** 判定表（TDD §5.3）：按 total 比对目标值；raw 供 nat20/nat1 类面值规则使用 */
+  adjudicate(roll: AdjudicateInput, spec: CheckSpec): CheckResult;
   /** COC7 理智规则（可选能力） */
   sanityRule?(roll: number, currentSan: number): SanityLoss;
   /** 对抗检定（可选能力，TC-FR-04-008：按成功等级与技能值裁定胜/负/平） */

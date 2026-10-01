@@ -126,6 +126,7 @@ describe('默认依赖装配', () => {
       pcs: {
         alice: {
           sheet: {
+            rulebook: 'coc7',
             playerName: '爱丽丝',
             occupation: '',
             str: 0,

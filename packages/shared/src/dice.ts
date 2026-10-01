@@ -13,13 +13,36 @@ import { z } from 'zod';
 export const RULEBOOK_IDS = ['coc7', 'dnd5e'] as const;
 export type RuleBookId = (typeof RULEBOOK_IDS)[number];
 
-/** 判定种类（TDD §3.5 check.kind） */
-export const DICE_KINDS = ['skill', 'sanity', 'opposed', 'luck'] as const;
+/**
+ * 判定种类（TDD §3.5 check.kind）。
+ * 前四种为 COC7；v2 追加 5e 四种（FR-21）：ability 属性检定 / save 豁免 / attack 攻击 / initiative 先攻。
+ */
+export const DICE_KINDS = [
+  'skill',
+  'sanity',
+  'opposed',
+  'luck',
+  'ability',
+  'save',
+  'attack',
+  'initiative',
+] as const;
 export type DiceKind = (typeof DICE_KINDS)[number];
 
 /** 判定难度档（KP 要求的成功档位，TDD §3.5 / §5.4） */
 export const CHECK_DIFFICULTIES = ['normal', 'hard', 'extreme'] as const;
 export type CheckDifficulty = (typeof CHECK_DIFFICULTIES)[number];
+
+/**
+ * nat20 / nat1 的适用面（v2 FR-22 / ADR-2-02）。
+ * attack_only（默认）= 跟官方：仅攻击骰强制 nat20 必中、nat1 必失；
+ * all_d20 = 常见桌面房规：所有 d20 检定都适用。
+ * 放在 dice.ts：判定记录要带它，审计复现才能重算出同样的结果。
+ */
+export const NAT20_RULES = ['attack_only', 'all_d20'] as const;
+export type Nat20Rule = (typeof NAT20_RULES)[number];
+/** 缺省值（旧数据/未指定时按官方口径） */
+export const DEFAULT_NAT20_RULE: Nat20Rule = 'attack_only';
 
 /** 判定结果四分类（TDD §3.5 check.outcome） */
 export const CHECK_OUTCOMES = ['critical', 'success', 'fail', 'fumble'] as const;
@@ -41,9 +64,13 @@ export const DiceExprSchema = z.object({
 });
 export type DiceExpr = z.infer<typeof DiceExprSchema>;
 
+/** 判定后缀运算符（骰式文法 `check := expr ("<=" | ">=" | "=") number`） */
+export const CHECK_OPS = ['<=', '>=', '='] as const;
+export type CheckOp = (typeof CHECK_OPS)[number];
+
 /** 判定后缀规格：骰式文法 `check := expr ("<=" | ">=" | "=") number` 的产物 */
 export const CheckSpecSuffixSchema = z.object({
-  op: z.enum(['<=', '>=', '=']),
+  op: z.enum(CHECK_OPS),
   target: z.number(),
 });
 export type CheckSpecSuffix = z.infer<typeof CheckSpecSuffixSchema>;
@@ -63,7 +90,13 @@ export const RollCheckSchema = z.object({
    * `>=` / `=` 无规则书语义，走通用布尔比较，outcome 仅 success/fail 且不带 grade
    * （如 5e 的 `1d20+5>=13`）。
    */
-  op: z.enum(['<=', '>=', '=']).optional(),
+  op: z.enum(CHECK_OPS).optional(),
+  /**
+   * 判定时的 nat20 适用面（5e；v2 FR-22）。
+   * 它是判定的直接输入（同一骰值在不同开关下可能是大成功或普通成功），
+   * 故随判定记录落审计流水——否则非默认房规的骰子复现会误报不一致。
+   */
+  nat20Rule: z.enum(NAT20_RULES).optional(),
 });
 export type RollCheck = z.infer<typeof RollCheckSchema>;
 

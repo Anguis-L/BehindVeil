@@ -68,3 +68,16 @@ export async function addMember(
   });
   return member;
 }
+
+/** 成员角色更新（T-M8-06 Host 转让）：读改写进 JsonStore 文件锁，与 addMember 同一并发口径 */
+export async function updateMemberRole(
+  layout: DataLayout,
+  roomId: string,
+  memberId: string,
+  role: MemberRole,
+): Promise<void> {
+  await new JsonStore(layout.membersFile(roomId)).update((current) => {
+    const members = parseMembers(current);
+    return members.map((m) => (m.id === memberId ? { ...m, role } : m));
+  });
+}

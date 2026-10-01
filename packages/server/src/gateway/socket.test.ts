@@ -10,6 +10,7 @@ import { createDataLayout, type DataLayout } from '../adapters/storage/layout.js
 import { JsonlStore } from '../adapters/storage/jsonl-store.js';
 import { createRoom, readRoomFile } from '../domain/session/rooms.js';
 import { readSession } from '../domain/session/sessions.js';
+import { registerHostRoutes } from './http/host.js';
 import { attachGateway, type GatewayHandle } from './socket.js';
 
 /**
@@ -59,6 +60,7 @@ beforeAll(async () => {
 
   app = Fastify({ logger: false });
   gateway = attachGateway(app, { layout, initialSeqs: new Map() });
+  registerHostRoutes(app, { gateway: () => gateway });
   await app.listen({ port: 0, host: '127.0.0.1' });
   port = (app.server.address() as AddressInfo).port;
 });
@@ -92,7 +94,7 @@ function join(client: Socket, payload: Record<string, unknown>): Promise<JoinAck
 }
 
 /** T-M5-05：开团前置是模组包存在——按需放置最小合法包（manifest + 三件套） */
-async function placeModule(moduleId: string): Promise<void> {
+async function placeModule(moduleId: string, rulebook: 'coc7' | 'dnd5e' = 'coc7'): Promise<void> {
   const dir = path.join(layout.modulesDir, moduleId);
   await mkdir(dir, { recursive: true });
   await writeFile(
@@ -101,7 +103,7 @@ async function placeModule(moduleId: string): Promise<void> {
       id: moduleId,
       name: moduleId,
       version: '1.0.0',
-      rulebook: 'coc7',
+      rulebook,
       apiVersion: '1',
       entry: { kpCard: 'kp-card.json', worldBook: 'worldbook.json', initState: 'init-state.json' },
     }),
@@ -116,7 +118,7 @@ async function placeModule(moduleId: string): Promise<void> {
         scenario: '',
         first_mes: '',
         mes_example: '',
-        extensions: { aidle: { rulebook: 'coc7' } },
+        extensions: { aidle: { rulebook } },
       },
     }),
   );
@@ -130,8 +132,9 @@ async function placeModule(moduleId: string): Promise<void> {
 async function startSession(
   client: Socket,
   moduleId = 'mod-1',
+  rulebook: 'coc7' | 'dnd5e' = 'coc7',
 ): Promise<{ ok: boolean; session?: { id: string }; message?: string }> {
-  await placeModule(moduleId);
+  await placeModule(moduleId, rulebook);
   return new Promise((resolve) => client.emit('session:start', { moduleId, settings }, resolve));
 }
 
@@ -173,7 +176,7 @@ async function expectNoBroadcast(client: Socket, ms = 400): Promise<void> {
 }
 
 /** 建房 + Host 进房 + 开团，返回 inviteCode/hostToken/host 连接与会话 */
-async function setupLiveRoom(roomName = '活跃房') {
+async function setupLiveRoom(roomName = '活跃房', rulebook: 'coc7' | 'dnd5e' = 'coc7') {
   const room = await createRoom(layout, { name: roomName });
   const host = await connect();
   const hostAck = await join(host, {
@@ -182,7 +185,7 @@ async function setupLiveRoom(roomName = '活跃房') {
     name: 'KP',
   });
   if (!hostAck.ok) throw new Error(`Host 进房失败：${hostAck.message}`);
-  const started = await startSession(host);
+  const started = await startSession(host, rulebook === 'dnd5e' ? 'mod-5e' : 'mod-1', rulebook);
   if (!started.ok) throw new Error(`开团失败：${started.message}`);
   return { room, host, hostAck, sessionId: started.session?.id as string };
 }
@@ -719,6 +722,245 @@ describe('kpOnly 不泄露（TC-FR-07-012，TDD §8）', () => {
     });
 
     player.close();
+    host.close();
+  });
+});
+
+describe('规则书接线（T-M7-04，设计文档 v2 §5.1）', () => {
+  it('5e 模组开团 → 玩家骰走 dnd5e 判定（kind=ability、DC 后缀）', async () => {
+    const { host } = await setupLiveRoom('五版房', 'dnd5e');
+    const broadcast = waitBroadcast(host);
+    host.emit('dice:roll', { expr: '1d20+5>=13' });
+    const { msg } = await broadcast;
+
+    expect(msg.type).toBe('dice');
+    if (msg.type !== 'dice') throw new Error('期望骰子消息');
+    expect(msg.roll.check).toMatchObject({
+      rulebook: 'dnd5e',
+      kind: 'ability',
+      op: '>=',
+      target: 13,
+    });
+    // 属性检定在 attack_only 下不触发面值规则：判定即 total 与 DC 的比较
+    expect(msg.roll.check?.outcome).toBe(msg.roll.total >= 13 ? 'success' : 'fail');
+    host.close();
+  });
+
+  it('一房一规则书：COC 活跃会话在，换 5e 模组开团 → 拒绝（E-MOD-01）', async () => {
+    const { host, room, sessionId } = await setupLiveRoom('混搭房', 'coc7');
+    const started = await startSession(host, 'mod-5e', 'dnd5e');
+    expect(started).toMatchObject({ ok: false, code: 'E-MOD-01' });
+
+    // 拒绝后活跃会话不变，房内状态仍然是原来那个 COC 会话
+    const after = await readRoomFile(layout, room.id);
+    expect(after?.activeSessionId).toBe(sessionId);
+    host.close();
+  });
+
+  it('同规则书换模组可正常开新场次（不误伤连载复播）', async () => {
+    const { host } = await setupLiveRoom('同版房', 'dnd5e');
+    const second = await startSession(host, 'mod-5e-b', 'dnd5e');
+    expect(second.ok).toBe(true);
+    host.close();
+  });
+});
+
+// ---- Host 转让/副 Host（T-M8-06，FR-26，设计 §5.5）----
+
+describe('Host 转让（T-M8-06）', () => {
+  it('REST 转让全链路：原 Host 即时失权、新 Host 即时获权、旧 token 失效、新 Host 凭 memberId 重连', async () => {
+    const room = await createRoom(layout, { name: 'T8-转让' });
+    const host = await connect();
+    const hostAck = await join(host, {
+      inviteCode: room.inviteCode,
+      hostToken: room.hostToken,
+      name: 'KP',
+    });
+    expect(hostAck.role).toBe('host');
+    const alice = await connect();
+    const aliceAck = await join(alice, { inviteCode: room.inviteCode, name: '爱丽丝' });
+
+    const base = `http://127.0.0.1:${port}/rooms/${room.id}`;
+    const res = await fetch(`${base}/host-transfer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hostToken: room.hostToken, toMemberId: aliceAck.memberId }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ memberId: aliceAck.memberId });
+
+    // presence 即时换位：原 Host 的 Host 专属动作（开团）被拒
+    const denied = await startSession(host, 'mod-t8a');
+    expect(denied.ok).toBe(false);
+
+    // 新 Host 同一连接即时获权（无需重连）
+    const granted = await startSession(alice, 'mod-t8a');
+    expect(granted.ok).toBe(true);
+
+    // 旧 token 已轮换失效：再拿它做任何 Host 操作 → 401
+    const stale = await fetch(`${base}/host-transfer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hostToken: room.hostToken, toMemberId: hostAck.memberId }),
+    });
+    expect(stale.status).toBe(401);
+
+    // hostAuth='member'：新 Host 断线重连凭 memberId 恢复 Host（无需 token）
+    alice.close();
+    const again = await connect();
+    const reAck = await join(again, {
+      inviteCode: room.inviteCode,
+      name: '爱丽丝',
+      memberId: aliceAck.memberId,
+    });
+    expect(reAck.role).toBe('host');
+    again.close();
+    host.close();
+  });
+
+  it('非法转让：观察者/离线成员/不存在的成员 → 400 且身份不变', async () => {
+    const room = await createRoom(layout, { name: 'T8-拒绝' });
+    const host = await connect();
+    const hostAck = await join(host, {
+      inviteCode: room.inviteCode,
+      hostToken: room.hostToken,
+      name: 'KP',
+    });
+    const observer = await connect();
+    const observerAck = await join(observer, {
+      inviteCode: room.inviteCode,
+      name: '围观',
+      wantRole: 'observer',
+    });
+    const base = `http://127.0.0.1:${port}/rooms/${room.id}`;
+    const post = (body: Record<string, unknown>): Promise<Response> =>
+      fetch(`${base}/host-transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+    expect(
+      (await post({ hostToken: room.hostToken, toMemberId: observerAck.memberId })).status,
+    ).toBe(400);
+    expect(
+      (
+        await post({
+          hostToken: room.hostToken,
+          toMemberId: 'ghost-member',
+        })
+      ).status,
+    ).toBe(400);
+    // token 错误 → 401
+    expect(
+      (await post({ hostToken: 'wrong-token', toMemberId: observerAck.memberId })).status,
+    ).toBe(401);
+
+    // 原 Host 身份不变：仍可开团
+    const session = await startSession(host, 'mod-t8b');
+    expect(session.ok).toBe(true);
+    expect(await readSession(layout, room.id, session.session?.id ?? '')).not.toBeNull();
+    observer.close();
+    host.close();
+    void hostAck;
+  });
+});
+
+describe('副 Host（T-M8-06，FR-26）', () => {
+  it('副 Host 可状态编辑与快照（Host 掉线亦可代行），普通玩家仍被拒', async () => {
+    const room = await createRoom(layout, { name: 'T8-副Host' });
+    const host = await connect();
+    await join(host, { inviteCode: room.inviteCode, hostToken: room.hostToken, name: 'KP' });
+    const alice = await connect();
+    const aliceAck = await join(alice, { inviteCode: room.inviteCode, name: '爱丽丝' });
+    const carol = await connect();
+    await join(carol, { inviteCode: room.inviteCode, name: '卡萝' });
+
+    const session = await startSession(host, 'mod-t8c');
+    expect(session.ok).toBe(true);
+
+    // 普通玩家 state:update → 拒
+    const denied = new Promise<AppError>((resolve) => {
+      carol.once('error:app', (e: AppError) => resolve(e));
+    });
+    carol.emit('state:update', { patch: { facts: ['卡萝的编辑'] }, expectedVersion: 0 });
+    expect(await denied).toMatchObject({ code: 'E-ROOM-01' });
+
+    // Host 掉线（代行前提）：roomHostSockets 清空
+    host.close();
+    await sleep(200);
+
+    // REST 设副 Host（hostToken 在 Host 手里，掉线不影响 REST 授权）
+    const res = await fetch(`http://127.0.0.1:${port}/rooms/${room.id}/co-host`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hostToken: room.hostToken, memberId: aliceAck.memberId }),
+    });
+    expect(res.status).toBe(200);
+
+    // 副 Host 状态编辑：乐观锁写 → 成功广播（state:update 无 ack，以广播为准）
+    const updated = new Promise<{ stateBoard: { version: number; facts: string[] } }>((resolve) => {
+      alice.once('state:broadcast', (p: { stateBoard: { version: number; facts: string[] } }) =>
+        resolve(p),
+      );
+    });
+    alice.emit('state:update', { patch: { facts: ['副 Host 写入的事实'] }, expectedVersion: 0 });
+    const board = await updated;
+    expect(board.stateBoard.facts).toContain('副 Host 写入的事实');
+
+    // 副 Host 快照：state_snapshot 消息入流
+    const snapshotSeen = new Promise<void>((resolve) => {
+      alice.once('msg:broadcast', (p: { msg: Message }) => {
+        if (p.msg.type === 'state_snapshot') resolve();
+      });
+    });
+    alice.emit('state:snapshot', {});
+    await snapshotSeen;
+
+    carol.close();
+    alice.close();
+  });
+
+  it('撤销副 Host → 权限收回；观察者/离线成员设副 Host → 400', async () => {
+    const room = await createRoom(layout, { name: 'T8-撤销' });
+    const host = await connect();
+    await join(host, { inviteCode: room.inviteCode, hostToken: room.hostToken, name: 'KP' });
+    const alice = await connect();
+    const aliceAck = await join(alice, { inviteCode: room.inviteCode, name: '爱丽丝' });
+    const observer = await connect();
+    const observerAck = await join(observer, {
+      inviteCode: room.inviteCode,
+      name: '围观',
+      wantRole: 'observer',
+    });
+    await startSession(host, 'mod-t8d');
+
+    const base = `http://127.0.0.1:${port}/rooms/${room.id}`;
+    const put = (body: Record<string, unknown>): Promise<Response> =>
+      fetch(`${base}/co-host`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+    expect((await put({ hostToken: room.hostToken, memberId: observerAck.memberId })).status).toBe(
+      400,
+    );
+    expect((await put({ hostToken: room.hostToken, memberId: 'ghost-member' })).status).toBe(400);
+
+    expect((await put({ hostToken: room.hostToken, memberId: aliceAck.memberId })).status).toBe(
+      200,
+    );
+    // 撤销（memberId=null）→ 200，随后 alice 的 state:update 被拒
+    expect((await put({ hostToken: room.hostToken, memberId: null })).status).toBe(200);
+    const denied = new Promise<AppError>((resolve) => {
+      alice.once('error:app', (e: AppError) => resolve(e));
+    });
+    alice.emit('state:update', { patch: { facts: ['迟到的编辑'] }, expectedVersion: 0 });
+    expect(await denied).toMatchObject({ code: 'E-ROOM-01' });
+
+    observer.close();
+    alice.close();
     host.close();
   });
 });

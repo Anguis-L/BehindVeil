@@ -20,6 +20,7 @@ const boardOf = (pcs: StateBoard['pcs']): StateBoard => ({
 
 const ALICE = {
   sheet: {
+    rulebook: 'coc7',
     playerName: '爱丽丝',
     occupation: '记者',
     str: 50,
@@ -39,9 +40,10 @@ const ALICE = {
     skills: { 侦查: 60, 图书馆使用: 50 },
   },
   conditions: [],
-};
+} satisfies StateBoard['pcs'][string];
 const BOB = {
   sheet: {
+    rulebook: 'coc7',
     playerName: '鲍勃',
     occupation: '医生',
     str: 60,
@@ -61,7 +63,23 @@ const BOB = {
     skills: { 聆听: 55, 急救: 50 },
   },
   conditions: ['轻伤'],
-};
+} satisfies StateBoard['pcs'][string];
+
+/** 5e 卡（T-M8-02）：敏捷系远程游荡者轮廓——敏捷 16（+3）、察觉熟练、运动不熟练 */
+const EIN = {
+  sheet: {
+    rulebook: 'dnd5e',
+    playerName: '艾恩',
+    occupation: '游荡者',
+    abilities: { str: 10, dex: 16, con: 12, int: 13, wis: 16, cha: 8 },
+    proficiencyBonus: 2,
+    ac: 15,
+    hp: { max: 22, current: 22 },
+    proficientSkills: ['察觉', 'Athletics'],
+    proficientSaves: ['dex', 'int'],
+  },
+  conditions: [],
+} satisfies StateBoard['pcs'][string];
 
 describe('createStateBoardRoster（T-M5-04）', () => {
   it('实现 PcRoster 端口', () => {
@@ -125,6 +143,45 @@ describe('createStateBoardRoster（T-M5-04）', () => {
     expect(createStateBoardRoster(undefined).skillValue('pc:m1', '侦查')).toEqual({
       found: false,
       reason: 'pc-not-found',
+    });
+  });
+});
+
+describe('5e 名册取值分流（T-M8-02，修正值服务端现算）', () => {
+  it('熟练技能：属性调整值 + 熟练加值（察觉 = wis(16)=+3 + 2 = +5）', () => {
+    expect(createStateBoardRoster(boardOf({ m1: EIN })).skillValue('pc:m1', '察觉')).toEqual({
+      found: true,
+      value: 5,
+      name: '艾恩',
+    });
+  });
+
+  it('不熟练技能：仅属性调整值（隐匿 = dex(16)=+3）', () => {
+    expect(createStateBoardRoster(boardOf({ m1: EIN })).skillValue('pc:m1', '隐匿')).toMatchObject({
+      found: true,
+      value: 3,
+    });
+  });
+
+  it('英文技能名规范化命中（Athletics 熟练，大小写与键名归一）', () => {
+    expect(createStateBoardRoster(boardOf({ m1: EIN })).skillValue('pc:m1', 'athletics')).toEqual({
+      found: true,
+      value: 2, // str(10)=+0 + 熟练 2
+      name: '艾恩',
+    });
+  });
+
+  it('六维本身可直接当检定项（力量 = +0，不叠加熟练加值）', () => {
+    expect(createStateBoardRoster(boardOf({ m1: EIN })).skillValue('pc:m1', '力量')).toMatchObject({
+      found: true,
+      value: 0,
+    });
+  });
+
+  it('认不出的技能 → skill-not-found（数值不出自 AI）', () => {
+    expect(createStateBoardRoster(boardOf({ m1: EIN })).skillValue('pc:m1', '计算机')).toEqual({
+      found: false,
+      reason: 'skill-not-found',
     });
   });
 });

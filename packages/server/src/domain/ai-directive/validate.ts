@@ -1,14 +1,29 @@
-import type { CheckDirective } from './schema.js';
-import { CheckDirectiveSchema } from './schema.js';
+import type { AiDirective } from './schema.js';
+import {
+  CheckDirectiveSchema,
+  DamageDirectiveSchema,
+  HealDirectiveSchema,
+  SanityDirectiveSchema,
+} from './schema.js';
+import { z } from 'zod';
 
 export type DirectiveValidation =
-  { ok: true; directive: CheckDirective } | { ok: false; code: 'E-AI-01'; reason: string };
+  { ok: true; directive: AiDirective } | { ok: false; code: 'E-AI-01'; reason: string };
+
+/** op → Schema 白名单（T-M8-03/04 扩值：check / damage / heal / sanity） */
+const OP_SCHEMAS: Record<string, z.ZodType<AiDirective>> = {
+  check: CheckDirectiveSchema,
+  damage: DamageDirectiveSchema,
+  heal: HealDirectiveSchema,
+  sanity: SanityDirectiveSchema,
+};
 
 /**
- * op 白名单校验（T-M3-02，TDD §5.4：v1 仅 `check`，二期扩展 roll/emote/set_fact）。
+ * op 白名单校验（T-M3-02 / T-M8-03，TDD §5.4 + 设计文档 v2 §5.4）。
  *
  * 三类拒绝都归 E-AI-01（TDD §11：KP 端告警、玩家无感、计入 R-01 指标）：
- * 非对象 / 未知 op（白名单拒绝）/ 字段校验失败（未知字段、非法 target 等，strictObject）。
+ * 非对象 / 未知 op（白名单拒绝）/ 字段校验失败（未知字段、非法 target、夹带
+ * result/total/hp 等数值字段，strictObject 一律拒）。
  * 拒绝不掷骰——执行器只消费 ok 分支。
  */
 export function validateDirective(parsed: unknown): DirectiveValidation {
@@ -17,11 +32,16 @@ export function validateDirective(parsed: unknown): DirectiveValidation {
   }
 
   const op = (parsed as { op?: unknown }).op;
-  if (op !== 'check') {
-    return { ok: false, code: 'E-AI-01', reason: `未知 op: ${String(op)}（v1 白名单仅 check）` };
+  const schema = typeof op === 'string' ? OP_SCHEMAS[op] : undefined;
+  if (!schema) {
+    return {
+      ok: false,
+      code: 'E-AI-01',
+      reason: `未知 op: ${String(op)}（白名单：check / damage / heal / sanity）`,
+    };
   }
 
-  const result = CheckDirectiveSchema.safeParse(parsed);
+  const result = schema.safeParse(parsed);
   if (!result.success) {
     // Zod 契约：失败时 issues 非空
     const issue = result.error.issues[0]!;

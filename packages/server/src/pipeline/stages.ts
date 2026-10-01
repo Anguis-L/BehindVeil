@@ -93,10 +93,19 @@ export const s2State: Stage = (ctx) => {
     lines.push('【PC 状态】');
     for (const [memberId, pc] of pcEntries) {
       const { sheet } = pc;
-      lines.push(
-        `- [${memberId}] ${sheet.playerName}（${sheet.occupation}）HP ${sheet.hp}｜MP ${sheet.mp}｜` +
-          `SAN ${sheet.san}｜DB ${sheet.db}｜体格 ${sheet.build}｜状态：${pc.conditions.join('、') || '无'}`,
-      );
+      // 状态注入按规则书分流（T-M8-00 消费清单 #3）：5e 无 MP/SAN/DB，给 AC + HP current/max
+      if (sheet.rulebook === 'dnd5e') {
+        lines.push(
+          `- [${memberId}] ${sheet.playerName}（${sheet.occupation}）` +
+            `HP ${sheet.hp.current}/${sheet.hp.max}｜AC ${sheet.ac}｜` +
+            `状态：${pc.conditions.join('、') || '无'}`,
+        );
+      } else {
+        lines.push(
+          `- [${memberId}] ${sheet.playerName}（${sheet.occupation}）HP ${sheet.hp}｜MP ${sheet.mp}｜` +
+            `SAN ${sheet.san}｜DB ${sheet.db}｜体格 ${sheet.build}｜状态：${pc.conditions.join('、') || '无'}`,
+        );
+      }
     }
   }
 

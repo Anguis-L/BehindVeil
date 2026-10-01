@@ -3,7 +3,7 @@ import type { StateBoard } from '@behindveil/shared';
 import type { ParsedRoll } from '../dice/evaluator.js';
 import { Coc7RuleBook } from '../rulebook/coc7.js';
 import type { RuleBook } from '../rulebook/types.js';
-import { sanityLossPatch } from './engine-writes.js';
+import { hpPatch, sanityLossPatch } from './engine-writes.js';
 import { applyStatePatch } from './board.js';
 
 /**
@@ -19,6 +19,7 @@ const board = (san = ALICE_SAN): StateBoard => ({
   pcs: {
     m1: {
       sheet: {
+        rulebook: 'coc7',
         playerName: '爱丽丝',
         occupation: '记者',
         str: 50,
@@ -36,6 +37,30 @@ const board = (san = ALICE_SAN): StateBoard => ({
         db: '0',
         build: '0',
         skills: { 侦查: 60 },
+      },
+      conditions: [],
+    },
+  },
+  scene: { name: '', time: '', publicDesc: '' },
+  facts: [],
+  updatedAt: '1970-01-01T00:00:00.000Z',
+});
+
+/** 5e 板（T-M8-03）：艾恩 22/22 HP */
+const board5e = (current = 22, max = 22): StateBoard => ({
+  version: 4,
+  pcs: {
+    m1: {
+      sheet: {
+        rulebook: 'dnd5e',
+        playerName: '艾恩',
+        occupation: '游荡者',
+        abilities: { str: 10, dex: 16, con: 12, int: 13, wis: 16, cha: 8 },
+        proficiencyBonus: 2,
+        ac: 15,
+        hp: { max, current },
+        proficientSkills: ['察觉'],
+        proficientSaves: ['dex', 'int'],
       },
       conditions: [],
     },
@@ -64,7 +89,7 @@ describe('sanityLossPatch（T-M5-08）', () => {
     if (!result.ok) return;
     expect(result.lossExpr).toBe('1d6');
     expect(result.loss).toBe(4);
-    expect(result.patch.pcs?.m1?.sheet.san).toBe(51);
+    expect(result.patch.pcs?.m1?.sheet).toMatchObject({ san: 51 });
   });
 
   it('SAN 检定普通成功（55 ≥ roll 30 > 27）→ 普通成功档 1d2', () => {
@@ -72,7 +97,7 @@ describe('sanityLossPatch（T-M5-08）', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.lossExpr).toBe('1d2');
-    expect(result.patch.pcs?.m1?.sheet.san).toBe(53);
+    expect(result.patch.pcs?.m1?.sheet).toMatchObject({ san: 53 });
   });
 
   it('损失超过当前 SAN → 扣到 0 为止（COC7 理智归零）', () => {
@@ -80,7 +105,7 @@ describe('sanityLossPatch（T-M5-08）', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.loss).toBe(3);
-    expect(result.patch.pcs?.m1?.sheet.san).toBe(0);
+    expect(result.patch.pcs?.m1?.sheet).toMatchObject({ san: 0 });
   });
 
   it('patch 可直接通过乐观锁写路径落盘（引擎与 Host 同一条写路径）', () => {
@@ -91,7 +116,7 @@ describe('sanityLossPatch（T-M5-08）', () => {
     expect(applied.ok).toBe(true);
     if (!applied.ok) return;
     expect(applied.next.version).toBe(5);
-    expect(applied.next.pcs.m1?.sheet.san).toBe(49);
+    expect(applied.next.pcs.m1?.sheet).toMatchObject({ san: 49 });
   });
 
   it('查无此 PC → pc-not-found 拒绝', () => {
@@ -106,5 +131,72 @@ describe('sanityLossPatch（T-M5-08）', () => {
       ok: false,
       reason: 'sanity-rule-missing',
     });
+  });
+
+  it('5e 卡无 san 字段 → rulebook-mismatch（E-AI-01 防呆，设计 §5.4）', () => {
+    expect(sanityLossPatch(board5e(), 'm1', 80, lossRollOf(4), RULEBOOK)).toEqual({
+      ok: false,
+      reason: 'rulebook-mismatch',
+    });
+  });
+});
+
+describe('hpPatch（T-M8-03，FR-25）', () => {
+  it('伤害：hp.current = clamp(current − total)（22 − 7 = 15）', () => {
+    const result = hpPatch(board5e(), 'm1', 'damage', lossRollOf(7));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.applied).toBe(7);
+    const sheet = result.patch.pcs?.m1?.sheet;
+    expect(sheet).toMatchObject({ hp: { current: 15, max: 22 } });
+  });
+
+  it('治疗：hp.current = clamp(current + total)（12 + 6 = 18）', () => {
+    const result = hpPatch(board5e(12), 'm1', 'heal', lossRollOf(6));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.applied).toBe(6);
+    expect(result.patch.pcs?.m1?.sheet).toMatchObject({ hp: { current: 18, max: 22 } });
+  });
+
+  it('伤害下限 clamp 0：过量伤害只扣到 0（applied 反映实际变动）', () => {
+    const result = hpPatch(board5e(), 'm1', 'damage', lossRollOf(50));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.applied).toBe(22);
+    expect(result.patch.pcs?.m1?.sheet).toMatchObject({ hp: { current: 0, max: 22 } });
+  });
+
+  it('治疗上限 clamp max：溢出治疗不突破 max', () => {
+    const result = hpPatch(board5e(20), 'm1', 'heal', lossRollOf(9));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.applied).toBe(2);
+    expect(result.patch.pcs?.m1?.sheet).toMatchObject({ hp: { current: 22, max: 22 } });
+  });
+
+  it('COC 卡无 hp.max/current 结构 → rulebook-mismatch（E-AI-01 防呆）', () => {
+    expect(hpPatch(board(), 'm1', 'damage', lossRollOf(4))).toEqual({
+      ok: false,
+      reason: 'rulebook-mismatch',
+    });
+  });
+
+  it('查无此 PC → pc-not-found 拒绝', () => {
+    expect(hpPatch(board5e(), 'ghost', 'heal', lossRollOf(4))).toEqual({
+      ok: false,
+      reason: 'pc-not-found',
+    });
+  });
+
+  it('patch 可直接通过乐观锁写路径落盘（引擎与 Host 同一条写路径）', () => {
+    const produced = hpPatch(board5e(), 'm1', 'damage', lossRollOf(5));
+    expect(produced.ok).toBe(true);
+    if (!produced.ok) return;
+    const applied = applyStatePatch(board5e(), produced.patch, 4);
+    expect(applied.ok).toBe(true);
+    if (!applied.ok) return;
+    expect(applied.next.version).toBe(5);
+    expect(applied.next.pcs.m1?.sheet).toMatchObject({ hp: { current: 17, max: 22 } });
   });
 });

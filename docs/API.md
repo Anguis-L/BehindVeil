@@ -7,7 +7,7 @@
 >
 > 本文只是给人看的导读，真正以那两份为准。
 
-**最近更新：2026-09-26**（M5 卡库 `/cards` 落地 + 管理面路由分离：玩家端点免令牌）
+**最近更新：2026-10-01**（M8：5e 角色卡判别联合、damage/heal/sanity 指令、Host 转让/副 Host）
 
 ## 一句话：接口分成两条通道
 
@@ -30,6 +30,9 @@
 ✅ PC 声明：把玩家卡或速建表绑到成员，开团自动进状态板（M5）
 ✅ 模组：列出 / 装载 / 卸载模组包（M5 后半）
 ✅ 房内：状态板编辑（乐观锁）、生成快照、状态板广播（M5）
+✅ PC 角色卡判别联合：COC7 / D&D 5e 两套字段体系，5e 速建表模板与状态板渲染（M8）
+✅ AI 数值指令：`damage` / `heal` / `sanity` 服务端掷骰并自动写状态板（M8）
+✅ Host 转让 / 副 Host：`POST /rooms/{id}/host-transfer`、`PUT /rooms/{id}/co-host`（M8）
 ✅ AI 叙事流 `narration:delta` / `narration:done`、`ai:invoke`（M3 已实装）
 
 还没轮到的（按里程碑排队，不提前做）：
@@ -48,6 +51,7 @@
 | GET | `/rooms/{id}` | 房间详情 |
 | POST | `/rooms/{id}/invite-reset` | 重置 6 位邀请码 |
 | PATCH | `/rooms/{id}/settings` | 改房间名 / 人数上限 / 默认会话设置 |
+| PATCH | `/rooms/{id}/sessions/{sid}/settings` | 改当前会话的运行时设置（温度 / 裁剪窗 / 世界书预算 / **nat20Rule**） |
 | GET | `/rooms/{id}/sessions` | 这个房间跑过哪些场次（连载团） |
 | GET | `/rooms/{id}/sessions/{sid}/export` | 导出这一场的跑团日志（`format=md` 缺省 / `html`） |
 | POST | `/rooms/{id}/sessions/{sid}/end` | 结束某一场 |
@@ -63,6 +67,8 @@
 | GET | `/modules` | 列出已装载模组（坏包跳过，M5） |
 | POST | `/modules` | 装载模组：`{ moduleId }`（data/modules 下目录名），校验 manifest+三件套（M5） |
 | DELETE | `/modules/{moduleId}` | 卸载模组；活跃会话引用中回 409 + E-MOD-01（D-09，M5） |
+| POST | `/rooms/{id}/host-transfer` | Host 转让：`{ hostToken, toMemberId }`，旧 token 轮换失效（M8；鉴权用 hostToken，不用 X-Admin-Token） |
+| PUT | `/rooms/{id}/co-host` | 设/撤副 Host：`{ hostToken, memberId \| null }`（M8；同上，hostToken 鉴权） |
 
 模组以目录形态放置（`data/modules/<id>/` + manifest + 三件套），zip 上传不在此列。
 
@@ -156,6 +162,38 @@ curl -X POST http://127.0.0.1:8787/rooms/V1StGXR8_Z5j/sessions/s_01J9Z8Y7X6/end
    会按「表达式 + 原始骰值」把每一条重算一遍，对不上就报出来（退出码 1）。
 
 注意验算的是「算得对不对」，不是「能不能再摇出一模一样的点数」——CSPRNG 没有种子，本来就不该能重摇。
+
+## 规则书：一房一套（COC7 / D&D 5e）
+
+- 规则书由**开团时选的模组**决定（KP 卡的 `extensions.aidle.rulebook` 优先，没有就用模组 manifest 里写的），写进会话的 `rulebook` 字段。缺省 `coc7`，老数据不受影响。
+- **一房一规则书**：房里已经有活跃会话时，换一套规则书的模组开团会被拒绝（`E-MOD-01`），活跃会话保持不变。换同规则书的模组不受影响（连载团照常复播）。
+- 判定差别：COC7 是 `1d100<=技能值` 六档判定表；5e 是 `1d20+修正>=DC`（攻击目标写成 AC），并按会话设置 `nat20Rule` 判 nat20 必中 / nat1 必失——**判的是 d20 面值**，加了修正到 25 不算 nat20。
+  `nat20Rule` 默认 `attack_only`（官方口径，只有攻击骰算），KP 控制台可切 `all_d20`（桌面房规）。
+- 优劣势：骰式末尾写 `adv` / `dis`（如 `.r 1d20+5>=13 adv`），服务端展开成 `2d20kh1` / `2d20kl1` 再掷，流水里记的就是展开后的骰式。
+
+## 角色卡：一套契约两种规则书（M8）
+
+- `PCSheet` 是按 `rulebook` 字段的判别联合：COC7 卡（str…san/skills）与 5e 卡（六维 abilities / 熟练加值 / AC / HP max+current / 熟练技能与豁免）。**旧数据不用迁移**：没有 `rulebook` 字段的存量卡和 state.json 一律按 coc7 解析。
+- 技能取值永远服务端现算：COC7 查 `skills[名]`；5e = `floor((属性−10)/2) + (熟练 ? 熟练加值 : 0)`，AI 和客户端都只传名字不传数值。中文/英文技能名都认（「察觉」= perception）。
+- 卡库面板有 COC7 / D&D 5e 两份速建表模板，粘贴 JSON 改数值即可声明。
+
+## AI 数值指令：伤害 / 治疗 / 理智（M8）
+
+KP 的 AI 在 ```aidle 指令块里除了 `check` 还可以请求三种数值效果，面值全部由服务端掷骰：
+
+```jsonc
+{ "op": "damage", "target": "pc:alice", "expr": "1d8+2", "label": "哥布林弯刀" }
+{ "op": "heal",   "target": "pc:alice", "expr": "2d4+2" }
+{ "op": "sanity", "target": "pc:alice", "loss": "1d6" }   // loss 缺省查 COC7 房规损失表
+```
+
+处理链统一是：strictObject 校验（夹带 `result`/`total`/`hp` 等数值字段直接拒绝，E-AI-01）→ 服务端 CSPRNG 掷骰（先落审计流水）→ 骰子卡广播 → 引擎写状态板（HP/SAN clamp 到合法区间）→ `state:broadcast`。规则书防呆：COC 卡收到 damage/heal、5e 卡收到 sanity 都会被拒（E-AI-01），不掷骰。
+
+## Host 转让 / 副 Host（M8）
+
+- **转让**：`POST /rooms/{id}/host-transfer`，当前 Host 出示 hostToken 指定一名**在线**成员。转让后 members.json 角色换位、hostToken 立即轮换（旧的作废）、房间 `hostAuth` 标为 `member`——新 Host 以后凭成员身份（memberId）重连即可，不需要 token。原 Host 即刻降为玩家。
+- **副 Host**：`PUT /rooms/{id}/co-host` 指定一名在线成员（`memberId: null` 撤销）。副 Host 与 Host 同享**快照 + 状态编辑**权限，Host 掉线也能代行；不发新 token。
+- 未转让的房间维持 v1 口径：Host 重连必须出示 hostToken，防 memberId 冒领。
 
 ## 怎么读这两份文件
 

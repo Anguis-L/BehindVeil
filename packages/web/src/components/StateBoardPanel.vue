@@ -1,17 +1,29 @@
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue';
 import { useSessionStore } from '../stores/session';
-import type { PCSheet, StateBoardPc, StatePatch } from '@behindveil/shared';
+import type {
+  Coc7Sheet,
+  Dnd5eAbility,
+  PCSheet,
+  StateBoardPc,
+  StatePatch,
+} from '@behindveil/shared';
 
 /**
- * 状态板面板（T-M5-10，FR-09）：全房可见的场景/事实/PC 状态展示；
+ * 状态板面板（T-M5-10 / T-M8-07，FR-09/24）：全房可见的场景/事实/PC 状态展示；
  * Host 可编辑（scene/facts/PC 数值与状态，走 state:update 乐观锁）并生成快照。
  * 冲突（E-ST-01）时服务端会广播最新版，本地自动对齐——错误横幅提示重试即可。
+ * PC 数值渲染与编辑按 sheet.rulebook 分流：COC 是 SAN/HP/MP，5e 是 HP 条 + AC + 六维。
  */
 
 const store = useSessionStore();
 
 const editable = computed(() => store.role === 'host' && store.stateBoard !== null);
+
+/** Host 编辑草稿按规则书分型：两套卡的数值面不同，保存时各自并回 sheet */
+type PcDraft =
+  | { rulebook: 'coc7'; san: number; hp: number; mp: number; conditions: string[] }
+  | { rulebook: 'dnd5e'; hpCurrent: number; hpMax: number; conditions: string[] };
 
 /** 本地编辑草稿：进入编辑时深拷贝当前板，保存时整体作为 patch 提交 */
 const draft = reactive<{
@@ -19,7 +31,7 @@ const draft = reactive<{
   scene: { name: string; time: string; publicDesc: string };
   facts: string[];
   newFact: string;
-  pcs: Record<string, { san: number; hp: number; mp: number; conditions: string[] }>;
+  pcs: Record<string, PcDraft>;
 }>({
   active: false,
   scene: { name: '', time: '', publicDesc: '' },
@@ -42,13 +54,17 @@ watch(
   },
 );
 
-function pickEditable(pc: StateBoardPc) {
-  return {
-    san: pc.sheet.san,
-    hp: pc.sheet.hp,
-    mp: pc.sheet.mp,
-    conditions: [...pc.conditions],
-  };
+function pickEditable(pc: StateBoardPc): PcDraft {
+  const conditions = [...pc.conditions];
+  if (pc.sheet.rulebook === 'dnd5e') {
+    return {
+      rulebook: 'dnd5e',
+      hpCurrent: pc.sheet.hp.current,
+      hpMax: pc.sheet.hp.max,
+      conditions,
+    };
+  }
+  return { rulebook: 'coc7', san: pc.sheet.san, hp: pc.sheet.hp, mp: pc.sheet.mp, conditions };
 }
 
 function beginEdit(): void {
@@ -86,9 +102,7 @@ function save(): void {
     pcs: Object.fromEntries(
       Object.entries(board.pcs).map(([id, pc]) => {
         const edited = draft.pcs[id];
-        const sheet: PCSheet = edited
-          ? { ...pc.sheet, san: num(edited.san), hp: num(edited.hp), mp: num(edited.mp) }
-          : pc.sheet;
+        const sheet: PCSheet = edited ? mergeEditable(pc.sheet, edited) : pc.sheet;
         return [
           id,
           {
@@ -103,12 +117,62 @@ function save(): void {
   draft.active = false;
 }
 
+/** 编辑值并回 sheet：只覆盖该规则书自己的数值面（草稿与卡同型，分支保证不串） */
+function mergeEditable(sheet: PCSheet, edited: PcDraft): PCSheet {
+  if (sheet.rulebook === 'dnd5e' && edited.rulebook === 'dnd5e') {
+    return {
+      ...sheet,
+      hp: { max: num(edited.hpMax), current: num(edited.hpCurrent) },
+    };
+  }
+  if (sheet.rulebook === 'coc7' && edited.rulebook === 'coc7') {
+    const coc: Coc7Sheet = {
+      ...sheet,
+      san: num(edited.san),
+      hp: num(edited.hp),
+      mp: num(edited.mp),
+    };
+    return coc;
+  }
+  return sheet; // 广播把卡换成了另一套规则书且本行还在编辑——放弃本行数值编辑
+}
+
 function num(value: number | string): number {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
 const pcEntries = computed(() => Object.entries(store.stateBoard?.pcs ?? {}));
+
+// ---- 5e 渲染（T-M8-07）----
+
+const ABILITY_ZH: Record<Dnd5eAbility, string> = {
+  str: '力量',
+  dex: '敏捷',
+  con: '体质',
+  int: '智力',
+  wis: '感知',
+  cha: '魅力',
+};
+
+function abilityEntries(sheet: Extract<PCSheet, { rulebook: 'dnd5e' }>): {
+  key: Dnd5eAbility;
+  label: string;
+  score: number;
+  proficient: boolean;
+}[] {
+  return (Object.keys(sheet.abilities) as Dnd5eAbility[]).map((key) => ({
+    key,
+    label: ABILITY_ZH[key],
+    score: sheet.abilities[key],
+    proficient: sheet.proficientSaves.includes(key),
+  }));
+}
+
+function hpPercent(current: number, max: number): number {
+  if (max <= 0) return 0;
+  return Math.min(100, Math.max(0, (current / max) * 100));
+}
 </script>
 
 <template>
@@ -176,15 +240,20 @@ const pcEntries = computed(() => Object.entries(store.stateBoard?.pcs ?? {}));
       </ul>
       <p v-else class="bv-board__hint">暂无事实。</p>
 
-      <h3 class="bv-board__section">调查员（{{ pcEntries.length }}）</h3>
+      <h3 class="bv-board__section">PC（{{ pcEntries.length }}）</h3>
       <p v-if="pcEntries.length === 0" class="bv-board__hint">还没有 PC——在「卡库」标签声明。</p>
       <div v-for="[id, pc] in pcEntries" :key="id" class="bv-board__pc">
         <div class="bv-board__pc-head">
           <span class="bv-board__pc-name">{{ pc.sheet.playerName }}</span>
           <span class="bv-board__pc-job">{{ pc.sheet.occupation }}</span>
+          <span class="bv-board__pc-system">{{
+            pc.sheet.rulebook === 'dnd5e' ? 'D&D 5e' : 'COC7'
+          }}</span>
         </div>
-        <div class="bv-board__pc-stats">
-          <template v-if="draft.active && draft.pcs[id]">
+
+        <!-- COC7：数值面与 v1 一致（渲染不回归） -->
+        <div v-if="pc.sheet.rulebook === 'coc7'" class="bv-board__pc-stats">
+          <template v-if="draft.active && draft.pcs[id]?.rulebook === 'coc7'">
             <label class="bv-board__stat"
               >SAN <input v-model="draft.pcs[id]!.san" class="bv-board__num" type="number"
             /></label>
@@ -201,6 +270,44 @@ const pcEntries = computed(() => Object.entries(store.stateBoard?.pcs ?? {}));
             <span class="bv-board__stat">MP {{ pc.sheet.mp }}</span>
             <span class="bv-board__stat">幸运 {{ pc.sheet.luck }}</span>
           </template>
+        </div>
+
+        <!-- 5e：HP 条（current/max）+ AC + 六维（豁免熟练标记） -->
+        <div v-else class="bv-board__pc-stats">
+          <template v-if="draft.active && draft.pcs[id]?.rulebook === 'dnd5e'">
+            <label class="bv-board__stat"
+              >HP
+              <input v-model="draft.pcs[id]!.hpCurrent" class="bv-board__num" type="number" />
+              /
+              <input v-model="draft.pcs[id]!.hpMax" class="bv-board__num" type="number"
+            /></label>
+          </template>
+          <template v-else>
+            <span class="bv-board__hp">
+              <span class="bv-board__hp-bar">
+                <span
+                  class="bv-board__hp-fill"
+                  :style="{ width: hpPercent(pc.sheet.hp.current, pc.sheet.hp.max) + '%' }"
+                ></span>
+              </span>
+              <span class="bv-board__stat">HP {{ pc.sheet.hp.current }}/{{ pc.sheet.hp.max }}</span>
+            </span>
+            <span class="bv-board__stat">AC {{ pc.sheet.ac }}</span>
+          </template>
+          <span class="bv-board__abilities">
+            <span
+              v-for="ab in abilityEntries(pc.sheet)"
+              :key="ab.key"
+              class="bv-board__ability"
+              :class="{ 'bv-board__ability--prof': ab.proficient }"
+              :title="ab.proficient ? '豁免熟练' : ''"
+            >
+              {{ ab.label }} {{ ab.score }}
+            </span>
+          </span>
+        </div>
+
+        <div class="bv-board__pc-stats">
           <span
             v-for="cond in pc.conditions"
             :key="cond"
@@ -312,12 +419,54 @@ const pcEntries = computed(() => Object.entries(store.stateBoard?.pcs ?? {}));
 .bv-board__pc-job {
   color: var(--bv-text-tertiary);
 }
+.bv-board__pc-system {
+  margin-left: auto;
+  padding: 0 var(--bv-space-1);
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: var(--bv-radius-card);
+  font-size: 10px;
+  color: var(--bv-text-tertiary);
+}
 .bv-board__pc-stats {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: var(--bv-space-2);
   color: var(--bv-text-secondary);
   font-size: 12px;
+}
+.bv-board__hp {
+  display: flex;
+  align-items: center;
+  gap: var(--bv-space-1);
+}
+.bv-board__hp-bar {
+  width: 72px;
+  height: 6px;
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--bv-bg-canvas);
+}
+.bv-board__hp-fill {
+  display: block;
+  height: 100%;
+  background: var(--bv-accent);
+}
+.bv-board__abilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--bv-space-1);
+}
+.bv-board__ability {
+  padding: 0 var(--bv-space-1);
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: var(--bv-radius-card);
+  font-size: 11px;
+}
+.bv-board__ability--prof {
+  border-color: var(--bv-accent);
+  color: var(--bv-accent);
 }
 .bv-board__condition {
   padding: 0 var(--bv-space-2);

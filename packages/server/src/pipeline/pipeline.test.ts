@@ -188,6 +188,7 @@ describe('S2 状态注入（TC-FR-03-003）', () => {
         pcs: {
           mem_1: {
             sheet: {
+              rulebook: 'coc7',
               playerName: '张三',
               occupation: '记者',
               str: 50,

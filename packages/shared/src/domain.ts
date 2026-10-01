@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { NAT20_RULES, RULEBOOK_IDS } from './dice.js';
 
 /**
  * 领域模型骨架（TDD §3.1 Room/Session、§3.3 角色卡、§3.4 世界书、§3.7 状态板）。
@@ -29,6 +30,11 @@ export const SessionSettingsSchema = z
     provider: z.string(),
     model: z.string(),
     temperature: z.number().min(0).max(2),
+    /**
+     * nat20/nat1 适用面（5e；COC 不使用，随会话设置一并持久化）。
+     * 可选而非 default：旧会话数据无此字段时保持缺失、不改写落盘结构，消费侧按 DEFAULT_NAT20_RULE 兜底。
+     */
+    nat20Rule: z.enum(NAT20_RULES).optional(),
     /** 历史裁剪窗（默认 40，由创建方填入） */
     maxHistoryMessages: z.number().int().positive(),
     /** 世界书预算（默认 2000，由创建方填入） */
@@ -48,6 +54,10 @@ export const SessionSettingsSchema = z
   });
 export type SessionSettings = z.infer<typeof SessionSettingsSchema>;
 
+/** Host 身份锚定方式（T-M8-06，FR-26）：token=建房者凭 hostToken（v1）；member=转让后凭成员角色标记 */
+export const HOST_AUTH_MODES = ['token', 'member'] as const;
+export type HostAuthMode = (typeof HOST_AUTH_MODES)[number];
+
 export const RoomSchema = z.object({
   /** nanoid(12)，T-M1-01/M1 REST 建房时生成 */
   id: z.string(),
@@ -58,6 +68,16 @@ export const RoomSchema = z.object({
   inviteCode: z.string().length(6),
   activeSessionId: z.string().nullable(),
   memberLimit: z.number().int().positive(),
+  /**
+   * Host 转让标记（T-M8-06）：可选而非 default——v1 room.json 无此字段，按 'token' 处理
+   * （消费侧归一）。'member' 时 Host 重连凭 members.json 角色标记 + memberId 恢复（旧 token 已轮换失效）。
+   */
+  hostAuth: z.enum(HOST_AUTH_MODES).optional(),
+  /**
+   * 副 Host（T-M8-06，FR-26）：房间级角色标记（一名），获得快照/状态编辑权限；
+   * 不发新 token。可选而非 default：v1 room.json 无此字段，按无副 Host 处理。
+   */
+  coHostMemberId: z.string().nullable().optional(),
   /**
    * 本房默认会话设置（docs/openapi RoomSettingsPatch）：只影响之后新建的会话，
    * 不改写已存在 Session 的 settings；缺省时由 session:start 显式给出。
@@ -73,6 +93,11 @@ export const SessionSchema = z.object({
   moduleRef: z.string(),
   startedAt: z.string(),
   endedAt: z.string().nullable(),
+  /**
+   * 本会话采用的规则书（v2 FR-20 / 设计 §5.1）：一房一规则书，开团时由模组决定。
+   * 可选而非 default：v1 存量 session.json 无此字段，按 coc7 处理（消费侧归一）。
+   */
+  rulebook: z.enum(RULEBOOK_IDS).optional(),
   /** 状态板乐观锁版本号（§3.7 / E-ST-01） */
   stateBoardVersion: z.number().int().nonnegative(),
   settings: SessionSettingsSchema,
@@ -86,8 +111,13 @@ export type Session = z.infer<typeof SessionSchema>;
 
 // ---- PCSheet / StateBoard（§3.3 / §3.7）----
 
-/** COC7 调查员速览（注入名册用） */
-export const PCSheetSchema = z.object({
+/**
+ * COC7 调查员卡（v1 原样保留，仅加判别字段）。
+ * `rulebook` 带 default：v1 存量数据与旧角色卡无此字段，解析时自动补 coc7（实测 discriminatedUnion 会应用 default，
+ * 故存量 state.json 零迁移）。
+ */
+export const Coc7SheetSchema = z.object({
+  rulebook: z.literal('coc7').default('coc7'),
   playerName: z.string(),
   occupation: z.string(),
   str: z.number(),
@@ -107,6 +137,39 @@ export const PCSheetSchema = z.object({
   /** { "侦查": 60, "图书馆使用": 50 } */
   skills: z.record(z.string(), z.number()),
 });
+export type Coc7Sheet = z.infer<typeof Coc7SheetSchema>;
+
+/** 5e 六维（属性值，不是调整值——调整值由服务端现算，见 roster） */
+export const DND5E_ABILITIES = ['str', 'dex', 'con', 'int', 'wis', 'cha'] as const;
+export type Dnd5eAbility = (typeof DND5E_ABILITIES)[number];
+
+/** D&D 5e 角色卡（v2 FR-24）：只存「原始数值」，一切修正值由服务端现算 */
+export const Dnd5eSheetSchema = z.object({
+  rulebook: z.literal('dnd5e'),
+  playerName: z.string(),
+  /** 职业与种族（展示与名册用；内容不内置，由模组/卡自己给） */
+  occupation: z.string().default(''),
+  abilities: z.object({
+    str: z.number(),
+    dex: z.number(),
+    con: z.number(),
+    int: z.number(),
+    wis: z.number(),
+    cha: z.number(),
+  }),
+  /** 熟练加值（随等级走，卡里写死，服务端不推导等级） */
+  proficiencyBonus: z.number(),
+  ac: z.number(),
+  hp: z.object({ max: z.number(), current: z.number() }),
+  /** 熟练技能名（与技能表对齐，取值时按名匹配属性） */
+  proficientSkills: z.array(z.string()).default([]),
+  /** 熟练豁免（六维键） */
+  proficientSaves: z.array(z.enum(DND5E_ABILITIES)).default([]),
+});
+export type Dnd5eSheet = z.infer<typeof Dnd5eSheetSchema>;
+
+/** 角色卡判别联合：按 rulebook 分流两套字段体系 */
+export const PCSheetSchema = z.discriminatedUnion('rulebook', [Coc7SheetSchema, Dnd5eSheetSchema]);
 export type PCSheet = z.infer<typeof PCSheetSchema>;
 
 export const StateBoardPcSchema = z.object({

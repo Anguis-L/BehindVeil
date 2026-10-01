@@ -1,4 +1,11 @@
-import type { CheckGrade, CheckOutcome, ErrorCode, RollCheck } from '@behindveil/shared';
+import type {
+  CheckGrade,
+  CheckOutcome,
+  ErrorCode,
+  RollCheck,
+  StateBoard,
+  StatePatch,
+} from '@behindveil/shared';
 import { describe, expect, it } from 'vitest';
 import type { ParsedRoll } from '../dice/evaluator.js';
 import type { RandomSource } from '../dice/random.js';
@@ -7,6 +14,7 @@ import { DirectiveSuccessTracker } from './degrade.js';
 import type { PcRoster } from './executor.js';
 import {
   directiveResultText,
+  effectResultText,
   FEW_SHOT_EXAMPLES,
   MAX_CHECKS_PER_TURN,
   NO_MORE_CHECKS_META,
@@ -63,6 +71,8 @@ interface Harness {
   tracker: DirectiveSuccessTracker;
   /** 留档端口收到的失败块（T-M3-07，测试文档 §12.4） */
   records: DirectiveScanEvent[];
+  /** 引擎写路径收到的 patch（T-M8-03/04 数值效果） */
+  patches: StatePatch[];
 }
 
 function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Harness {
@@ -74,6 +84,7 @@ function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Har
   const deltas: string[] = [];
   const narrations: { triggerSeq: number; content: string; aborted: boolean }[] = [];
   const records: DirectiveScanEvent[] = [];
+  const patches: StatePatch[] = [];
   let fallbacks = 0;
 
   const llm: LlmAdapter = {
@@ -102,6 +113,10 @@ function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Har
     roster: rosterOf(60),
     random: fixed(40),
     tracker,
+    getBoard: () => undefined,
+    applyEnginePatch: async (patch) => {
+      patches.push(patch);
+    },
     buildMessages: async () => [{ role: 'user', content: '玩家：我翻查书桌。' }],
     emitDice: async (roll) => {
       dice.push(roll);
@@ -140,6 +155,7 @@ function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Har
     },
     tracker,
     records,
+    patches,
   };
 }
 
@@ -507,5 +523,275 @@ describe('回注文案 directiveResultText', () => {
     expect(directiveResultText(d, roll(40, checkOf('success', 'normal')), '爱丽丝')).toBe(
       '【检定】爱丽丝 侦查：1d100<=60 → 40，成功',
     );
+  });
+});
+
+// ---- 数值效果闭环（T-M8-03/04，FR-25/27，设计 §5.4）----
+
+/** 顺序随机源：按入参依次出值（多颗骰按掷骰顺序消费） */
+const seqRandom = (...ints: number[]): RandomSource => {
+  const queue = [...ints];
+  return { int: () => queue.shift() ?? 1 };
+};
+
+const board5e = (): StateBoard => ({
+  version: 4,
+  pcs: {
+    alice: {
+      sheet: {
+        rulebook: 'dnd5e',
+        playerName: '爱丽丝',
+        occupation: '战士',
+        abilities: { str: 16, dex: 14, con: 14, int: 10, wis: 12, cha: 8 },
+        proficiencyBonus: 2,
+        ac: 16,
+        hp: { max: 22, current: 22 },
+        proficientSkills: [],
+        proficientSaves: ['str', 'con'],
+      },
+      conditions: [],
+    },
+  },
+  scene: { name: '', time: '', publicDesc: '' },
+  facts: [],
+  updatedAt: '1970-01-01T00:00:00.000Z',
+});
+
+const boardCoc7 = (san = 55): StateBoard => ({
+  version: 4,
+  pcs: {
+    alice: {
+      sheet: {
+        rulebook: 'coc7',
+        playerName: '爱丽丝',
+        occupation: '记者',
+        str: 50,
+        con: 60,
+        siz: 55,
+        dex: 70,
+        app: 50,
+        int: 75,
+        pow: 55,
+        edu: 80,
+        luck: 40,
+        hp: 11,
+        mp: 11,
+        san,
+        db: '0',
+        build: '0',
+        skills: { 侦查: 60 },
+      },
+      conditions: [],
+    },
+  },
+  scene: { name: '', time: '', publicDesc: '' },
+  facts: [],
+  updatedAt: '1970-01-01T00:00:00.000Z',
+});
+
+describe('damage/heal 闭环（T-M8-03，FR-25）', () => {
+  it('damage：服务端掷 expr → DiceMsg → 引擎 patch 落盘端口 → 回注含 HP 前后值', async () => {
+    const h = harness(
+      [
+        {
+          chunks: [
+            '哥布林挥刀砍来。\n',
+            fence(
+              JSON.stringify({ op: 'damage', target: 'pc:alice', expr: '1d8+2', label: '弯刀' }),
+            ),
+            '鲜血溅出。',
+          ],
+        },
+        { chunks: ['你踉跄后退。'] },
+      ],
+      { random: seqRandom(5), getBoard: board5e },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.calls).toHaveLength(2); // 效果指令同样触发续写
+    expect(h.dice).toHaveLength(1);
+    expect(h.dice[0]!.expr).toBe('1d8+2');
+    expect(h.dice[0]!.total).toBe(7); // d8=5 + 2
+    expect(h.dice[0]!.check).toBeNull(); // 效果骰无判定
+    expect(h.patches).toHaveLength(1);
+    expect(h.patches[0]!.pcs?.alice?.sheet).toMatchObject({ hp: { current: 15, max: 22 } });
+    expect(h.results).toEqual(['【伤害】爱丽丝（弯刀）：1d8+2 → 7，HP 22 → 15']);
+    expect(h.tracker.successRate).toBe(1);
+    expect(h.alerts).toHaveLength(0);
+  });
+
+  it('heal：治疗骰回注文案与 patch 方向正确', async () => {
+    const h = harness(
+      [
+        { chunks: [fence(JSON.stringify({ op: 'heal', target: 'pc:alice', expr: '2d4+2' }))] },
+        { chunks: ['暖流涌动。'] },
+      ],
+      { random: seqRandom(2, 3), getBoard: board5e },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.dice[0]!.total).toBe(7); // 2+3+2
+    expect(h.patches[0]!.pcs?.alice?.sheet).toMatchObject({ hp: { current: 22, max: 22 } }); // clamp max
+    expect(h.results[0]).toContain('HP 22 → 22');
+  });
+
+  it('COC 卡收到 damage → E-AI-01 防呆拒绝：不掷骰、不出 patch、计 R-01', async () => {
+    const h = harness(
+      [
+        { chunks: [fence(JSON.stringify({ op: 'damage', target: 'pc:alice', expr: '1d8' }))] },
+        { chunks: ['叙事继续。'] },
+      ],
+      { getBoard: boardCoc7 },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.dice).toHaveLength(0);
+    expect(h.patches).toHaveLength(0);
+    expect(h.alerts).toHaveLength(1);
+    expect(h.alerts[0]).toMatchObject({ code: 'E-AI-01' });
+    expect(h.alerts[0]!.message).toContain('不是 5e 卡');
+    expect(h.tracker.successRate).toBe(0);
+  });
+
+  it.each([
+    ['无效骰式', { op: 'damage', target: 'pc:alice', expr: '不是骰式' }, '无效'],
+    ['判定后缀混入效果骰', { op: 'damage', target: 'pc:alice', expr: '1d8>=5' }, '判定后缀'],
+    ['查无此 PC', { op: 'heal', target: 'pc:ghost', expr: '1d4' }, '查无 PC'],
+  ])('%s → E-AI-01 拒绝且不掷骰', async (_name, directiveJson, reasonPart) => {
+    const h = harness(
+      [{ chunks: [fence(JSON.stringify(directiveJson))] }, { chunks: ['叙事继续。'] }],
+      { getBoard: board5e },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.dice).toHaveLength(0);
+    expect(h.patches).toHaveLength(0);
+    expect(h.alerts[0]).toMatchObject({ code: 'E-AI-01' });
+    if (h.alerts[0]) expect(h.alerts[0].message).toContain(reasonPart);
+  });
+});
+
+describe('sanity 闭环（T-M8-04，FR-27，T-M5-08 最后一步）', () => {
+  it('SAN 检定失败 → 房规损失表 1d6 → 服务端掷损失骰 → 扣 SAN → 回注全链路', async () => {
+    const h = harness(
+      [
+        {
+          chunks: [
+            '不可名状之物映入眼帘。\n',
+            fence(JSON.stringify({ op: 'sanity', target: 'pc:alice', label: '目击旧日支配者' })),
+            '你僵在原地。',
+          ],
+        },
+        { chunks: ['你缓缓回过神。'] },
+      ],
+      { random: seqRandom(80, 4), getBoard: () => boardCoc7() },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.calls).toHaveLength(2);
+    expect(h.dice).toHaveLength(2);
+    expect(h.dice[0]!.expr).toBe('1d100<=55');
+    expect(h.dice[0]!.total).toBe(80);
+    expect(h.dice[0]!.check).toMatchObject({ kind: 'sanity', outcome: 'fail' });
+    expect(h.dice[1]!.expr).toBe('1d6'); // 失败档损失表
+    expect(h.dice[1]!.total).toBe(4);
+    expect(h.patches).toHaveLength(1);
+    expect(h.patches[0]!.pcs?.alice?.sheet).toMatchObject({ san: 51 });
+    expect(h.results).toEqual([
+      '【理智检定】爱丽丝（目击旧日支配者）：1d100<=55 → 80，失败，失败：损失 1d6 = 4，SAN 55 → 51',
+    ]);
+  });
+
+  it('KP 显式指定损失表达式 → 覆盖房规表（仍由服务端掷骰）', async () => {
+    const h = harness(
+      [
+        { chunks: [fence(JSON.stringify({ op: 'sanity', target: 'pc:alice', loss: '1d10' }))] },
+        { chunks: ['叙事。'] },
+      ],
+      { random: seqRandom(30, 2), getBoard: () => boardCoc7() },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.dice[1]!.expr).toBe('1d10'); // KP 指定，非失败档 1d2
+    expect(h.results[0]).toContain('KP 指定损失 1d10 = 2');
+    expect(h.patches[0]!.pcs?.alice?.sheet).toMatchObject({ san: 53 });
+  });
+
+  it('损失超过当前 SAN → 扣到 0（clamp，G-M8 门禁项）', async () => {
+    const h = harness(
+      [
+        { chunks: [fence(JSON.stringify({ op: 'sanity', target: 'pc:alice' }))] },
+        { chunks: ['叙事。'] },
+      ],
+      { random: seqRandom(90, 6), getBoard: () => boardCoc7(3) },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.patches[0]!.pcs?.alice?.sheet).toMatchObject({ san: 0 });
+    expect(h.results[0]).toContain('SAN 3 → 0');
+  });
+
+  it('5e 卡收到 sanity → E-AI-01 防呆拒绝：不掷骰、不出 patch', async () => {
+    const h = harness(
+      [
+        { chunks: [fence(JSON.stringify({ op: 'sanity', target: 'pc:alice' }))] },
+        { chunks: ['叙事。'] },
+      ],
+      { getBoard: board5e },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.dice).toHaveLength(0);
+    expect(h.patches).toHaveLength(0);
+    expect(h.alerts[0]).toMatchObject({ code: 'E-AI-01' });
+    if (h.alerts[0]) expect(h.alerts[0].message).toContain('不是 COC7 卡');
+  });
+
+  it('未开团（getBoard=undefined）→ E-AI-01 拒绝', async () => {
+    const h = harness([
+      { chunks: [fence(JSON.stringify({ op: 'damage', target: 'pc:alice', expr: '1d8' }))] },
+      { chunks: ['叙事。'] },
+    ]);
+    await runAiTurn(1, h.ports);
+
+    expect(h.dice).toHaveLength(0);
+    expect(h.alerts[0]).toMatchObject({ code: 'E-AI-01' });
+    if (h.alerts[0]) expect(h.alerts[0].message).toContain('查无 PC');
+  });
+});
+
+describe('数值效果回注文案（T-M8-03/04）', () => {
+  const hpExec = {
+    ok: true as const,
+    pcName: '爱丽丝',
+    roll: {
+      expr: '1d8+2',
+      raw: '1d8+2',
+      rolls: [[5]],
+      kept: [5],
+      total: 7,
+      check: null,
+    },
+    patch: {},
+    before: 22,
+    after: 15,
+  };
+
+  it('damage/heal 文案：骰式 → 面值 → HP 前后值', () => {
+    expect(
+      effectResultText({ op: 'damage', target: 'pc:alice', expr: '1d8+2', label: '弯刀' }, hpExec),
+    ).toBe('【伤害】爱丽丝（弯刀）：1d8+2 → 7，HP 22 → 15');
+    expect(
+      effectResultText({ op: 'heal', target: 'pc:alice', expr: '1d8+2' }, { ...hpExec, after: 22 }),
+    ).toBe('【治疗】爱丽丝：1d8+2 → 7，HP 22 → 22');
+  });
+
+  it('失败结果不出文案（调用方只在 ok 分支调用）', () => {
+    expect(
+      effectResultText(
+        { op: 'damage', target: 'pc:alice', expr: '1d8' },
+        { ok: false, code: 'E-AI-01', reason: 'x' },
+      ),
+    ).toBe('');
   });
 });

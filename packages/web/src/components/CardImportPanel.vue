@@ -27,6 +27,53 @@ const manualSheetJson = ref('');
 const pcCards = computed(() => cards.value.filter((c) => c.kind === 'pc'));
 const memberOptions = computed(() => store.members.map((m) => ({ id: m.id, name: m.name })));
 
+/** 速建表模板（T-M8-05，FR-24）：两套规则书字段体系各一份，插入后改数值即可 */
+const SHEET_TEMPLATES = {
+  coc7: JSON.stringify(
+    {
+      rulebook: 'coc7',
+      playerName: '',
+      occupation: '',
+      str: 50,
+      con: 50,
+      siz: 50,
+      dex: 50,
+      app: 50,
+      int: 50,
+      pow: 50,
+      edu: 50,
+      luck: 50,
+      hp: 10,
+      mp: 10,
+      san: 50,
+      db: '0',
+      build: '0',
+      skills: {},
+    },
+    null,
+    2,
+  ),
+  dnd5e: JSON.stringify(
+    {
+      rulebook: 'dnd5e',
+      playerName: '',
+      occupation: '',
+      abilities: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 },
+      proficiencyBonus: 2,
+      ac: 10,
+      hp: { max: 10, current: 10 },
+      proficientSkills: [],
+      proficientSaves: [],
+    },
+    null,
+    2,
+  ),
+} as const;
+
+function insertTemplate(kind: keyof typeof SHEET_TEMPLATES): void {
+  manualSheetJson.value = SHEET_TEMPLATES[kind];
+}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败';
 }
@@ -196,7 +243,8 @@ async function undeclare(memberId: string): Promise<void> {
       <li v-for="d in declared" :key="d.memberId" class="bv-cards__card">
         <span class="bv-cards__card-name">{{ d.sheet.playerName }}</span>
         <span class="bv-cards__card-meta">
-          {{ d.source === 'card' ? `来自卡 ${d.cardId}` : '速建表' }}
+          {{ d.source === 'card' ? `来自卡 ${d.cardId}` : '速建表' }} ·
+          {{ d.sheet.rulebook === 'dnd5e' ? 'D&D 5e' : 'COC7' }}
         </span>
         <button
           class="bv-cards__btn bv-cards__btn--ghost"
@@ -229,11 +277,28 @@ async function undeclare(memberId: string): Promise<void> {
         用卡声明
       </button>
     </div>
+    <div class="bv-cards__row bv-cards__templates">
+      <span class="bv-cards__hint">速建表模板：</span>
+      <button
+        class="bv-cards__btn bv-cards__btn--ghost"
+        type="button"
+        @click="insertTemplate('coc7')"
+      >
+        COC7
+      </button>
+      <button
+        class="bv-cards__btn bv-cards__btn--ghost"
+        type="button"
+        @click="insertTemplate('dnd5e')"
+      >
+        D&amp;D 5e
+      </button>
+    </div>
     <textarea
       v-model="manualSheetJson"
       class="bv-cards__json"
-      rows="4"
-      placeholder="无卡速建表：粘贴 PCSheet JSON（playerName/occupation/六维/luck/hp/mp/san/db/build/skills）"
+      rows="6"
+      placeholder="无卡速建表：粘贴 PCSheet JSON，或从上方模板插入后修改（COC7 / D&D 5e 两套字段体系）"
     ></textarea>
     <button
       class="bv-cards__btn"
@@ -310,6 +375,9 @@ async function undeclare(memberId: string): Promise<void> {
 .bv-cards__row {
   display: flex;
   gap: var(--bv-space-2);
+}
+.bv-cards__templates {
+  align-items: center;
 }
 .bv-cards__select {
   flex: 1;

@@ -1,4 +1,10 @@
-import type { PipelineTracePayload, Session, SessionSettings } from '@behindveil/shared';
+import {
+  DEFAULT_NAT20_RULE,
+  type Nat20Rule,
+  type PipelineTracePayload,
+  type Session,
+  type SessionSettings,
+} from '@behindveil/shared';
 
 /**
  * KP 控制台纯逻辑（T-M6-04/05，FR-13 / R-02）。
@@ -230,13 +236,16 @@ export interface SessionSettingsPatch {
   temperature?: number;
   maxHistoryMessages?: number;
   worldBookBudgetTokens?: number;
+  nat20Rule?: Nat20Rule;
 }
 
-/** 表单值一律是字符串（input value），校验后才成数字 */
+/** 表单值一律是字符串（input value），校验后才成数字；nat20Rule 是下拉选择，直接是枚举值 */
 export interface SettingsDraft {
   temperature: string;
   maxHistoryMessages: string;
   worldBookBudgetTokens: string;
+  /** nat20/nat1 适用面（v2 FR-22，5e 消费；COC 房改它不改判定） */
+  nat20Rule: Nat20Rule;
 }
 
 export type SettingsFieldErrors = Partial<Record<keyof SettingsDraft, string>>;
@@ -287,6 +296,10 @@ export function parseSettingsDraft(
     errors.worldBookBudgetTokens = '世界书预算必须是非负整数';
   else if (current === null || current.worldBookBudgetTokens !== worldBookBudgetTokens)
     patch.worldBookBudgetTokens = worldBookBudgetTokens;
+
+  // 下拉选择，值域由 UI 保证；缺省（旧会话无该字段）按官方口径比对，避免产生无意义的 patch
+  if (current === null || (current.nat20Rule ?? DEFAULT_NAT20_RULE) !== draft.nat20Rule)
+    patch.nat20Rule = draft.nat20Rule;
 
   return { patch, errors, ok: Object.keys(errors).length === 0 };
 }

@@ -239,6 +239,7 @@ describe('parseSettingsDraft（LLM 参数校验）', () => {
     temperature: '0.8',
     maxHistoryMessages: '30',
     worldBookBudgetTokens: '1500',
+    nat20Rule: 'attack_only',
   };
 
   it('合法且与当前值不同 → 进 patch', () => {
@@ -254,8 +255,18 @@ describe('parseSettingsDraft（LLM 参数校验）', () => {
       temperature: '0.7',
       maxHistoryMessages: '40',
       worldBookBudgetTokens: '2000',
+      nat20Rule: 'attack_only',
     };
     expect(parseSettingsDraft(same, settings).patch).toEqual({});
+  });
+
+  it('nat20Rule 改动单独进 patch（5e 房规开关）', () => {
+    expect(parseSettingsDraft({ ...draft, nat20Rule: 'all_d20' }, settings).patch).toEqual({
+      temperature: 0.8,
+      maxHistoryMessages: 30,
+      worldBookBudgetTokens: 1500,
+      nat20Rule: 'all_d20',
+    });
   });
 
   it('拿不到当前值时照发（current = null）', () => {
@@ -263,6 +274,7 @@ describe('parseSettingsDraft（LLM 参数校验）', () => {
       temperature: 0.8,
       maxHistoryMessages: 30,
       worldBookBudgetTokens: 1500,
+      nat20Rule: 'attack_only',
     });
   });
 

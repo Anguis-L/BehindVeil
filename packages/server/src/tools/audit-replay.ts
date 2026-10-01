@@ -4,10 +4,16 @@ import type { DiceAuditEntry } from '../domain/dice/audit.js';
 import { DiceAuditEntrySchema } from '../domain/dice/audit.js';
 import { replayRoll } from '../domain/dice/evaluator.js';
 import { DiceExpressionError } from '../domain/dice/parser.js';
-import { Coc7RuleBook } from '../domain/rulebook/coc7.js';
+import { createRuleBook } from '../domain/rulebook/index.js';
 import type { RuleBook } from '../domain/rulebook/types.js';
 import type { ParsedRoll } from '../domain/dice/evaluator.js';
-import type { RollCheck } from '@behindveil/shared';
+import {
+  NAT20_RULES,
+  RULEBOOK_IDS,
+  type Nat20Rule,
+  type RollCheck,
+  type RuleBookId,
+} from '@behindveil/shared';
 
 /**
  * 审计复现校验器（T-M4-04，NFR-04；语义按决议 D-04）。
@@ -33,17 +39,25 @@ export interface ReplayReport {
   badLines: number;
 }
 
-/** v1 仅 COC7（接口按 ADR-04 预留；未知规则书无法复现，直接判不一致） */
-const RULEBOOKS: Record<string, RuleBook> = { coc7: new Coc7RuleBook() };
+/** 流水里的取值是枚举外也说得通（旧数据/篡改），故用守卫而非断言 */
+const isRuleBookId = (value: string): value is RuleBookId =>
+  (RULEBOOK_IDS as readonly string[]).includes(value);
+const isNat20Rule = (value: string | undefined): value is Nat20Rule =>
+  value !== undefined && (NAT20_RULES as readonly string[]).includes(value);
 
-export function rulebookFor(id: string): RuleBook | null {
-  return RULEBOOKS[id] ?? null;
+/**
+ * 规则书按判定记录装配（v2 起支持 5e）；未知规则书无法复现，直接判不一致。
+ * nat20 适用面取判定记录里的快照——同一骰值在不同开关下结果不同，不还原就复现不出。
+ */
+export function rulebookFor(id: string, nat20Rule?: string): RuleBook | null {
+  if (!isRuleBookId(id)) return null;
+  return createRuleBook(id, { nat20Rule: isNat20Rule(nat20Rule) ? nat20Rule : undefined });
 }
 
 /** 复现单条审计记录：一致返回 null，不一致返回原因 */
 export function replayEntry(entry: DiceAuditEntry): ReplayMismatch | null {
   const check = entry.check;
-  const rulebook = rulebookFor(check?.rulebook ?? 'coc7');
+  const rulebook = rulebookFor(check?.rulebook ?? 'coc7', check?.nat20Rule);
   if (!rulebook) {
     return { seq: entry.seq, reason: `未知规则书：${check?.rulebook ?? '(未记录)'}` };
   }

@@ -8,6 +8,7 @@
  *   dice     := count? "d" (number | "F") modifier?
  *   modifier := ("kh"|"kl"|"dh"|"dl") number
  *   check    := expr ("<=" | ">=" | "=") number
+ *   advdis   := ("adv" | "dis")?   （骰式末尾；v2 FR-23，展开为 2d20kh1 / 2d20kl1）
  *
  * 实现口径（与 TDD 原文的差异，待回写文档）：
  * - TDD BNF 的 term 行写作 `("*"|"/")? dice | number`，前缀乘除无语义；
@@ -18,7 +19,7 @@
  * TC-FR-04-006），并附帮助文本；解析失败不产生任何掷骰。
  */
 export const DICE_HELP_TEXT =
-  '骰式语法：NdY（Y 为面数）或 NdF（命运骰），可带 kh/kl/dh/dl 修改器与 + - * / 四则运算，末尾可加判定后缀 <=N / >=N / =N。示例：1d100<=50、4d6kh3、3d6+2d10-1*2、4dF。';
+  '骰式语法：NdY（Y 为面数）或 NdF（命运骰），可带 kh/kl/dh/dl 修改器与 + - * / 四则运算，末尾可加判定后缀 <=N / >=N / =N，以及优劣势标记 adv / dis（仅用于含单颗 d20 的骰式）。示例：1d100<=50、4d6kh3、3d6+2d10-1*2、4dF、1d20+5>=13 adv。';
 
 /** 防失控上限：表达式长度（TC-FR-04-006「超长」分支） */
 export const MAX_EXPR_LENGTH = 200;
@@ -51,6 +52,11 @@ export interface ParsedDiceExpr {
   canonical: string;
   root: DiceNode;
   check: DiceCheckSuffix | null;
+  /**
+   * 优劣势标记（v2 FR-23 / ADR-2-03）：骰式末尾的 `adv` / `dis`。
+   * 解析阶段只记录，展开由 evaluator 完成（展开后的骰式才是审计流水的 expr）。
+   */
+  advDis: 'adv' | 'dis' | null;
 }
 
 /** 骰式非法（E-DICE-01）：行内提示 + 帮助文本（TDD §11） */
@@ -71,7 +77,8 @@ type Token =
   | { t: 'fate' }
   | { t: 'mod'; kind: DiceModifierKind }
   | { t: 'op'; op: '+' | '-' | '*' | '/' }
-  | { t: 'check'; op: '<=' | '>=' | '=' };
+  | { t: 'check'; op: '<=' | '>=' | '=' }
+  | { t: 'advdis'; mode: 'adv' | 'dis' };
 
 export function parseDiceExpr(input: string): ParsedDiceExpr {
   const raw = input.trim();
@@ -120,6 +127,10 @@ function tokenize(input: string): Token[] {
         case 'dh':
         case 'dl':
           tokens.push({ t: 'mod', kind: word });
+          break;
+        case 'adv':
+        case 'dis':
+          tokens.push({ t: 'advdis', mode: word });
           break;
         default:
           throw new DiceExpressionError(`无法识别的记号 "${word}"`);
@@ -177,8 +188,15 @@ class Parser {
       }
       check = { op: next.op, target: numTok.value };
     }
+    // 优劣势标记紧贴骰式末尾（判定后缀之后），如 `1d20+5>=13 adv`
+    let advDis: 'adv' | 'dis' | null = null;
+    const last = this.peek();
+    if (last && last.t === 'advdis') {
+      this.advance();
+      advDis = last.mode;
+    }
     if (this.peek()) throw new DiceExpressionError('表达式末尾有多余内容');
-    return { raw: this.raw, canonical: this.canonical(root, check), root, check };
+    return { raw: this.raw, canonical: this.canonical(root, check), root, check, advDis };
   }
 
   private parseExpr(): DiceNode {
@@ -282,6 +300,42 @@ function serialize(node: DiceNode): string {
     case 'binary':
       return `${serialize(node.left)}${node.op}${serialize(node.right)}`;
   }
+}
+
+/**
+ * 优劣势展开（v2 FR-23 / ADR-2-03）：把骰式里那颗单颗 d20 就地改写为 2d20kh1（优势）/ 2d20kl1（劣势）。
+ * 在 AST 上展开而非拼字符串：求值产物 rolls/kept 与规范化表达式天然一致，
+ * 审计流水里存的就是展开后的骰式（复现不必再懂 adv/dis）。
+ */
+export function expandAdvDis(root: DiceNode, mode: 'adv' | 'dis'): DiceNode {
+  const die = findD20(root);
+  if (!die) {
+    throw new DiceExpressionError('adv / dis 只能用于含 d20 的骰式（如 1d20+5>=13 adv）');
+  }
+  if (die.count !== 1 || die.modifier !== null) {
+    throw new DiceExpressionError('adv / dis 只能用于未被取舍的单颗 d20');
+  }
+  die.count = 2;
+  die.modifier = { kind: mode === 'adv' ? 'kh' : 'kl', count: 1 };
+  return root;
+}
+
+/** 按求值顺序找第一颗 d20（左先于右，与 rolls 的组序一致） */
+function findD20(node: DiceNode): Extract<DiceNode, { kind: 'dice' }> | null {
+  switch (node.kind) {
+    case 'number':
+      return null;
+    case 'dice':
+      return node.sides === 20 ? node : null;
+    case 'binary':
+      return findD20(node.left) ?? findD20(node.right);
+  }
+}
+
+/** 规范化表达式序列化：AST 被改写（如 adv/dis 展开）后重算 expr 用 */
+export function canonicalizeDice(root: DiceNode, check: DiceCheckSuffix | null = null): string {
+  const text = serialize(root);
+  return check ? `${text}${check.op}${check.target}` : text;
 }
 
 function isDigit(ch: string): boolean {

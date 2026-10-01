@@ -1,5 +1,5 @@
 import type { ExportEntry, ExportInput } from './render.js';
-import { toExportEntries } from './render.js';
+import { hpTextOf, statTextOf, toExportEntries } from './render.js';
 
 /**
  * Markdown 日志导出（T-M6-01，FR-12；TC-FR-12-001）。
@@ -45,7 +45,7 @@ function renderSnapshot(entry: ExportEntry): string {
     lines.push('|---|---|---:|---:|---:|---:|---|');
     for (const pc of snap.pcs) {
       lines.push(
-        `| ${pc.playerName} | ${pc.memberName} | ${pc.hp} | ${pc.san} | ${pc.mp} | ${pc.luck} | ${pc.conditions.join('、') || '—'} |`,
+        `| ${pc.playerName} | ${pc.memberName} | ${hpTextOf(pc)} | ${statTextOf(pc.san)} | ${statTextOf(pc.mp)} | ${statTextOf(pc.luck)} | ${pc.conditions.join('、') || '—'} |`,
       );
     }
   }

@@ -185,21 +185,88 @@ describe('篡改必被检出（防「算错也看不出来」）', () => {
     expect(report.mismatches[0]?.reason).toContain('重放失败');
   });
 
-  it('未知规则书无法复现', () => {
+  it('未知规则书无法复现（旧流水或手工篡改可能出现枚举外的值）', () => {
     const entry = makeEntries(1)[0];
     expect(entry).toBeDefined();
-    const tampered: DiceAuditEntry = {
-      ...(entry as DiceAuditEntry),
+    // 规则书是枚举，测试要造枚举外的值只能显式窄化：模拟「未来规则书/被篡改」的流水
+    const bogusCheck = {
+      ...(entry as DiceAuditEntry).check,
+      rulebook: 'coc9',
+    } as unknown as DiceAuditEntry['check'];
+    const tampered: DiceAuditEntry = { ...(entry as DiceAuditEntry), check: bogusCheck };
+
+    expect(replayEntry(tampered)?.reason).toContain('未知规则书');
+  });
+
+  it('5e 判定记录可复现（v2：dnd5e 已是已知规则书）', () => {
+    const entry = makeEntries(1)[0] as DiceAuditEntry;
+    const fiveE: DiceAuditEntry = {
+      ...entry,
+      expr: '1d20+5>=13',
+      rolls: [[8]],
+      kept: [8],
+      total: 13,
       check: {
         rulebook: 'dnd5e',
-        kind: 'skill',
-        target: 10,
+        kind: 'ability',
+        target: 13,
         difficulty: 'normal',
+        op: '>=',
         outcome: 'success',
       },
     };
+    expect(replayEntry(fiveE)).toBeNull();
+  });
 
-    expect(replayEntry(tampered)?.reason).toContain('未知规则书');
+  it('优势骰（adv）展开后的流水可复现：kept 与判定都能算回', () => {
+    const entry = makeEntries(1)[0] as DiceAuditEntry;
+    const adv: DiceAuditEntry = {
+      ...entry,
+      expr: '2d20kh1+5>=13',
+      rolls: [[3, 18]],
+      kept: [18],
+      total: 23,
+      check: {
+        rulebook: 'dnd5e',
+        kind: 'ability',
+        target: 13,
+        difficulty: 'normal',
+        op: '>=',
+        outcome: 'success',
+      },
+    };
+    expect(replayEntry(adv)).toBeNull();
+
+    // 篡改保留值必被检出（展开后的 expr 与 kept 必须自洽）
+    expect(replayEntry({ ...adv, kept: [3] })?.reason).toContain('kept 不一致');
+  });
+
+  it('nat20 开关不同 → 复现判定不一致（房规快照是判定的一部分）', () => {
+    const entry = makeEntries(1)[0] as DiceAuditEntry;
+    const nat20: DiceAuditEntry = {
+      ...entry,
+      expr: '1d20>=15',
+      rolls: [[20]],
+      kept: [20],
+      total: 20,
+      check: {
+        rulebook: 'dnd5e',
+        kind: 'ability',
+        target: 15,
+        difficulty: 'normal',
+        op: '>=',
+        outcome: 'critical',
+        nat20Rule: 'all_d20',
+      },
+    };
+    expect(replayEntry(nat20)).toBeNull();
+
+    // 抹掉房规快照 → 按默认 attack_only 重算得 success，与记录的 critical 不符
+    const stripped: DiceAuditEntry = {
+      ...nat20,
+      check: { ...nat20.check, nat20Rule: undefined } as DiceAuditEntry['check'],
+    };
+    expect(replayEntry(stripped)?.reason).toContain('check 不一致');
   });
 });
 

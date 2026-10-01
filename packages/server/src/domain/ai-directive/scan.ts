@@ -1,5 +1,5 @@
 import { repairJson } from './repair.js';
-import type { CheckDirective } from './schema.js';
+import type { AiDirective } from './schema.js';
 import { validateDirective } from './validate.js';
 
 /**
@@ -12,7 +12,7 @@ import { validateDirective } from './validate.js';
  * 绝对字符区间 [start, end)（end 仅闭合块有），供闭环编排器从叙事全文剥离指令块。
  */
 export type DirectiveScanEvent =
-  | { kind: 'directive'; block: number; directive: CheckDirective; start: number; end: number }
+  | { kind: 'directive'; block: number; directive: AiDirective; start: number; end: number }
   | {
       kind: 'parse-error';
       block: number;

@@ -1,4 +1,10 @@
-import { SessionSettingsSchema, type Message, type Room, type Session } from '@behindveil/shared';
+import {
+  NAT20_RULES,
+  SessionSettingsSchema,
+  type Message,
+  type Room,
+  type Session,
+} from '@behindveil/shared';
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import type { DataLayout } from '../../adapters/storage/layout.js';
@@ -71,6 +77,8 @@ const SessionSettingsPatchSchema = z
     scanDepth: z.number().int().positive(),
     contextWindowTokens: z.number().int().positive(),
     outputReserveTokens: z.number().int().positive(),
+    /** nat20/nat1 适用面（v2 FR-22，5e 消费） */
+    nat20Rule: z.enum(NAT20_RULES),
   })
   .partial()
   .refine((patch) => Object.keys(patch).length > 0, { message: '至少提供一项设置' });

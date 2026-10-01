@@ -1,12 +1,19 @@
-import type { ErrorCode, RollCheck } from '@behindveil/shared';
+import type { ErrorCode, RollCheck, StateBoard, StatePatch } from '@behindveil/shared';
 import type { ParsedRoll } from '../dice/evaluator.js';
 // 缺省 CSPRNG 由 executeCheck 兜底（executor.ts），本层只透传测试注入的确定性源
 import type { RandomSource } from '../dice/random.js';
 import type { LlmAdapter, LlmMessage } from '../llm.js';
 import type { RuleBook } from '../rulebook/types.js';
 import type { DirectiveSuccessTracker } from './degrade.js';
-import { executeCheck, type PcRoster } from './executor.js';
-import type { CheckDirective } from './schema.js';
+import {
+  executeCheck,
+  executeHp,
+  executeSanity,
+  type HpExecution,
+  type PcRoster,
+  type SanityExecution,
+} from './executor.js';
+import type { CheckDirective, DamageDirective, HealDirective, SanityDirective } from './schema.js';
 import { DirectiveStreamScanner, type DirectiveScanEvent } from './scan.js';
 
 /**
@@ -30,12 +37,12 @@ import { DirectiveStreamScanner, type DirectiveScanEvent } from './scan.js';
  * 本模块为领域层纯编排：广播/持久化/告警经 ports 注入，不 import gateway（TDD §1.2）。
  */
 
-/** 每轮（一次 AI 回合）允许执行的检定上限（TDD §5.4：循环上限 3 次/轮） */
+/** 每轮（一次 AI 回合）允许执行的指令上限（TDD §5.4 循环上限 3 次/轮；T-M8-03 起含全部 op） */
 export const MAX_CHECKS_PER_TURN = 3;
 
-/** 第 4 次检定被拦后注入的收尾元指令（TC-FR-05-007） */
+/** 第 4 条指令被拦后注入的收尾元指令（TC-FR-05-007） */
 export const NO_MORE_CHECKS_META =
-  '【元指令】本轮检定请求已达上限，禁止再输出 aidle 指令块，请直接以纯叙事收尾。';
+  '【元指令】本轮指令请求已达上限，禁止再输出 aidle 指令块，请直接以纯叙事收尾。';
 
 /** 一级降级追加的少样本示例（TDD §5.4 降级链） */
 export const FEW_SHOT_EXAMPLES = [
@@ -55,6 +62,10 @@ export interface AiTurnPorts {
   random?: RandomSource;
   /** R-01 滑动窗口（跨回合共享，挂在房间/会话上） */
   tracker: DirectiveSuccessTracker;
+  /** 当前会话状态板（T-M8-03/04 数值效果取值与写板的权威源）；未开团/未载入为 undefined */
+  getBoard(): StateBoard | undefined;
+  /** 引擎写路径落盘：乐观锁 applyStatePatch → save → state:broadcast（网关装配，房间队列内） */
+  applyEnginePatch(patch: StatePatch): Promise<void>;
   /** 组装当前 prompt：读盘消息 → 管线 → LlmMessage[]（每请求重建，回注自动入上下文） */
   buildMessages(): Promise<LlmMessage[]>;
   /** 持久化 + 广播 DiceMsg（房间串行队列内，TDD §5.4） */
@@ -143,25 +154,51 @@ export async function runAiTurn(triggerSeq: number, ports: AiTurnPorts): Promise
         if (protocolDisabled) return;
         if (executed >= MAX_CHECKS_PER_TURN) {
           if (!wrapUpDone) wrapUpPending = true;
-          ports.alertKp('E-AI-01', `检定循环已达上限（${MAX_CHECKS_PER_TURN}/轮），该指令块未执行`);
+          ports.alertKp('E-AI-01', `指令循环已达上限（${MAX_CHECKS_PER_TURN}/轮），该指令块未执行`);
           return;
         }
-        const result = executeCheck(ev.directive, {
-          roster: ports.roster,
-          rulebook: ports.rulebook,
-          random: ports.random,
-        });
-        if (!result.ok) {
-          ports.tracker.record(false);
-          failedHere = true;
-          ports.alertKp(result.code, result.reason);
+        if (ev.directive.op === 'check') {
+          const result = executeCheck(ev.directive, {
+            roster: ports.roster,
+            rulebook: ports.rulebook,
+            random: ports.random,
+          });
+          if (!result.ok) {
+            ports.tracker.record(false);
+            failedHere = true;
+            ports.alertKp(result.code, result.reason);
+          } else {
+            ports.tracker.record(true);
+            executed += 1;
+            executedHere += 1;
+            const text = directiveResultText(ev.directive, result.roll, result.pcName);
+            effects.push(ports.emitDice(result.roll));
+            effects.push(ports.emitDirectiveResult(text));
+          }
         } else {
-          ports.tracker.record(true);
-          executed += 1;
-          executedHere += 1;
-          const text = directiveResultText(ev.directive, result.roll, result.pcName);
-          effects.push(ports.emitDice(result.roll));
-          effects.push(ports.emitDirectiveResult(text));
+          // 数值效果（T-M8-03/04）：damage/heal/sanity——服务端掷骰 → DiceMsg →
+          // 引擎写板（乐观锁落盘 + state:broadcast）→ 回注。失败同样计 R-01。
+          const deps = {
+            board: ports.getBoard(),
+            rulebook: ports.rulebook,
+            random: ports.random,
+          };
+          const result =
+            ev.directive.op === 'sanity'
+              ? executeSanity(ev.directive, deps)
+              : executeHp(ev.directive, deps);
+          if (!result.ok) {
+            ports.tracker.record(false);
+            failedHere = true;
+            ports.alertKp(result.code, result.reason);
+          } else {
+            ports.tracker.record(true);
+            executed += 1;
+            executedHere += 1;
+            for (const roll of effectRolls(result)) effects.push(ports.emitDice(roll));
+            effects.push(ports.emitDirectiveResult(effectResultText(ev.directive, result)));
+            effects.push(ports.applyEnginePatch(result.patch));
+          }
         }
       } else {
         // parse-error | rejected：E-AI-01，计入 R-01（TDD §11/§5.4）
@@ -227,6 +264,31 @@ export function directiveResultText(
   const check = roll.check;
   const verdict = check ? `，${outcomeText(check)}` : '';
   return `【检定】${pcName} ${directive.skill}${label}：${roll.expr} → ${roll.total}${verdict}`;
+}
+
+/** 效果骰清单：sanity 是检定骰 + 损失骰两颗，damage/heal 一颗（仅 ok 结果调用） */
+function effectRolls(exec: HpExecution | SanityExecution): ParsedRoll[] {
+  if (!exec.ok) return [];
+  return 'checkRoll' in exec ? [exec.checkRoll, exec.lossRoll] : [exec.roll];
+}
+
+/** 数值效果回注文案（T-M8-03/04）：骰式、面值与 HP/SAN 前后变化（人类可读审计链） */
+export function effectResultText(
+  directive: DamageDirective | HealDirective | SanityDirective,
+  exec: HpExecution | SanityExecution,
+): string {
+  if (!exec.ok) return '';
+  if ('checkRoll' in exec) {
+    const label = directive.label ? `（${directive.label}）` : '';
+    const verdict = exec.checkRoll.check ? `，${outcomeText(exec.checkRoll.check)}` : '';
+    return (
+      `【理智检定】${exec.pcName}${label}：${exec.checkRoll.expr} → ${exec.checkRoll.total}${verdict}，` +
+      `${exec.desc} = ${exec.lossRoll.total}，SAN ${exec.before} → ${exec.after}`
+    );
+  }
+  const kind = directive.op === 'damage' ? '伤害' : '治疗';
+  const label = directive.label ? `（${directive.label}）` : '';
+  return `【${kind}】${exec.pcName}${label}：${exec.roll.expr} → ${exec.roll.total}，HP ${exec.before} → ${exec.after}`;
 }
 
 function outcomeText(check: RollCheck): string {

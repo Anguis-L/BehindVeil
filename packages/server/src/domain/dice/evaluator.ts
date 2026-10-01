@@ -1,5 +1,12 @@
 import type { CheckDifficulty, DiceKind, RollCheck } from '@behindveil/shared';
-import { DiceExpressionError, parseDiceExpr, type DiceModifier, type DiceNode } from './parser.js';
+import {
+  canonicalizeDice,
+  DiceExpressionError,
+  expandAdvDis,
+  parseDiceExpr,
+  type DiceModifier,
+  type DiceNode,
+} from './parser.js';
 import type { RandomSource } from './random.js';
 import type { RuleBook } from '../rulebook/types.js';
 
@@ -107,12 +114,14 @@ export interface ParsedRoll {
 /** 一站式掷骰：解析 → 静态校验 → 求值 →（可选）规则书判定 */
 export function rollDice(rawExpr: string, opts: RollOptions): ParsedRoll {
   const parsed = parseDiceExpr(rawExpr);
-  assertNoStaticDivideByZero(parsed.root);
-  const data = evaluate(parsed.root, opts.random);
+  // 优劣势（v2 FR-23）：把那颗 d20 展开成 2d20kh1 / 2d20kl1 再求值，expr 记展开后的骰式
+  const root = parsed.advDis ? expandAdvDis(parsed.root, parsed.advDis) : parsed.root;
+  assertNoStaticDivideByZero(root);
+  const data = evaluate(root, opts.random);
 
   let check: RollCheck | null = null;
   if (parsed.check) {
-    // 判定权威必须明确：任何判定后缀（含 >=/=）都要求装配规则书（v1 恒为 COC7）
+    // 判定权威必须明确：任何判定后缀（含 >=/=）都要求装配规则书（COC7 / dnd5e）
     const rulebook = opts.rulebook;
     if (!rulebook) {
       throw new DiceExpressionError('表达式带判定后缀但未提供规则书');
@@ -120,39 +129,39 @@ export function rollDice(rawExpr: string, opts: RollOptions): ParsedRoll {
     const kind = opts.kind ?? 'skill';
     const difficulty = opts.difficulty ?? 'normal';
     const { op, target } = parsed.check;
-    if (op === '<=') {
-      const outcome = rulebook.adjudicate(data.total, { kind, target, difficulty });
-      check = {
-        rulebook: rulebook.id,
-        kind,
-        target,
-        difficulty,
-        op,
-        outcome: outcome.outcome,
-        grade: outcome.grade,
-      };
-    } else {
-      // 通用布尔判定：不查规则书判定表，故无 grade
-      const passed = op === '>=' ? data.total >= target : data.total === target;
-      check = {
-        rulebook: rulebook.id,
-        kind,
-        target,
-        difficulty,
-        op,
-        outcome: passed ? 'success' : 'fail',
-      };
-    }
+    // 判定一律交规则书：规则书自解 op 语义（COC7 走 <= 判定表，5e 走 >= DC 比较 + nat20/nat1）
+    const outcome = rulebook.adjudicate(mainDie(data), { kind, target, difficulty, op });
+    check = {
+      rulebook: rulebook.id,
+      kind,
+      target,
+      difficulty,
+      op,
+      outcome: outcome.outcome,
+      // `>=` / `=` 是通用布尔比较、不查规则书判定表，故不带 grade（T-M4-02 方案 a）
+      ...(op === '<=' ? { grade: outcome.grade } : {}),
+      // 房规快照随判定记录落流水：audit-replay 用同一开关才能重算出同一结果
+      ...(rulebook.nat20Rule ? { nat20Rule: rulebook.nat20Rule } : {}),
+    };
   }
 
   return {
-    expr: parsed.canonical,
+    expr: canonicalizeDice(root, parsed.check),
     raw: parsed.raw,
     rolls: data.rolls,
     kept: data.kept,
     total: data.total,
     check,
   };
+}
+
+/**
+ * 判定输入：total 参与比较；raw 为主骰原始面值（5e nat20/nat1 按面值判定）。
+ * 只有「一个骰组且恰好保留一颗」时主骰才明确——多骰组（1d20+1d4）或未取舍的多颗骰（2d6）不含主骰语义。
+ */
+function mainDie(data: RollData): { total: number; raw: number | null } {
+  const raw = data.rolls.length === 1 && data.kept.length === 1 ? (data.kept[0] ?? null) : null;
+  return { total: data.total, raw };
 }
 
 /**
