@@ -63,6 +63,11 @@ jobs:
           cp packages/web/package.json    "$STAGE/packages/web/package.json"
           cp package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc .nvmrc README.md LICENSE "$STAGE/"
 
+          # 示例模组（T-M9-01）：部署后 node scripts/seed-example-module.mjs 落进 data/modules/
+          cp -r examples "$STAGE/examples"
+          mkdir -p "$STAGE/scripts"
+          cp scripts/seed-example-module.mjs "$STAGE/scripts/seed-example-module.mjs"
+
           (cd build && zip -qr "../behindveil-${VERSION}.zip" staging)
           sha256sum "behindveil-${VERSION}.zip" | tee "behindveil-${VERSION}.zip.sha256"
 
@@ -82,7 +87,8 @@ jobs:
             4. 配置 LLM：通过环境变量注入（**切勿写入文件**）
                - `AIDLE_LLM_KEY`：模型服务的 API Key
                - 其余非敏感配置项见解压目录内的 `README.md`
-            5. 启动服务后访问对应端口即可；运行时数据写在 `data/` 目录，备份即复制该目录。
+            5. （可选）装载内置示例模组：`node scripts/seed-example-module.mjs`
+            6. 启动服务后访问对应端口即可；运行时数据写在 `data/` 目录，备份即复制该目录。
 
             > 公网部署请务必配合反向代理 + TLS，或直接使用 Tailscale 组网（见 README 安全章节）。
 

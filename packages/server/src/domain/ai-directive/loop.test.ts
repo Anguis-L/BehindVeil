@@ -4,7 +4,6 @@ import type {
   ErrorCode,
   RollCheck,
   StateBoard,
-  StatePatch,
 } from '@behindveil/shared';
 import { describe, expect, it } from 'vitest';
 import type { ParsedRoll } from '../dice/evaluator.js';
@@ -14,13 +13,18 @@ import { DirectiveSuccessTracker } from './degrade.js';
 import type { PcRoster } from './executor.js';
 import {
   directiveResultText,
-  effectResultText,
+  hpResultText,
   FEW_SHOT_EXAMPLES,
   MAX_CHECKS_PER_TURN,
   NO_MORE_CHECKS_META,
   runAiTurn,
+  sanityResultText,
   type AiTurnPorts,
 } from './loop.js';
+import { hpPatch, sanityLossPatch } from '../stateboard/engine-writes.js';
+import { applyStatePatch } from '../stateboard/board.js';
+import { rollDice } from '../dice/evaluator.js';
+import { Coc7RuleBook } from '../rulebook/coc7.js';
 import type { CheckDirective } from './schema.js';
 import type { DirectiveScanEvent } from './scan.js';
 
@@ -71,12 +75,48 @@ interface Harness {
   tracker: DirectiveSuccessTracker;
   /** 留档端口收到的失败块（T-M3-07，测试文档 §12.4） */
   records: DirectiveScanEvent[];
-  /** 引擎写路径收到的 patch（T-M8-03/04 数值效果） */
-  patches: StatePatch[];
+  /** 引擎写路径应用记录（T-M8-03/04 数值效果，网关队列语义的模拟） */
+  hpEffects: Array<{
+    key: string;
+    kind: 'damage' | 'heal';
+    roll: ParsedRoll;
+    before: number;
+    after: number;
+  }>;
+  sanityEffects: Array<{
+    key: string;
+    sanRoll: number;
+    lossRoll: ParsedRoll;
+    loss: number;
+    before: number;
+    after: number;
+  }>;
 }
 
-function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Harness {
+function harness(
+  replies: ScriptedReply[],
+  over: Partial<AiTurnPorts> = {},
+  opts: { board?: StateBoard } = {},
+): Harness {
   const tracker = over.tracker ?? new DirectiveSuccessTracker();
+  // 模拟网关引擎写路径：效果在「当前板」上现算并原地更新（同一轮多条效果依次累加）
+  const liveBoard = opts.board;
+  const coc7 = new Coc7RuleBook();
+  const hpEffects: Array<{
+    key: string;
+    kind: 'damage' | 'heal';
+    roll: ParsedRoll;
+    before: number;
+    after: number;
+  }> = [];
+  const sanityEffects: Array<{
+    key: string;
+    sanRoll: number;
+    lossRoll: ParsedRoll;
+    loss: number;
+    before: number;
+    after: number;
+  }> = [];
   const calls: { messages: LlmMessage[] }[] = [];
   const dice: ParsedRoll[] = [];
   const results: string[] = [];
@@ -84,7 +124,6 @@ function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Har
   const deltas: string[] = [];
   const narrations: { triggerSeq: number; content: string; aborted: boolean }[] = [];
   const records: DirectiveScanEvent[] = [];
-  const patches: StatePatch[] = [];
   let fallbacks = 0;
 
   const llm: LlmAdapter = {
@@ -113,9 +152,45 @@ function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Har
     roster: rosterOf(60),
     random: fixed(40),
     tracker,
-    getBoard: () => undefined,
-    applyEnginePatch: async (patch) => {
-      patches.push(patch);
+    getBoard: () => liveBoard,
+    applyHpEffect: async (key, kind, roll) => {
+      if (!liveBoard) return null;
+      const produced = hpPatch(liveBoard, key, kind, roll);
+      if (!produced.ok) return null;
+      const pc = liveBoard.pcs[key];
+      if (!pc || pc.sheet.rulebook !== 'dnd5e') return null;
+      const lock = applyStatePatch(liveBoard, produced.patch, liveBoard.version);
+      if (!lock.ok) return null;
+      const before = pc.sheet.hp.current;
+      Object.assign(liveBoard, lock.next);
+      const after = liveBoard.pcs[key]?.sheet;
+      if (!after || after.rulebook !== 'dnd5e') return null;
+      hpEffects.push({ key, kind, roll, before, after: after.hp.current });
+      return { before, after: after.hp.current };
+    },
+    applySanityEffect: async (key, sanRoll, lossHint, random) => {
+      if (!liveBoard) return null;
+      const pc = liveBoard.pcs[key];
+      if (!pc || pc.sheet.rulebook !== 'coc7') return null;
+      const tier = coc7.sanityRule(sanRoll, pc.sheet.san);
+      const lossExpr = lossHint ?? tier.loss;
+      const lossRoll = rollDice(lossExpr, { random: random ?? fixed(1), rulebook: coc7 });
+      const produced = sanityLossPatch(liveBoard, key, sanRoll, lossRoll, coc7);
+      if (!produced.ok) return null;
+      const lock = applyStatePatch(liveBoard, produced.patch, liveBoard.version);
+      if (!lock.ok) return null;
+      const before = pc.sheet.san;
+      Object.assign(liveBoard, lock.next);
+      const after = liveBoard.pcs[key]?.sheet;
+      if (!after || after.rulebook !== 'coc7') return null;
+      sanityEffects.push({ key, sanRoll, lossRoll, loss: produced.loss, before, after: after.san });
+      return {
+        lossRoll,
+        loss: produced.loss,
+        before,
+        after: after.san,
+        desc: lossHint ? `KP 指定损失 ${lossExpr}` : tier.desc,
+      };
     },
     buildMessages: async () => [{ role: 'user', content: '玩家：我翻查书桌。' }],
     emitDice: async (roll) => {
@@ -155,7 +230,8 @@ function harness(replies: ScriptedReply[], over: Partial<AiTurnPorts> = {}): Har
     },
     tracker,
     records,
-    patches,
+    hpEffects,
+    sanityEffects,
   };
 }
 
@@ -534,7 +610,7 @@ const seqRandom = (...ints: number[]): RandomSource => {
   return { int: () => queue.shift() ?? 1 };
 };
 
-const board5e = (): StateBoard => ({
+const board5e = (current = 22, max = 22): StateBoard => ({
   version: 4,
   pcs: {
     alice: {
@@ -545,7 +621,7 @@ const board5e = (): StateBoard => ({
         abilities: { str: 16, dex: 14, con: 14, int: 10, wis: 12, cha: 8 },
         proficiencyBonus: 2,
         ac: 16,
-        hp: { max: 22, current: 22 },
+        hp: { max, current },
         proficientSkills: [],
         proficientSaves: ['str', 'con'],
       },
@@ -604,7 +680,8 @@ describe('damage/heal 闭环（T-M8-03，FR-25）', () => {
         },
         { chunks: ['你踉跄后退。'] },
       ],
-      { random: seqRandom(5), getBoard: board5e },
+      { random: seqRandom(5) },
+      { board: board5e() },
     );
     await runAiTurn(1, h.ports);
 
@@ -613,8 +690,8 @@ describe('damage/heal 闭环（T-M8-03，FR-25）', () => {
     expect(h.dice[0]!.expr).toBe('1d8+2');
     expect(h.dice[0]!.total).toBe(7); // d8=5 + 2
     expect(h.dice[0]!.check).toBeNull(); // 效果骰无判定
-    expect(h.patches).toHaveLength(1);
-    expect(h.patches[0]!.pcs?.alice?.sheet).toMatchObject({ hp: { current: 15, max: 22 } });
+    expect(h.hpEffects).toHaveLength(1);
+    expect(h.hpEffects[0]).toMatchObject({ key: 'alice', kind: 'damage', before: 22, after: 15 });
     expect(h.results).toEqual(['【伤害】爱丽丝（弯刀）：1d8+2 → 7，HP 22 → 15']);
     expect(h.tracker.successRate).toBe(1);
     expect(h.alerts).toHaveLength(0);
@@ -626,13 +703,14 @@ describe('damage/heal 闭环（T-M8-03，FR-25）', () => {
         { chunks: [fence(JSON.stringify({ op: 'heal', target: 'pc:alice', expr: '2d4+2' }))] },
         { chunks: ['暖流涌动。'] },
       ],
-      { random: seqRandom(2, 3), getBoard: board5e },
+      { random: seqRandom(2, 3) },
+      { board: board5e(12) },
     );
     await runAiTurn(1, h.ports);
 
     expect(h.dice[0]!.total).toBe(7); // 2+3+2
-    expect(h.patches[0]!.pcs?.alice?.sheet).toMatchObject({ hp: { current: 22, max: 22 } }); // clamp max
-    expect(h.results[0]).toContain('HP 22 → 22');
+    expect(h.hpEffects[0]).toMatchObject({ kind: 'heal', before: 12, after: 19 });
+    expect(h.results[0]).toContain('HP 12 → 19');
   });
 
   it('COC 卡收到 damage → E-AI-01 防呆拒绝：不掷骰、不出 patch、计 R-01', async () => {
@@ -641,12 +719,13 @@ describe('damage/heal 闭环（T-M8-03，FR-25）', () => {
         { chunks: [fence(JSON.stringify({ op: 'damage', target: 'pc:alice', expr: '1d8' }))] },
         { chunks: ['叙事继续。'] },
       ],
-      { getBoard: boardCoc7 },
+      {},
+      { board: boardCoc7() },
     );
     await runAiTurn(1, h.ports);
 
     expect(h.dice).toHaveLength(0);
-    expect(h.patches).toHaveLength(0);
+    expect(h.hpEffects).toHaveLength(0);
     expect(h.alerts).toHaveLength(1);
     expect(h.alerts[0]).toMatchObject({ code: 'E-AI-01' });
     expect(h.alerts[0]!.message).toContain('不是 5e 卡');
@@ -660,12 +739,13 @@ describe('damage/heal 闭环（T-M8-03，FR-25）', () => {
   ])('%s → E-AI-01 拒绝且不掷骰', async (_name, directiveJson, reasonPart) => {
     const h = harness(
       [{ chunks: [fence(JSON.stringify(directiveJson))] }, { chunks: ['叙事继续。'] }],
-      { getBoard: board5e },
+      {},
+      { board: board5e() },
     );
     await runAiTurn(1, h.ports);
 
     expect(h.dice).toHaveLength(0);
-    expect(h.patches).toHaveLength(0);
+    expect(h.hpEffects).toHaveLength(0);
     expect(h.alerts[0]).toMatchObject({ code: 'E-AI-01' });
     if (h.alerts[0]) expect(h.alerts[0].message).toContain(reasonPart);
   });
@@ -684,19 +764,27 @@ describe('sanity 闭环（T-M8-04，FR-27，T-M5-08 最后一步）', () => {
         },
         { chunks: ['你缓缓回过神。'] },
       ],
-      { random: seqRandom(80, 4), getBoard: () => boardCoc7() },
+      { random: seqRandom(80, 4) },
+      { board: boardCoc7() },
     );
     await runAiTurn(1, h.ports);
 
     expect(h.calls).toHaveLength(2);
-    expect(h.dice).toHaveLength(2);
+    // 检定骰经 emitDice 落盘；损失骰由端口内部 recordDice（网关队列内），经 sanityEffects 观测
+    expect(h.dice).toHaveLength(1);
     expect(h.dice[0]!.expr).toBe('1d100<=55');
     expect(h.dice[0]!.total).toBe(80);
     expect(h.dice[0]!.check).toMatchObject({ kind: 'sanity', outcome: 'fail' });
-    expect(h.dice[1]!.expr).toBe('1d6'); // 失败档损失表
-    expect(h.dice[1]!.total).toBe(4);
-    expect(h.patches).toHaveLength(1);
-    expect(h.patches[0]!.pcs?.alice?.sheet).toMatchObject({ san: 51 });
+    expect(h.sanityEffects).toHaveLength(1);
+    expect(h.sanityEffects[0]!.lossRoll.expr).toBe('1d6'); // 失败档损失表
+    expect(h.sanityEffects[0]!.lossRoll.total).toBe(4);
+    expect(h.sanityEffects[0]).toMatchObject({
+      key: 'alice',
+      sanRoll: 80,
+      loss: 4,
+      before: 55,
+      after: 51,
+    });
     expect(h.results).toEqual([
       '【理智检定】爱丽丝（目击旧日支配者）：1d100<=55 → 80，失败，失败：损失 1d6 = 4，SAN 55 → 51',
     ]);
@@ -708,13 +796,14 @@ describe('sanity 闭环（T-M8-04，FR-27，T-M5-08 最后一步）', () => {
         { chunks: [fence(JSON.stringify({ op: 'sanity', target: 'pc:alice', loss: '1d10' }))] },
         { chunks: ['叙事。'] },
       ],
-      { random: seqRandom(30, 2), getBoard: () => boardCoc7() },
+      { random: seqRandom(30, 2) },
+      { board: boardCoc7() },
     );
     await runAiTurn(1, h.ports);
 
-    expect(h.dice[1]!.expr).toBe('1d10'); // KP 指定，非失败档 1d2
+    expect(h.sanityEffects[0]!.lossRoll.expr).toBe('1d10'); // KP 指定，非失败档 1d2
     expect(h.results[0]).toContain('KP 指定损失 1d10 = 2');
-    expect(h.patches[0]!.pcs?.alice?.sheet).toMatchObject({ san: 53 });
+    expect(h.sanityEffects[0]).toMatchObject({ loss: 2, before: 55, after: 53 });
   });
 
   it('损失超过当前 SAN → 扣到 0（clamp，G-M8 门禁项）', async () => {
@@ -723,11 +812,12 @@ describe('sanity 闭环（T-M8-04，FR-27，T-M5-08 最后一步）', () => {
         { chunks: [fence(JSON.stringify({ op: 'sanity', target: 'pc:alice' }))] },
         { chunks: ['叙事。'] },
       ],
-      { random: seqRandom(90, 6), getBoard: () => boardCoc7(3) },
+      { random: seqRandom(90, 6) },
+      { board: boardCoc7(3) },
     );
     await runAiTurn(1, h.ports);
 
-    expect(h.patches[0]!.pcs?.alice?.sheet).toMatchObject({ san: 0 });
+    expect(h.sanityEffects[0]).toMatchObject({ loss: 3, before: 3, after: 0 });
     expect(h.results[0]).toContain('SAN 3 → 0');
   });
 
@@ -737,12 +827,13 @@ describe('sanity 闭环（T-M8-04，FR-27，T-M5-08 最后一步）', () => {
         { chunks: [fence(JSON.stringify({ op: 'sanity', target: 'pc:alice' }))] },
         { chunks: ['叙事。'] },
       ],
-      { getBoard: board5e },
+      {},
+      { board: board5e() },
     );
     await runAiTurn(1, h.ports);
 
     expect(h.dice).toHaveLength(0);
-    expect(h.patches).toHaveLength(0);
+    expect(h.sanityEffects).toHaveLength(0);
     expect(h.alerts[0]).toMatchObject({ code: 'E-AI-01' });
     if (h.alerts[0]) expect(h.alerts[0].message).toContain('不是 COC7 卡');
   });
@@ -761,37 +852,63 @@ describe('sanity 闭环（T-M8-04，FR-27，T-M5-08 最后一步）', () => {
 });
 
 describe('数值效果回注文案（T-M8-03/04）', () => {
-  const hpExec = {
-    ok: true as const,
-    pcName: '爱丽丝',
-    roll: {
-      expr: '1d8+2',
-      raw: '1d8+2',
-      rolls: [[5]],
-      kept: [5],
-      total: 7,
-      check: null,
-    },
-    patch: {},
-    before: 22,
-    after: 15,
-  };
+  const roll = {
+    expr: '1d8+2',
+    raw: '1d8+2',
+    rolls: [[5]],
+    kept: [5],
+    total: 7,
+    check: null,
+  } as unknown as ParsedRoll;
 
-  it('damage/heal 文案：骰式 → 面值 → HP 前后值', () => {
+  it('damage/heal 文案：骰式 → 面值 → HP 前后值（前后值以队列内应用结果为准）', () => {
     expect(
-      effectResultText({ op: 'damage', target: 'pc:alice', expr: '1d8+2', label: '弯刀' }, hpExec),
+      hpResultText(
+        { op: 'damage', target: 'pc:alice', expr: '1d8+2', label: '弯刀' },
+        '爱丽丝',
+        roll,
+        { before: 22, after: 15 },
+      ),
     ).toBe('【伤害】爱丽丝（弯刀）：1d8+2 → 7，HP 22 → 15');
     expect(
-      effectResultText({ op: 'heal', target: 'pc:alice', expr: '1d8+2' }, { ...hpExec, after: 22 }),
+      hpResultText({ op: 'heal', target: 'pc:alice', expr: '1d8+2' }, '爱丽丝', roll, {
+        before: 22,
+        after: 22,
+      }),
     ).toBe('【治疗】爱丽丝：1d8+2 → 7，HP 22 → 22');
   });
 
-  it('失败结果不出文案（调用方只在 ok 分支调用）', () => {
+  it('sanity 文案：检定结果 + 损失表档位 + SAN 前后值', () => {
+    const checkRoll = {
+      expr: '1d100<=55',
+      raw: '1d100<=55',
+      rolls: [[80]],
+      kept: [80],
+      total: 80,
+      check: {
+        rulebook: 'coc7',
+        kind: 'sanity',
+        target: 55,
+        difficulty: 'normal',
+        outcome: 'fail',
+      },
+    } as unknown as ParsedRoll;
+    const applied = {
+      lossRoll: { ...roll, expr: '1d6', total: 4 },
+      loss: 4,
+      before: 55,
+      after: 51,
+      desc: '失败：损失 1d6',
+    };
     expect(
-      effectResultText(
-        { op: 'damage', target: 'pc:alice', expr: '1d8' },
-        { ok: false, code: 'E-AI-01', reason: 'x' },
+      sanityResultText(
+        { op: 'sanity', target: 'pc:alice', label: '目击旧日支配者' },
+        '爱丽丝',
+        checkRoll,
+        applied,
       ),
-    ).toBe('');
+    ).toBe(
+      '【理智检定】爱丽丝（目击旧日支配者）：1d100<=55 → 80，失败，失败：损失 1d6 = 4，SAN 55 → 51',
+    );
   });
 });

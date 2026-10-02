@@ -1,0 +1,12 @@
+{
+  "id": "fogbridge-5e",
+  "name": "雾桥驿站",
+  "version": "1.0.0",
+  "rulebook": "dnd5e",
+  "apiVersion": "1",
+  "entry": {
+    "kpCard": "kp-card.json",
+    "worldBook": "worldbook.json",
+    "initState": "init-state.json"
+  }
+}

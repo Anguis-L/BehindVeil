@@ -34,6 +34,7 @@ import type { DirectiveScanEvent } from '../domain/ai-directive/scan.js';
 import { runAiTurn } from '../domain/ai-directive/loop.js';
 import type { LlmAdapter } from '../domain/llm.js';
 import { applyStatePatch, readStateBoard, saveStateBoard } from '../domain/stateboard/board.js';
+import { hpPatch, sanityLossPatch } from '../domain/stateboard/engine-writes.js';
 import { createStateBoardRoster } from '../domain/stateboard/roster.js';
 import { loadModule } from '../domain/module/library.js';
 import { appendMessage, readMessagesAfter } from '../domain/session/messages.js';
@@ -895,35 +896,101 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
         const chat = session
           ? { ...baseChat, temperature: session.settings.temperature }
           : baseChat;
+        // 规则书随会话（T-M7-04）：AI 检定骰、玩家骰与引擎写路径的损失表共用同一套判定
+        const sessionRulebook = sessionRuleBook(session);
         await runAiTurn(triggerSeq, {
           llm: instrumentLlm(llm, sessionId),
           chat,
           // 真实名册（T-M5-04）：按本会话状态板取技能值（含 roster 声明装配的初始板）
           roster: createStateBoardRoster(stateBoards.get(sessionId)),
-          // 数值效果（T-M8-03/04）：damage/heal/sanity 的取值源与写板目标
+          // 数值效果（T-M8-03/04）：取值源与写板目标
           getBoard: () => stateBoards.get(sessionId),
-          applyEnginePatch: async (patch) => {
+          // 引擎写板在房间队列内对**当前板**现算（同一轮多条效果依次累加，不吃过期快照）；
+          // 乐观锁冲突（Host 编辑抢先）→ 广播最新版对齐 + KP 告警，效果丢弃
+          applyHpEffect: async (key, kind, roll) => {
+            let applied: { before: number; after: number } | null = null;
             await enqueue(roomId, async () => {
-              const board = stateBoards.get(sessionId);
-              if (!board) return;
-              const result = applyStatePatch(board, patch, board.version);
-              if (!result.ok) {
-                // Host 编辑抢先：引擎写入乐观锁冲突——广播最新版对齐，本次效果丢弃（KP 告警可重试）
+              const board = await boardFor(roomId, sessionId);
+              const produced = hpPatch(board, key, kind, roll);
+              if (!produced.ok) return;
+              const pc = board.pcs[key];
+              if (!pc || pc.sheet.rulebook !== 'dnd5e') return;
+              const lock = applyStatePatch(board, produced.patch, board.version);
+              if (!lock.ok) {
                 for (const socketId of alertTargets()) {
                   emitError(io.to(socketId), 'E-ST-01', '引擎写状态板时版本冲突，本次效果未落盘');
                 }
                 emitChecked(io.to(`room:${roomId}`), 'state:broadcast', {
-                  stateBoard: result.current,
+                  stateBoard: lock.current,
                 });
                 return;
               }
-              stateBoards.set(sessionId, result.next);
-              await saveStateBoard(layout, roomId, sessionId, result.next);
-              emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: result.next });
+              const before = pc.sheet.hp.current;
+              const after = lock.next.pcs[key]?.sheet;
+              if (!after || after.rulebook !== 'dnd5e') return;
+              stateBoards.set(sessionId, lock.next);
+              await saveStateBoard(layout, roomId, sessionId, lock.next);
+              emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: lock.next });
+              applied = { before, after: after.hp.current };
             });
+            return applied;
+          },
+          applySanityEffect: async (key, sanRoll, lossHint, random) => {
+            let applied: {
+              lossRoll: ParsedRoll;
+              loss: number;
+              before: number;
+              after: number;
+              desc: string;
+            } | null = null;
+            await enqueue(roomId, async () => {
+              const board = await boardFor(roomId, sessionId);
+              const pc = board.pcs[key];
+              if (!pc || pc.sheet.rulebook !== 'coc7' || !sessionRulebook.sanityRule) return;
+              // 损失表档位以**当前 SAN** 为判定目标（同一轮多次理智检定逐条基于最新值）
+              const tier = sessionRulebook.sanityRule(sanRoll, pc.sheet.san);
+              const lossExpr = lossHint ?? tier.loss;
+              const lossRoll = rollDice(lossExpr, {
+                random: random ?? createCsprngRandom(),
+                rulebook: sessionRulebook,
+              });
+              const produced = sanityLossPatch(board, key, sanRoll, lossRoll, sessionRulebook);
+              if (!produced.ok) return;
+              // 损失骰 DiceMsg：审计先行（已在队列内，直接 recordDice，不再嵌套入队）
+              const diceRoll = await recordDice(roomId, sessionId, lossRoll, { hidden: false });
+              const lock = applyStatePatch(board, produced.patch, board.version);
+              if (!lock.ok) {
+                for (const socketId of alertTargets()) {
+                  emitError(io.to(socketId), 'E-ST-01', '引擎写状态板时版本冲突，本次效果未落盘');
+                }
+                emitChecked(io.to(`room:${roomId}`), 'state:broadcast', {
+                  stateBoard: lock.current,
+                });
+                return;
+              }
+              const before = pc.sheet.san;
+              stateBoards.set(sessionId, lock.next);
+              await saveStateBoard(layout, roomId, sessionId, lock.next);
+              await persistAndDeliver(roomId, sessionId, {
+                type: 'dice',
+                roll: diceRoll,
+                hidden: false,
+              });
+              emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: lock.next });
+              const after = lock.next.pcs[key]?.sheet;
+              if (!after || after.rulebook !== 'coc7') return;
+              applied = {
+                lossRoll,
+                loss: produced.loss,
+                before,
+                after: after.san,
+                desc: lossHint ? `KP 指定损失 ${lossExpr}` : tier.desc,
+              };
+            });
+            return applied;
           },
           // 规则书随会话（T-M7-04）：AI 检定骰与玩家骰走同一套判定
-          rulebook: sessionRuleBook(session),
+          rulebook: sessionRulebook,
           tracker,
           buildMessages: async () => (await buildPreviewTrace(layout, roomId, sessionId)).messages,
           emitDice: async (roll) => {

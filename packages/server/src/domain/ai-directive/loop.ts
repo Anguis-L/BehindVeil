@@ -1,18 +1,11 @@
-import type { ErrorCode, RollCheck, StateBoard, StatePatch } from '@behindveil/shared';
+import type { ErrorCode, RollCheck, StateBoard } from '@behindveil/shared';
 import type { ParsedRoll } from '../dice/evaluator.js';
 // 缺省 CSPRNG 由 executeCheck 兜底（executor.ts），本层只透传测试注入的确定性源
 import type { RandomSource } from '../dice/random.js';
 import type { LlmAdapter, LlmMessage } from '../llm.js';
 import type { RuleBook } from '../rulebook/types.js';
 import type { DirectiveSuccessTracker } from './degrade.js';
-import {
-  executeCheck,
-  executeHp,
-  executeSanity,
-  type HpExecution,
-  type PcRoster,
-  type SanityExecution,
-} from './executor.js';
+import { executeCheck, executeHp, executeSanity, type PcRoster } from './executor.js';
 import type { CheckDirective, DamageDirective, HealDirective, SanityDirective } from './schema.js';
 import { DirectiveStreamScanner, type DirectiveScanEvent } from './scan.js';
 
@@ -62,10 +55,35 @@ export interface AiTurnPorts {
   random?: RandomSource;
   /** R-01 滑动窗口（跨回合共享，挂在房间/会话上） */
   tracker: DirectiveSuccessTracker;
-  /** 当前会话状态板（T-M8-03/04 数值效果取值与写板的权威源）；未开团/未载入为 undefined */
+  /** 当前会话状态板（T-M8-03/04 数值效果取值的权威源）；未开团/未载入为 undefined */
   getBoard(): StateBoard | undefined;
-  /** 引擎写路径落盘：乐观锁 applyStatePatch → save → state:broadcast（网关装配，房间队列内） */
-  applyEnginePatch(patch: StatePatch): Promise<void>;
+  /**
+   * 引擎写路径（T-M8-03）：伤害/治疗——在房间队列内对**当前板**现算 clamp patch 并
+   * 乐观锁落盘广播。同一轮多条效果指令依次基于最新板累加；返回 null = 板侧拒绝
+   * （目标被移除等罕见态），调用方告警。应用先于回注：文案里的 HP 前后值以应用结果为准。
+   */
+  applyHpEffect(
+    key: string,
+    kind: 'damage' | 'heal',
+    roll: ParsedRoll,
+  ): Promise<{ before: number; after: number } | null>;
+  /**
+   * 引擎写路径（T-M8-04）：理智——损失表档位以**当前 SAN** 为判定目标，损失骰在
+   * 队列内对当前板现算扣减；KP 显式 lossHint 覆盖房规表（仍服务端掷）。损失骰的
+   * DiceMsg 落盘广播由本端口一并完成（审计先行），返回 null = 板侧拒绝。
+   */
+  applySanityEffect(
+    key: string,
+    sanRoll: number,
+    lossHint: string | undefined,
+    random?: RandomSource,
+  ): Promise<{
+    lossRoll: ParsedRoll;
+    loss: number;
+    before: number;
+    after: number;
+    desc: string;
+  } | null>;
   /** 组装当前 prompt：读盘消息 → 管线 → LlmMessage[]（每请求重建，回注自动入上下文） */
   buildMessages(): Promise<LlmMessage[]>;
   /** 持久化 + 广播 DiceMsg（房间串行队列内，TDD §5.4） */
@@ -176,28 +194,72 @@ export async function runAiTurn(triggerSeq: number, ports: AiTurnPorts): Promise
             effects.push(ports.emitDirectiveResult(text));
           }
         } else {
-          // 数值效果（T-M8-03/04）：damage/heal/sanity——服务端掷骰 → DiceMsg →
-          // 引擎写板（乐观锁落盘 + state:broadcast）→ 回注。失败同样计 R-01。
+          // 数值效果（T-M8-03/04）：damage/heal/sanity——服务端掷骰（防呆校验先行）→
+          // 队列内对当前板现算写板（乐观锁落盘 + state:broadcast）→ 回注。失败同样计 R-01。
+          const directive = ev.directive;
           const deps = {
             board: ports.getBoard(),
             rulebook: ports.rulebook,
             random: ports.random,
           };
-          const result =
-            ev.directive.op === 'sanity'
-              ? executeSanity(ev.directive, deps)
-              : executeHp(ev.directive, deps);
-          if (!result.ok) {
-            ports.tracker.record(false);
-            failedHere = true;
-            ports.alertKp(result.code, result.reason);
-          } else {
+          const recordOk = (): void => {
             ports.tracker.record(true);
             executed += 1;
             executedHere += 1;
-            for (const roll of effectRolls(result)) effects.push(ports.emitDice(roll));
-            effects.push(ports.emitDirectiveResult(effectResultText(ev.directive, result)));
-            effects.push(ports.applyEnginePatch(result.patch));
+          };
+          const recordFail = (reason: string): void => {
+            ports.tracker.record(false);
+            failedHere = true;
+            ports.alertKp('E-AI-01', reason);
+          };
+
+          if (directive.op === 'sanity') {
+            const result = executeSanity(directive, deps);
+            if (!result.ok) {
+              recordFail(result.reason);
+            } else {
+              recordOk();
+              // 检定骰广播 → 队列内查损失表掷损失骰并写板 → 回注（前后值依应用结果）
+              effects.push(
+                (async () => {
+                  await ports.emitDice(result.checkRoll);
+                  const applied = await ports.applySanityEffect(
+                    result.key,
+                    result.checkRoll.total,
+                    directive.loss,
+                    ports.random,
+                  );
+                  if (!applied) {
+                    ports.alertKp('E-AI-01', '状态板写入失败，本次理智效果未落盘');
+                    return;
+                  }
+                  await ports.emitDirectiveResult(
+                    sanityResultText(directive, result.pcName, result.checkRoll, applied),
+                  );
+                })(),
+              );
+            }
+          } else {
+            const result = executeHp(directive, deps);
+            if (!result.ok) {
+              recordFail(result.reason);
+            } else {
+              recordOk();
+              // 效果骰广播（audit-first）→ 队列内现算写板 → 回注
+              effects.push(
+                (async () => {
+                  await ports.emitDice(result.roll);
+                  const applied = await ports.applyHpEffect(result.key, directive.op, result.roll);
+                  if (!applied) {
+                    ports.alertKp('E-AI-01', '状态板写入失败，本次效果未落盘');
+                    return;
+                  }
+                  await ports.emitDirectiveResult(
+                    hpResultText(directive, result.pcName, result.roll, applied),
+                  );
+                })(),
+              );
+            }
           }
         }
       } else {
@@ -266,29 +328,31 @@ export function directiveResultText(
   return `【检定】${pcName} ${directive.skill}${label}：${roll.expr} → ${roll.total}${verdict}`;
 }
 
-/** 效果骰清单：sanity 是检定骰 + 损失骰两颗，damage/heal 一颗（仅 ok 结果调用） */
-function effectRolls(exec: HpExecution | SanityExecution): ParsedRoll[] {
-  if (!exec.ok) return [];
-  return 'checkRoll' in exec ? [exec.checkRoll, exec.lossRoll] : [exec.roll];
-}
-
-/** 数值效果回注文案（T-M8-03/04）：骰式、面值与 HP/SAN 前后变化（人类可读审计链） */
-export function effectResultText(
-  directive: DamageDirective | HealDirective | SanityDirective,
-  exec: HpExecution | SanityExecution,
+/** 伤害/治疗回注文案（T-M8-03）：骰式、面值与 HP 前后变化（前后值以队列内应用结果为准） */
+export function hpResultText(
+  directive: DamageDirective | HealDirective,
+  pcName: string,
+  roll: ParsedRoll,
+  applied: { before: number; after: number },
 ): string {
-  if (!exec.ok) return '';
-  if ('checkRoll' in exec) {
-    const label = directive.label ? `（${directive.label}）` : '';
-    const verdict = exec.checkRoll.check ? `，${outcomeText(exec.checkRoll.check)}` : '';
-    return (
-      `【理智检定】${exec.pcName}${label}：${exec.checkRoll.expr} → ${exec.checkRoll.total}${verdict}，` +
-      `${exec.desc} = ${exec.lossRoll.total}，SAN ${exec.before} → ${exec.after}`
-    );
-  }
   const kind = directive.op === 'damage' ? '伤害' : '治疗';
   const label = directive.label ? `（${directive.label}）` : '';
-  return `【${kind}】${exec.pcName}${label}：${exec.roll.expr} → ${exec.roll.total}，HP ${exec.before} → ${exec.after}`;
+  return `【${kind}】${pcName}${label}：${roll.expr} → ${roll.total}，HP ${applied.before} → ${applied.after}`;
+}
+
+/** 理智回注文案（T-M8-04）：检定结果 + 损失表档位 + SAN 前后变化 */
+export function sanityResultText(
+  directive: SanityDirective,
+  pcName: string,
+  checkRoll: ParsedRoll,
+  applied: { lossRoll: ParsedRoll; loss: number; before: number; after: number; desc: string },
+): string {
+  const label = directive.label ? `（${directive.label}）` : '';
+  const verdict = checkRoll.check ? `，${outcomeText(checkRoll.check)}` : '';
+  return (
+    `【理智检定】${pcName}${label}：${checkRoll.expr} → ${checkRoll.total}${verdict}，` +
+    `${applied.desc} = ${applied.lossRoll.total}，SAN ${applied.before} → ${applied.after}`
+  );
 }
 
 function outcomeText(check: RollCheck): string {

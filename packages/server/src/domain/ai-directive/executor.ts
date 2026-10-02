@@ -1,11 +1,10 @@
-import type { StateBoard, StatePatch } from '@behindveil/shared';
+import type { StateBoard } from '@behindveil/shared';
 import type { ParsedRoll } from '../dice/evaluator.js';
 import { rollDice } from '../dice/evaluator.js';
 import { createCsprngRandom, type RandomSource } from '../dice/random.js';
 import { DiceExpressionError, parseDiceExpr } from '../dice/parser.js';
 import { DND5E_DEFAULT_DC, createRuleBook } from '../rulebook/index.js';
 import type { RuleBook } from '../rulebook/types.js';
-import { hpPatch, sanityLossPatch } from '../stateboard/engine-writes.js';
 import { resolvePc } from '../stateboard/roster.js';
 import type { CheckDirective, DamageDirective, HealDirective, SanityDirective } from './schema.js';
 
@@ -102,19 +101,18 @@ export type HpExecution =
   | {
       ok: true;
       pcName: string;
+      /** 目标在状态板内的键（引擎写板按此定位） */
+      key: string;
       /** 服务端掷出的效果骰（无判定后缀 → check=null，与检定骰同一审计通道） */
       roll: ParsedRoll;
-      /** 引擎写路径产物（clamp 0..max），调用方经乐观锁端口落盘广播 */
-      patch: StatePatch;
-      before: number;
-      after: number;
     }
   | { ok: false; code: 'E-AI-01'; reason: string };
 
 /**
  * 伤害/治疗执行器（FR-25）：AI 只传表达式与目标，面值由服务端 CSPRNG 掷出；
- * HP 由引擎写路径 clamp 到 [0, max]。COC 卡（无 hp.max/current 结构）在掷骰前即拒
- * （E-AI-01 防呆，设计 §5.4 第 5 步），不产生任何骰值。
+ * HP 写入由网关在房间队列内对**当前板**现算 clamp（同一轮多条效果指令依次累加，
+ * 不吃前条效果落盘前的过期快照）。此处只做防呆校验 + 掷骰：COC 卡（无 hp.max/current
+ * 结构）在掷骰前即拒（E-AI-01 防呆，设计 §5.4 第 5 步），不产生任何骰值。
  */
 export function executeHp(
   directive: DamageDirective | HealDirective,
@@ -152,52 +150,26 @@ export function executeHp(
     }
     throw err;
   }
-
-  const result = hpPatch(board, resolved.key, directive.op, roll);
-  if (!result.ok) {
-    return {
-      ok: false,
-      code: 'E-AI-01',
-      reason:
-        result.reason === 'rulebook-mismatch'
-          ? `${sheet.playerName} 的角色卡不支持 HP 写入`
-          : `名册查无 PC：${directive.target}`,
-    };
-  }
-  const after =
-    directive.op === 'damage'
-      ? sheet.hp.current - result.applied
-      : sheet.hp.current + result.applied;
-  return {
-    ok: true,
-    pcName: sheet.playerName,
-    roll,
-    patch: result.patch,
-    before: sheet.hp.current,
-    after,
-  };
+  return { ok: true, pcName: sheet.playerName, key: resolved.key, roll };
 }
 
 export type SanityExecution =
   | {
       ok: true;
       pcName: string;
+      /** 目标在状态板内的键 */
+      key: string;
       /** SAN 检定骰（1d100<=san，判定交规则书） */
       checkRoll: ParsedRoll;
-      /** 损失骰（房规损失表表达式或 KP 指定表达式，服务端掷） */
-      lossRoll: ParsedRoll;
-      patch: StatePatch;
-      before: number;
-      after: number;
-      /** 检定档位描述（房规表 desc）；KP 显式指定损失时为「KP 指定损失 …」 */
-      desc: string;
     }
   | { ok: false; code: 'E-AI-01'; reason: string };
 
 /**
- * 理智检定执行器（FR-27，v1 欠账 b 的接线）：先掷 SAN 检定（判定交规则书），
- * 再按房规损失表（或 KP 显式表达式）掷损失骰，引擎写路径扣 SAN（clamp 0）。
- * 仅 COC7 卡 + 有 sanityRule 能力的规则书；其余组合掷骰前即拒（E-AI-01 防呆）。
+ * 理智检定执行器（FR-27，v1 欠账 b 的接线）：掷 SAN 检定（判定交规则书）。
+ * 损失表档位与 SAN 扣减在网关队列内对**当前板**现算（sanityRule 的档位以当前 SAN
+ * 为判定目标——同一轮多次理智检定必须逐条基于最新值）；KP 显式 loss 表达式随端口
+ * 透传，仍由服务端掷骰。仅 COC7 卡 + 有 sanityRule 能力的规则书，掷骰前即拒
+ * （E-AI-01 防呆）。
  */
 export function executeSanity(
   directive: SanityDirective,
@@ -223,29 +195,5 @@ export function executeSanity(
 
   const random = deps.random ?? createCsprngRandom();
   const checkRoll = rollDice(`1d100<=${sheet.san}`, { random, rulebook, kind: 'sanity' });
-  const table = rulebook.sanityRule(checkRoll.total, sheet.san);
-  const lossExpr = directive.loss ?? table.loss;
-  const lossRoll = rollDice(lossExpr, { random, rulebook });
-
-  const patched = sanityLossPatch(board, resolved.key, checkRoll.total, lossRoll, rulebook);
-  if (!patched.ok) {
-    return {
-      ok: false,
-      code: 'E-AI-01',
-      reason:
-        patched.reason === 'sanity-rule-missing'
-          ? '规则书不支持理智检定（无 sanityRule）'
-          : `名册查无 PC：${directive.target}`,
-    };
-  }
-  return {
-    ok: true,
-    pcName: sheet.playerName,
-    checkRoll,
-    lossRoll,
-    patch: patched.patch,
-    before: sheet.san,
-    after: sheet.san - patched.loss,
-    desc: directive.loss ? `KP 指定损失 ${lossExpr}` : table.desc,
-  };
+  return { ok: true, pcName: sheet.playerName, key: resolved.key, checkRoll };
 }

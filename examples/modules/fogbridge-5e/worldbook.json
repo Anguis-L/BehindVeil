@@ -1,0 +1,98 @@
+{
+  "entries": [
+    {
+      "uid": 1,
+      "key": ["驿站", "梅姐", "老板娘", "大堂"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【场景锚】雾桥驿站：商路要冲的唯一客栈，两层木楼，下层是酒馆大堂。老板娘梅姐，四十上下，臂力惊人，消息灵通；驿丁小六胆子小但腿脚快；药师贺先生借住于此，沉默寡言。今日入住的旅人不多，人人都在议论断桥与失窃。",
+      "position": "before_char",
+      "order": 10,
+      "constant": true,
+      "disabled": false
+    },
+    {
+      "uid": 2,
+      "key": ["横梁", "断桥", "桥塌", "清障", "挪开", "推开石块"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【机制提示：属性检定】坍塌的横梁堵死正门。让人徒手挪开属力量检定：```aidle {\"op\":\"check\",\"target\":\"pc:<标识>\",\"skill\":\"力量\",\"difficulty\":\"hard\",\"label\":\"挪开横梁\"}``` 成功则正门清开；失败可让旁人接力（再检定一次），或引导他们去后门（无需检定）。",
+      "position": "before_char",
+      "order": 20,
+      "constant": false,
+      "disabled": false,
+      "extensions": { "kpOnly": true }
+    },
+    {
+      "uid": 3,
+      "key": ["失窃", "货物", "货栈", "勘查", "调查", "脚印", "线索"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【机制提示：技能检定】货栈有翻动痕迹。勘查现场属调查检定：```aidle {\"op\":\"check\",\"target\":\"pc:<标识>\",\"skill\":\"调查\",\"difficulty\":\"normal\",\"label\":\"勘查失窃现场\"}``` 成功发现：窃贼不是人——窗框上留着深达半寸的爪痕，货物只丢了腌肉和腊肉。",
+      "position": "before_char",
+      "order": 21,
+      "constant": false,
+      "disabled": false,
+      "extensions": { "kpOnly": true }
+    },
+    {
+      "uid": 4,
+      "key": ["酒", "喝", "干杯", "敬", "梅姐请"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【机制提示：豁免检定】梅姐的接风酒烈得呛人。玩家角色豪饮后让 ta 撑住：```aidle {\"op\":\"check\",\"target\":\"pc:<标识>\",\"skill\":\"体质\",\"kind\":\"save\",\"difficulty\":\"normal\",\"label\":\"烈酒的考验\"}``` 失败只是当场面红耳赤、言语失态（叙事后果，不扣血），并让在场旅人 ta 高看或看轻一眼。",
+      "position": "before_char",
+      "order": 22,
+      "constant": false,
+      "disabled": false,
+      "extensions": { "kpOnly": true }
+    },
+    {
+      "uid": 5,
+      "key": ["夜嚎兽", "兽嚎", "袭击", "扑来", "战斗", "迎击", "挥斧", "开弓"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【机制提示：攻击与伤害】夜里山中有「夜嚎兽」（原创生物：体型似狼而壮，颈背长有骨脊，嚎声能穿雾，怕火光）袭击驿站。玩家反击用攻击检定：```aidle {\"op\":\"check\",\"target\":\"pc:<标识>\",\"skill\":\"力量\",\"kind\":\"attack\",\"dc\":13,\"label\":\"劈向夜嚎兽\"}```（敏捷武器把 skill 换成「敏捷」）。命中后用伤害指令掷武器骰：```aidle {\"op\":\"damage\",\"target\":\"pc:<标识>\",\"expr\":\"1d8+2\",\"label\":\"斧刃劈中\"}```。夜嚎兽咬中玩家时同样走 damage（expr 2d6+2，label 夜嚎兽的咬击）。",
+      "position": "before_char",
+      "order": 23,
+      "constant": false,
+      "disabled": false,
+      "extensions": { "kpOnly": true }
+    },
+    {
+      "uid": 6,
+      "key": ["药膏", "治疗", "包扎", "贺先生", "药师", "伤"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【机制提示：治疗】药师贺先生有祖传药膏。给伤者上药走治疗指令：```aidle {\"op\":\"heal\",\"target\":\"pc:<标识>\",\"expr\":\"2d4+2\",\"label\":\"贺先生的药膏\"}``` 一晚限一次；重伤者需要长休（叙事处理，次日回满）。",
+      "position": "before_char",
+      "order": 24,
+      "constant": false,
+      "disabled": false,
+      "extensions": { "kpOnly": true }
+    },
+    {
+      "uid": 7,
+      "key": ["浓雾", "高处", "高台", "爬上", "隐蔽", "潜行", "优势", "劣势"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【战术环境：优势与劣势】柴房顶的高台视野开阔——从高台攻击可获得**优势**：玩家手掷骰时在骰式末尾加 adv（如 `.r 1d20+3>=13 adv`，服务端展开为 2d20kh1）。浓雾中潜行则处于**劣势**，骰式末尾加 dis（2d20kl1）。KP 叙事时明确告知玩家当前处于优势还是劣势。",
+      "position": "before_char",
+      "order": 25,
+      "constant": false,
+      "disabled": false
+    },
+    {
+      "uid": 8,
+      "key": ["后门", "厨房", "货栈外", "院里"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【备用路线】正门堵死时，厨房后门通向院子，仅容侧身而过（无需检定，但要弯腰慢行）。院子里堆着柴垛，可登上柴房顶高台。",
+      "position": "before_char",
+      "order": 26,
+      "constant": false,
+      "disabled": false,
+      "extensions": { "kpOnly": true }
+    }
+  ]
+}
