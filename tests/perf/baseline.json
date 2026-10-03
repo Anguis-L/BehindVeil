@@ -1,0 +1,19 @@
+{
+  "specVersion": 1,
+  "recordedAt": "2026-10-03T13:42:57.983Z",
+  "machine": {
+    "platform": "win32",
+    "arch": "x64",
+    "cpuModel": "11th Gen Intel(R) Core(TM) i7-11370H @ 3.30GHz",
+    "cpuCount": 8,
+    "nodeMajor": 24
+  },
+  "metrics": {
+    "scan_batch_ms": 20.029999999998836,
+    "pipeline_batch_ms": 11.448499999998603,
+    "first_token_p50_ms": 15.609800000000178,
+    "soak_msgs_total": 18,
+    "soak_rss_growth_mb": 0.1692708333333286,
+    "backup_fsync_p99_delta_ms": 0
+  }
+}

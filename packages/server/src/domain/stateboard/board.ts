@@ -1,5 +1,5 @@
 import { StateBoardSchema, type StateBoard, type StatePatch } from '@behindveil/shared';
-import { JsonStore } from '../../adapters/storage/json-store.js';
+import { ArchiveJsonStore } from '../../adapters/storage/archive-store.js';
 import type { DataLayout } from '../../adapters/storage/layout.js';
 
 /**
@@ -29,8 +29,10 @@ export async function readStateBoard(
   roomId: string,
   sessionId: string,
 ): Promise<StateBoard> {
-  // JsonStore 对损坏 JSON 抛错（由调用方降级）：状态板挂掉不该挡预览与写路径，空板兜底
-  const raw = await new JsonStore(layout.stateFile(roomId, sessionId)).read().catch(() => null);
+  // 版本不符/损坏 JSON 抛错（由调用方降级）：状态板挂掉不该挡预览与写路径，空板兜底
+  const raw = await new ArchiveJsonStore(layout.stateFile(roomId, sessionId), 'state')
+    .read()
+    .catch(() => null);
   const parsed = StateBoardSchema.safeParse(raw);
   return parsed.success ? parsed.data : emptyStateBoard();
 }
@@ -41,7 +43,7 @@ export async function saveStateBoard(
   sessionId: string,
   board: StateBoard,
 ): Promise<void> {
-  await new JsonStore(layout.stateFile(roomId, sessionId)).write(board);
+  await new ArchiveJsonStore(layout.stateFile(roomId, sessionId), 'state').write(board);
 }
 
 export type StatePatchResult =

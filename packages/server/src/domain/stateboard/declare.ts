@@ -1,6 +1,6 @@
 import { PCSheetSchema } from '@behindveil/shared';
 import { z } from 'zod';
-import { JsonStore } from '../../adapters/storage/json-store.js';
+import { ArchiveJsonStore } from '../../adapters/storage/archive-store.js';
 import type { DataLayout } from '../../adapters/storage/layout.js';
 
 /**
@@ -27,7 +27,9 @@ export type RoomRoster = z.infer<typeof RoomRosterSchema>;
 
 /** 缺失或损坏时以空名册兜底（声明属准备态，坏文件不应挡住开团） */
 export async function readRoomRoster(layout: DataLayout, roomId: string): Promise<RoomRoster> {
-  const raw = await new JsonStore(layout.rosterFile(roomId)).read().catch(() => null);
+  const raw = await new ArchiveJsonStore(layout.rosterFile(roomId), 'roster')
+    .read()
+    .catch(() => null);
   return parseRoster(raw);
 }
 
@@ -43,7 +45,7 @@ export async function declarePc(
   memberId: string,
   declared: DeclaredPc,
 ): Promise<RoomRoster> {
-  return new JsonStore(layout.rosterFile(roomId)).update((current) => {
+  return new ArchiveJsonStore(layout.rosterFile(roomId), 'roster').update((current) => {
     const roster = parseRoster(current);
     roster.pcs[memberId] = declared;
     return RoomRosterSchema.parse(roster);
@@ -56,7 +58,7 @@ export async function undeclarePc(
   memberId: string,
 ): Promise<boolean> {
   let removed = false;
-  await new JsonStore(layout.rosterFile(roomId)).update((current) => {
+  await new ArchiveJsonStore(layout.rosterFile(roomId), 'roster').update((current) => {
     const roster = parseRoster(current);
     if (roster.pcs[memberId] === undefined) return roster;
     delete roster.pcs[memberId];

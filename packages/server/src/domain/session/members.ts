@@ -1,5 +1,5 @@
 import { MemberSchema, type Member, type MemberRole } from '@behindveil/shared';
-import { JsonStore } from '../../adapters/storage/json-store.js';
+import { ArchiveJsonStore } from '../../adapters/storage/archive-store.js';
 import type { DataLayout } from '../../adapters/storage/layout.js';
 import { generateMemberId } from './ids.js';
 
@@ -8,11 +8,17 @@ import { generateMemberId } from './ids.js';
  *
  * 并发：同一进程内多玩家同时进房会并发触发 addMember（跨 await 的读改写），
  * 该操作已收进 JsonStore.update() 的文件锁内；其余调用只读或整写，无需额外保护。
+ * 存档版本化（T-M10-01）：经 ArchiveJsonStore 读写，v1 起落盘为
+ * `{ schemaVersion, members: [...] }`（v0 为裸数组，由 aidle-migrate 迁移）。
  */
+
+function membersStore(layout: DataLayout, roomId: string): ArchiveJsonStore {
+  return new ArchiveJsonStore(layout.membersFile(roomId), 'members');
+}
 
 /** members.json 缺失（未有人进房）或损坏时按空名单处理（损坏告警由启动恢复覆盖 room 级） */
 export async function readMembers(layout: DataLayout, roomId: string): Promise<Member[]> {
-  const json = await new JsonStore(layout.membersFile(roomId)).read();
+  const json = await membersStore(layout, roomId).read();
   return parseMembers(json);
 }
 
@@ -32,7 +38,7 @@ export async function saveMembers(
   roomId: string,
   members: Member[],
 ): Promise<void> {
-  await new JsonStore(layout.membersFile(roomId)).write(members);
+  await membersStore(layout, roomId).write(members);
 }
 
 export async function findMember(
@@ -61,7 +67,7 @@ export async function addMember(
     joinedAt: new Date().toISOString(),
   };
   // 读改写整段进锁：两玩家同时进房也不会互相覆盖（2026-09-25 代码审查修复）
-  await new JsonStore(layout.membersFile(roomId)).update((current) => {
+  await membersStore(layout, roomId).update((current) => {
     const members = parseMembers(current);
     members.push(member);
     return members;
@@ -76,7 +82,7 @@ export async function updateMemberRole(
   memberId: string,
   role: MemberRole,
 ): Promise<void> {
-  await new JsonStore(layout.membersFile(roomId)).update((current) => {
+  await membersStore(layout, roomId).update((current) => {
     const members = parseMembers(current);
     return members.map((m) => (m.id === memberId ? { ...m, role } : m));
   });

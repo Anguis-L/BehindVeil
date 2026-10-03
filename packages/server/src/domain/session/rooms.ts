@@ -1,6 +1,6 @@
 import { RoomSchema, type Room, type SessionSettings } from '@behindveil/shared';
 import { z } from 'zod';
-import { JsonStore } from '../../adapters/storage/json-store.js';
+import { ArchiveJsonStore } from '../../adapters/storage/archive-store.js';
 import type { DataLayout } from '../../adapters/storage/layout.js';
 import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
@@ -13,6 +13,7 @@ import { generateHostToken, generateInviteCode, generateRoomId } from './ids.js'
  */
 
 const RoomFileSchema = RoomSchema.extend({ hostToken: z.string() });
+export { RoomFileSchema };
 export type RoomFile = z.infer<typeof RoomFileSchema>;
 
 export function toPublicRoom(file: RoomFile): Room {
@@ -44,12 +45,12 @@ export async function createRoom(layout: DataLayout, input: CreateRoomInput): Pr
 }
 
 export async function saveRoomFile(layout: DataLayout, room: RoomFile): Promise<void> {
-  await new JsonStore(layout.roomFile(room.id)).write(room);
+  await new ArchiveJsonStore(layout.roomFile(room.id), 'room').write(room);
 }
 
 /** 缺失或校验失败一律返回 null（损坏文件的告警由启动恢复负责） */
 export async function readRoomFile(layout: DataLayout, roomId: string): Promise<RoomFile | null> {
-  const json = await new JsonStore(layout.roomFile(roomId)).read();
+  const json = await new ArchiveJsonStore(layout.roomFile(roomId), 'room').read();
   if (json === null) return null;
   const parsed = RoomFileSchema.safeParse(json);
   return parsed.success ? parsed.data : null;

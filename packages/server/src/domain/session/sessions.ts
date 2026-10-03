@@ -9,7 +9,7 @@ import {
 } from '@behindveil/shared';
 import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
-import { JsonStore } from '../../adapters/storage/json-store.js';
+import { ArchiveJsonStore } from '../../adapters/storage/archive-store.js';
 import type { DataLayout } from '../../adapters/storage/layout.js';
 import { readRoomRoster } from '../stateboard/declare.js';
 import { readRoomFile, saveRoomFile } from './rooms.js';
@@ -30,7 +30,7 @@ export interface CreateSessionInput {
 }
 
 async function saveSession(layout: DataLayout, roomId: string, session: Session): Promise<void> {
-  await new JsonStore(layout.sessionFile(roomId, session.id)).write(session);
+  await new ArchiveJsonStore(layout.sessionFile(roomId, session.id), 'session').write(session);
 }
 
 /**
@@ -81,7 +81,7 @@ export async function createSession(
     facts: input.initState?.facts ?? [],
     updatedAt: now,
   });
-  await new JsonStore(layout.stateFile(roomId, session.id)).write(stateBoard);
+  await new ArchiveJsonStore(layout.stateFile(roomId, session.id), 'state').write(stateBoard);
 
   room.activeSessionId = session.id;
   await saveRoomFile(layout, room);
@@ -93,7 +93,7 @@ export async function readSession(
   roomId: string,
   sessionId: string,
 ): Promise<Session | null> {
-  const json = await new JsonStore(layout.sessionFile(roomId, sessionId)).read();
+  const json = await new ArchiveJsonStore(layout.sessionFile(roomId, sessionId), 'session').read();
   if (json === null) return null;
   const parsed = SessionSchema.safeParse(json);
   return parsed.success ? parsed.data : null;

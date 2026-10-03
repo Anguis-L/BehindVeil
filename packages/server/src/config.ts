@@ -50,6 +50,14 @@ export interface AppConfig {
    * 必须携带 X-Admin-Token 头；未设置则不启用（零配置，依托网络边界）。
    */
   adminToken: string | undefined;
+  /**
+   * 热备目标目录（T-M10-02，FR-31）：仅来自环境变量 AIDLE_BACKUP_DIR（目录位置属
+   * 部署环境，不放 config.yaml）；未设置 = 热备关闭（行为 = v2.0，NFR-11 包线）。
+   * 必须指向 data/ 之外（指向内部会在构造时被拒绝）。
+   */
+  backupDir: string | undefined;
+  /** 热备同步周期 ms（AIDLE_BACKUP_INTERVAL_MS，默认 60s；测试/运维可调） */
+  backupIntervalMs: number;
 }
 
 export function loadConfig(opts: {
@@ -73,7 +81,18 @@ export function loadConfig(opts: {
       apiKey: env['AIDLE_LLM_KEY'],
     },
     adminToken: env['AIDLE_ADMIN_TOKEN'],
+    backupDir: env['AIDLE_BACKUP_DIR'],
+    backupIntervalMs: parseIntervalMs(env['AIDLE_BACKUP_INTERVAL_MS']),
   };
+}
+
+function parseIntervalMs(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return 60_000;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`AIDLE_BACKUP_INTERVAL_MS 非法：${raw}（须为正整数毫秒）`);
+  }
+  return value;
 }
 
 function readConfigFile(configFile: string): unknown {

@@ -1,0 +1,130 @@
+import { z } from 'zod';
+
+/**
+ * 存档版本化与迁移契约（v3 FR-30 / ADR-3-05，设计文档 §5.2）。
+ *
+ * 全部服务端写入的 JSON 存档带根字段 `schemaVersion`（设计原文「首字段」）：
+ * - v2.0 封版存档定 `SCHEMA_VERSION = 1`（补写即迁移链 v0→v1 节点）；
+ * - v3 起结构性变更从 2 起编号，**凡结构变更必须同卡交付迁移函数**（章程化）；
+ * - 消息 JSONL（messages/audit-dice/ai-directive）追加型不迁移；
+ * - 用户资产（cards/、modules/、房间级 worldbook.json）不在此管辖：内容归导入者所有，
+ *   完整性由装载时 zod 校验兜底（worldbook 待 M11 编辑器落地服务端写路径后收编，本注册表先占位）。
+ *
+ * 迁移函数是纯函数：`chain[v]` 把版本 v 的文档升到 v+1，输入输出都是「落盘文档」本身。
+ * members.json 的 v0 根是数组（无法内联字段），v1 起重构为 `{ schemaVersion, members: [...] }`。
+ */
+
+/** 当前存档版本。v2.0 封版存档 = 1；首个 v3 结构变更（M12 conditions 对象化）= 2 */
+export const SCHEMA_VERSION = 1;
+
+export const ARCHIVE_KINDS = [
+  'room',
+  'members',
+  'worldbook',
+  'roster',
+  'session',
+  'state',
+] as const;
+export type ArchiveKind = (typeof ARCHIVE_KINDS)[number];
+
+/**
+ * 版本未写入字段的存档视作版本 0（v2.0 及更早）。
+ * 数组根 / 无 schemaVersion 的对象根都归 0；其余形态（原始值、null）属损坏输入，由调用方拒绝。
+ */
+export const VERSIONLESS = 0;
+
+export type MigrationFn = (doc: unknown) => unknown;
+
+export interface Migrator {
+  currentVersion: number;
+  /** chain[fromVersion] → 产出版本 fromVersion+1 的文档；0 = 版本不详（v2.0 存量补写） */
+  chain: Record<number, MigrationFn>;
+}
+
+/** 在文档根补写版本字段（放首位，便于人读） */
+function stamp(payload: Record<string, unknown>): Record<string, unknown> {
+  return { schemaVersion: SCHEMA_VERSION, ...payload };
+}
+
+/**
+ * 全量注册表：每类存档一条链。v3 首版所有链只有 v0→v1 补写节；
+ * M12 conditions 对象化时在 state 链追加 v1→v2 节点。
+ */
+export const MIGRATORS: Record<ArchiveKind, Migrator> = {
+  room: { currentVersion: SCHEMA_VERSION, chain: { 0: (doc) => stamp(asObject(doc, 'room')) } },
+  members: {
+    currentVersion: SCHEMA_VERSION,
+    chain: {
+      // v0 数组根 → v1 对象根（数组无法内联版本字段，设计 §5.2 落地注记）
+      0: (doc) => stamp({ members: doc }),
+    },
+  },
+  worldbook: {
+    // 占位：M11 房间层编辑器落地服务端写路径后启用（gate/CLI 届时收编）
+    currentVersion: SCHEMA_VERSION,
+    chain: { 0: (doc) => stamp(asObject(doc, 'worldbook')) },
+  },
+  roster: { currentVersion: SCHEMA_VERSION, chain: { 0: (doc) => stamp(asObject(doc, 'roster')) } },
+  session: {
+    currentVersion: SCHEMA_VERSION,
+    chain: { 0: (doc) => stamp(asObject(doc, 'session')) },
+  },
+  state: { currentVersion: SCHEMA_VERSION, chain: { 0: (doc) => stamp(asObject(doc, 'state')) } },
+};
+
+function asObject(doc: unknown, kind: string): Record<string, unknown> {
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+    throw new Error(`${kind} 存档根不是对象，无法补写版本字段`);
+  }
+  return doc as Record<string, unknown>;
+}
+
+/**
+ * 读取落盘文档的 schemaVersion；无字段 / 数组根 = VERSIONLESS(0)。
+ * 非整数版本或原始值根抛错（损坏输入，宁可拒绝）。
+ */
+export function readSchemaVersion(doc: unknown): number {
+  if (Array.isArray(doc)) return VERSIONLESS;
+  if (doc === null || typeof doc !== 'object') {
+    throw new Error('存档根不是 JSON 对象/数组，无法判定版本');
+  }
+  const raw = (doc as Record<string, unknown>)['schemaVersion'];
+  if (raw === undefined) return VERSIONLESS;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0) {
+    throw new Error(`schemaVersion 非法：${String(raw)}`);
+  }
+  return raw;
+}
+
+/**
+ * 把一份存档文档沿注册表链升到当前版本（纯函数，不改输入）。
+ * 版本超前（存档来自更新版本的服务端）或链缺失时抛错——宁可拒绝，不静默猜。
+ */
+export function migrateArchive(kind: ArchiveKind, doc: unknown): unknown {
+  const migrator = MIGRATORS[kind];
+  let version = readSchemaVersion(doc);
+  if (version > migrator.currentVersion) {
+    throw new Error(
+      `${kind} 存档版本 ${version} 超前于当前支持的 ${migrator.currentVersion}（存档来自更新版本的服务端？）`,
+    );
+  }
+  let current = doc;
+  while (version < migrator.currentVersion) {
+    const step = migrator.chain[version];
+    if (!step) {
+      throw new Error(`${kind} 迁移链缺少 ${version}→${version + 1} 节点`);
+    }
+    current = step(current);
+    const next = readSchemaVersion(current);
+    if (next !== version + 1) {
+      throw new Error(`${kind} 迁移链 ${version}→${version + 1} 节点产出版本 ${next}，违反链契约`);
+    }
+    version = next;
+  }
+  return current;
+}
+
+/** 落盘存档信封校验（gate/自检用）：对象根 + 整数版本字段 */
+export const VersionedDocSchema = z.object({
+  schemaVersion: z.number().int().nonnegative(),
+});

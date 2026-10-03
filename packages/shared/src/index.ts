@@ -18,3 +18,4 @@ export * from './character.js';
 export * from './module.js';
 export * from './message.js';
 export * from './protocol.js';
+export * from './migration.js';

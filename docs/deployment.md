@@ -1,7 +1,7 @@
 # 部署与运维
 
 > 追溯：NFR-02（数据主权）、NFR-07（可移植）、R-06（公网部署被扫描/滥用）。
-> 适用版本：v1。本文是**唯一**的部署口径来源，README 只保留链接。
+> 适用版本：v1（v3 增补热备与存档版本门禁，见 §3.1/§4.1 与 [backup.md](./backup.md)）。本文是**唯一**的部署口径来源，README 只保留链接。
 
 ## 1. 部署形态
 
@@ -41,21 +41,39 @@ curl http://127.0.0.1:8787/healthz
 data/
 ├── config.yaml                 # 非敏感配置（key 不在这里）
 ├── rooms/<roomId>/
-│   ├── room.json               # 房间信息
-│   ├── members.json            # 成员名单
-│   ├── worldbook.json          # 房间级手编世界书
+│   ├── room.json               # 房间信息（v3 起带 schemaVersion 信封）
+│   ├── members.json            # 成员名单（v1 起为 { schemaVersion, members } 对象根）
+│   ├── worldbook.json          # 房间级手编世界书（用户资产，无版本字段）
 │   └── sessions/<sessionId>/
 │       ├── session.json        # 会话（含 settings / synopsis）
 │       ├── messages.jsonl      # 消息流（append-only）
 │       └── state.json          # 状态板
 ├── cards/                      # 角色卡库
 ├── modules/<moduleId>/         # 模组包
+├── index/                      # v3：服务端运行时元数据（热备游标等）
 └── logs/audit-dice.jsonl       # 骰子审计流水（全局）
 ```
 
 - 追加型数据用 JSONL，快照型用 JSON，写文件先落临时文件再原子改名——**断电不会留下半截文件**。
 - 启动时自动做一次恢复扫描：坏行跳过并告警，会话与消息照常恢复（NFR-06）。
 - 剧情梗概（`session.json` 的 `synopsis`）v1 由 Host 直接手编该文件维护，没有运行时编辑界面。
+
+### 3.1 存档版本门禁（v3 增补）
+
+服务端写入的 JSON 存档带 `schemaVersion` 根字段。启动检测到版本不符（含未迁移的 v2.0 存量）**拒绝启动**并明示命令，迁移流程见 [backup.md §3](./backup.md)：
+
+```bash
+pnpm aidle-migrate
+```
+
+### 3.2 运行时热备（v3 增补）
+
+```bash
+export AIDLE_BACKUP_DIR=/path/to/backup   # 未设置 = 关闭（行为与 v2.0 一致）
+export AIDLE_BACKUP_INTERVAL_MS=60000     # 可选，默认 60s
+```
+
+增量同步（JSONL 按偏移续传、小文件 hash 比对、崩溃续传、删除镜像）与备份校验工具详见 [backup.md](./backup.md)。
 
 ## 4. 备份、迁移、恢复
 
@@ -134,6 +152,7 @@ curl -H "X-Admin-Token: $AIDLE_ADMIN_TOKEN" \
 |---|---|
 | 启动报 `config.yaml 含敏感字段` | 把 key 从配置文件删掉，改用 `AIDLE_LLM_KEY` 环境变量 |
 | 启动报 LLM 适配器装配失败 | 服务照常起来，只是 AI 功能停用；检查 `baseUrl`/`model` 与 key |
+| 启动报「存档版本与当前服务端不符，拒绝启动」 | 停服务后跑 `pnpm aidle-migrate`（详见 [backup.md §3](./backup.md#3-存档版本化与-aidle-migrate)） |
 | 启动日志出现坏行告警 | 恢复扫描跳过了损坏行，其余数据正常；从备份补回该段即可 |
 | 玩家连不上实时消息 | 反代是否转发了 WebSocket 升级头（见 §6） |
 | 想换 LLM 服务商 | 改 `data/config.yaml` 的 `llm` 段 + 换 `AIDLE_LLM_KEY`，重启 |

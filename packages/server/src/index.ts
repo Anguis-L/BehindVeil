@@ -6,6 +6,7 @@ import fastifyStatic from '@fastify/static';
 import { APP_NAME, PROTOCOL_VERSION } from '@behindveil/shared';
 import { recover } from './adapters/storage/recovery.js';
 import { createDataLayout } from './adapters/storage/layout.js';
+import { assertArchivesUpToDate } from './adapters/storage/version-gate.js';
 import { createLlmAdapter } from './adapters/llm/index.js';
 import { createMockLlm } from './adapters/llm/mock.js';
 import type { LlmAdapter } from './domain/llm.js';
@@ -18,6 +19,7 @@ import { registerModuleRoutes } from './gateway/http/modules.js';
 import { registerPcRoutes } from './gateway/http/pcs.js';
 import { registerRoomRoutes } from './gateway/http/rooms.js';
 import { attachGateway } from './gateway/socket.js';
+import { BackupSyncer } from './adapters/backup/syncer.js';
 import { MetricsCollector } from './observability/metrics.js';
 import { redact } from './observability/redact.js';
 
@@ -71,6 +73,10 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
     });
   });
 
+  // 启动版本门禁（T-M10-01，FR-30：宁可拒绝，不静默猜）——先于恢复扫描；
+  // 版本不符抛 MigrationRequiredError（明示 aidle-migrate），损坏 JSON 仍归恢复器辖区
+  await assertArchivesUpToDate(dataDir);
+
   // 启动恢复（TDD §6 / SDD §5.3）：坏行告警不阻断启动
   const layout = createDataLayout(dataDir);
   const report = await recover(dataDir);
@@ -80,6 +86,27 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
     '启动恢复完成',
   );
   for (const warning of report.warnings) app.log.warn(warning);
+
+  // 热备（T-M10-02，FR-31）：AIDLE_BACKUP_DIR 配置即启用；同步器只读源文件，
+  // 独立于房间串行队列（ADR-3-04）。未配置 = 关闭，行为与 v2.0 一致。
+  if (cfg.backupDir !== undefined) {
+    const syncer = new BackupSyncer({
+      dataDir,
+      backupDir: cfg.backupDir,
+      layout,
+      intervalMs: cfg.backupIntervalMs,
+      onCycle: (summary) => {
+        if (summary.copied > 0 || summary.appended > 0 || summary.removed > 0) {
+          app.log.info({ backup: summary }, '热备同步完成');
+        }
+      },
+    });
+    syncer.start();
+    app.addHook('onClose', async () => {
+      await syncer.stop();
+    });
+    app.log.info({ backupDir: cfg.backupDir, intervalMs: cfg.backupIntervalMs }, '热备已启用');
+  }
 
   // 恢复出的会话 lastSeq 作为网关 seq 计数起点（断电重启 seq 严格单调，NFR-06/FR-11）
   const initialSeqs = new Map<string, number>();

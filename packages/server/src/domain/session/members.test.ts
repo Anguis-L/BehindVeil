@@ -39,9 +39,9 @@ describe('readMembers（容错口径）', () => {
     expect(await readMembers(layout, 'room-1')).toEqual([]);
   });
 
-  it('文件不是数组（损坏）→ 空数组，不抛错', async () => {
+  it('v1 信封缺 members 字段（不是数组）→ 空数组，不抛错', async () => {
     const layout = await makeLayout();
-    await seedMembersFile(layout, 'room-1', '{"nope":1}');
+    await seedMembersFile(layout, 'room-1', '{"schemaVersion":1}');
     expect(await readMembers(layout, 'room-1')).toEqual([]);
   });
 
@@ -51,7 +51,7 @@ describe('readMembers（容错口径）', () => {
     await seedMembersFile(
       layout,
       'room-1',
-      JSON.stringify([good, { junk: true }, 'not-an-object']),
+      JSON.stringify({ schemaVersion: 1, members: [good, { junk: true }, 'not-an-object'] }),
     );
 
     const members = await readMembers(layout, 'room-1');

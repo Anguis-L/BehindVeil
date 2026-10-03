@@ -38,11 +38,11 @@ const settings = {
   outputReserveTokens: 2_048,
 };
 
-/** 直接落一个非法 room.json（先建出目录），模拟损坏文件 */
+/** 直接落一个非法 room.json（先建出目录）：v1 信封但内容为空对象，卡在 Schema 校验 */
 async function seedBrokenRoom(layout: ReturnType<typeof createDataLayout>, roomId: string) {
   const file = layout.roomFile(roomId);
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, '{"nope":1}', 'utf8');
+  await writeFile(file, '{"schemaVersion":1}', 'utf8');
 }
 
 afterAll(async () => {
