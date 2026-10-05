@@ -120,7 +120,7 @@ describe('createSession（T-M1-01/07）', () => {
     const stateBoard = await new JsonStore(layout.stateFile(room.id, session.id)).read();
     expect(stateBoard).toMatchObject({
       version: 0,
-      pcs: { m1: { sheet: { playerName: '爱丽丝' }, conditions: [] } },
+      pcs: { m1: { sheet: { playerName: '爱丽丝' }, conditions: [], resources: [] } },
     });
   });
 

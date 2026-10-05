@@ -373,6 +373,7 @@ async function startHarness(script: MockScriptStep[]): Promise<Harness> {
           skills: { 侦查: 60, 聆听: 45, 图书馆使用: 50 },
         },
         conditions: [],
+        resources: [],
       },
     },
     scene: { name: '', time: '', publicDesc: '' },

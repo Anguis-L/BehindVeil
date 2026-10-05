@@ -221,6 +221,15 @@ export const useSessionStore = defineStore('session', {
       getSocket().emit('msg:send', { type, content });
     },
 
+    /**
+     * 密语（T-M12-03：玩家「加入先攻」提请走这条既有通道，零新增 socket 事件——
+     * 玩家无状态板写权限，改板必须经 Host，密语是最轻的提请方式）。
+     */
+    whisper(targetId: string, content: string): void {
+      if (!content.trim()) return;
+      getSocket().emit('msg:send', { type: 'ooc', content, targetId });
+    },
+
     /** 掷骰（T-M4-02）：骰式是否合法由服务端判定，非法回 E-DICE-01 行内提示 */
     roll(expr: string, hidden = false): void {
       if (!expr.trim()) return;

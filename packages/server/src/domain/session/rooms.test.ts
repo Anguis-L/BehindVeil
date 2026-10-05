@@ -1,3 +1,4 @@
+import { SCHEMA_VERSION } from '@behindveil/shared';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -42,7 +43,7 @@ const settings = {
 async function seedBrokenRoom(layout: ReturnType<typeof createDataLayout>, roomId: string) {
   const file = layout.roomFile(roomId);
   await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, '{"schemaVersion":1}', 'utf8');
+  await writeFile(file, `{"schemaVersion":${SCHEMA_VERSION}}`, 'utf8');
 }
 
 afterAll(async () => {

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { executeCheck, type CheckExecutorDeps, type PcRoster } from './executor.js';
+import {
+  executeCheck,
+  executeResource,
+  type CheckExecutorDeps,
+  type PcRoster,
+} from './executor.js';
 import type { CheckDirective } from './schema.js';
 import type { RandomSource } from '../dice/random.js';
 import { createStateBoardRoster } from '../stateboard/roster.js';
@@ -146,6 +151,7 @@ describe('默认依赖装配', () => {
             skills: { 侦查: 60 },
           },
           conditions: [],
+          resources: [],
         },
       },
       scene: { name: '', time: '', publicDesc: '' },
@@ -158,5 +164,82 @@ describe('默认依赖装配', () => {
     expect(result.roll.expr).toBe('1d100<=60');
     expect(result.roll.check).not.toBeNull();
     expect(result.roll.rolls[0]).toHaveLength(1);
+  });
+});
+
+describe('executeResource（T-M12-02，FR-38）', () => {
+  /** 最小 COC 板 + 指定资源（爱丽丝） */
+  const resBoard = (
+    resources: Array<{ name: string; current: number; max: number }>,
+  ): StateBoard => ({
+    version: 0,
+    pcs: {
+      m1: {
+        sheet: {
+          rulebook: 'coc7',
+          playerName: '爱丽丝',
+          occupation: '',
+          str: 0,
+          con: 0,
+          siz: 0,
+          dex: 0,
+          app: 0,
+          int: 0,
+          pow: 0,
+          edu: 0,
+          luck: 0,
+          hp: 0,
+          mp: 0,
+          san: 0,
+          db: '0',
+          build: '0',
+          skills: { 侦查: 60 },
+        },
+        conditions: [],
+        resources: resources.map((r) => ({ ...r, resetOn: 'none' as const })),
+      },
+    },
+    scene: { name: '', time: '', publicDesc: '' },
+    facts: [],
+    updatedAt: '1970-01-01T00:00:00.000Z',
+  });
+
+  it('合法消耗 → 带 key/name/delta，且不掷骰（本指令无随机结构）', () => {
+    const result = executeResource(
+      { op: 'resource', target: 'pc:m1', name: '箭矢', delta: -2 },
+      { board: resBoard([{ name: '箭矢', current: 10, max: 20 }]) },
+    );
+    expect(result).toEqual({ ok: true, pcName: '爱丽丝', key: 'm1', name: '箭矢', delta: -2 });
+  });
+
+  it('余量不足 → E-AI-01（不静默 clamp 成 0，KP 需知情）', () => {
+    const result = executeResource(
+      { op: 'resource', target: 'pc:m1', name: '箭矢', delta: -5 },
+      { board: resBoard([{ name: '箭矢', current: 2, max: 20 }]) },
+    );
+    expect(result).toMatchObject({ ok: false, code: 'E-AI-01' });
+    if (!result.ok) expect(result.reason).toContain('余量不足');
+  });
+
+  it('恢复超上限 → E-AI-01', () => {
+    const result = executeResource(
+      { op: 'resource', target: 'pc:m1', name: '一环法术位', delta: 3 },
+      { board: resBoard([{ name: '一环法术位', current: 2, max: 3 }]) },
+    );
+    expect(result).toMatchObject({ ok: false, code: 'E-AI-01' });
+    if (!result.ok) expect(result.reason).toContain('上限');
+  });
+
+  it('资源不存在 / PC 不存在 / delta 为 0 → E-AI-01', () => {
+    const deps = { board: resBoard([{ name: '箭矢', current: 5, max: 20 }]) };
+    expect(
+      executeResource({ op: 'resource', target: 'pc:m1', name: '不存在', delta: -1 }, deps),
+    ).toMatchObject({ ok: false });
+    expect(
+      executeResource({ op: 'resource', target: 'pc:m9', name: '箭矢', delta: -1 }, deps),
+    ).toMatchObject({ ok: false });
+    expect(
+      executeResource({ op: 'resource', target: 'pc:m1', name: '箭矢', delta: 0 }, deps),
+    ).toMatchObject({ ok: false });
   });
 });

@@ -59,7 +59,7 @@ describe('PCSheet 判别联合旧数据兼容（T-M8-01，设计 §5.3）', () =
   it('v1 存量 state.json（板内 pcs 的 sheet 无 rulebook）→ 整板解析成功', () => {
     const v1Board = {
       version: 3,
-      pcs: { m1: { sheet: v1CocSheet, conditions: ['轻伤'] } },
+      pcs: { m1: { sheet: v1CocSheet, conditions: [{ label: '轻伤' }], resources: [] } },
       scene: { name: '书房', time: '', publicDesc: '' },
       facts: [],
       updatedAt: '2026-01-01T00:00:00.000Z',

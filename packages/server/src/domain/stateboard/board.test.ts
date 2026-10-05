@@ -16,7 +16,7 @@ let layout: DataLayout;
 
 const baseBoard = (over: Partial<StateBoard> = {}): StateBoard => ({
   version: 2,
-  pcs: { m1: { sheet: sheetOf({ san: 55 }), conditions: [] } },
+  pcs: { m1: { sheet: sheetOf({ san: 55 }), conditions: [], resources: [] } },
   scene: { name: '书房', time: '1925 年冬夜', publicDesc: '壁炉将熄。' },
   facts: ['书房的门从内侧反锁'],
   updatedAt: '2026-01-01T00:00:00.000Z',
@@ -83,7 +83,9 @@ describe('readStateBoard', () => {
 describe('applyStatePatch（乐观锁，TC-FR-09-001 领域侧）', () => {
   it('expectedVersion 命中 → version+1，patch 字段整体覆盖', () => {
     const patch: StatePatch = {
-      pcs: { m1: { sheet: sheetOf({ san: 40 }), conditions: ['疯狂(临时)'] } },
+      pcs: {
+        m1: { sheet: sheetOf({ san: 40 }), conditions: [{ label: '疯狂(临时)' }], resources: [] },
+      },
       scene: { name: '地下室', time: '凌晨', publicDesc: '楼梯尽头有水声' },
     };
     const result = applyStatePatch(baseBoard(), patch, 2);
@@ -91,7 +93,7 @@ describe('applyStatePatch（乐观锁，TC-FR-09-001 领域侧）', () => {
     if (!result.ok) return;
     expect(result.next.version).toBe(3);
     expect(result.next.pcs.m1?.sheet).toMatchObject({ san: 40 });
-    expect(result.next.pcs.m1?.conditions).toEqual(['疯狂(临时)']);
+    expect(result.next.pcs.m1?.conditions).toEqual([{ label: '疯狂(临时)' }]);
     expect(result.next.scene.name).toBe('地下室');
     expect(result.next.updatedAt).not.toBe('2026-01-01T00:00:00.000Z');
   });

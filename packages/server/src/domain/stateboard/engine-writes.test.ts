@@ -3,7 +3,7 @@ import type { StateBoard } from '@behindveil/shared';
 import type { ParsedRoll } from '../dice/evaluator.js';
 import { Coc7RuleBook } from '../rulebook/coc7.js';
 import type { RuleBook } from '../rulebook/types.js';
-import { hpPatch, sanityLossPatch } from './engine-writes.js';
+import { hpPatch, resourcePatch, sanityLossPatch } from './engine-writes.js';
 import { applyStatePatch } from './board.js';
 
 /**
@@ -39,6 +39,7 @@ const board = (san = ALICE_SAN): StateBoard => ({
         skills: { 侦查: 60 },
       },
       conditions: [],
+      resources: [],
     },
   },
   scene: { name: '', time: '', publicDesc: '' },
@@ -63,6 +64,7 @@ const board5e = (current = 22, max = 22): StateBoard => ({
         proficientSaves: ['dex', 'int'],
       },
       conditions: [],
+      resources: [],
     },
   },
   scene: { name: '', time: '', publicDesc: '' },
@@ -198,5 +200,80 @@ describe('hpPatch（T-M8-03，FR-25）', () => {
     if (!applied.ok) return;
     expect(applied.next.version).toBe(5);
     expect(applied.next.pcs.m1?.sheet).toMatchObject({ hp: { current: 17, max: 22 } });
+  });
+});
+
+/** 带资源与状态的 5e 板（T-M12-02） */
+const boardWithResources = (): StateBoard => {
+  const base = board5e();
+  base.pcs['m1'] = {
+    ...base.pcs['m1']!,
+    conditions: [{ label: '重伤', note: '左臂' }],
+    resources: [
+      { name: '一环法术位', current: 2, max: 3, resetOn: 'long_rest' },
+      { name: '箭矢', current: 5, max: 20, resetOn: 'none' },
+    ],
+  };
+  return base;
+};
+
+describe('resourcePatch（T-M12-02，FR-38）', () => {
+  it('消耗：clamp(current+delta, 0, max)，前后值回传供回注文案', () => {
+    const produced = resourcePatch(boardWithResources(), 'm1', '一环法术位', -1);
+    expect(produced.ok).toBe(true);
+    if (!produced.ok) return;
+    expect(produced.before).toBe(2);
+    expect(produced.after).toBe(1);
+    const pc = produced.patch.pcs?.['m1'];
+    expect(pc?.resources[0]?.current).toBe(1);
+  });
+
+  it('下限夹逼：消耗量超过余量时停在 0（不出现负数）', () => {
+    const produced = resourcePatch(boardWithResources(), 'm1', '箭矢', -99);
+    expect(produced.ok).toBe(true);
+    if (!produced.ok) return;
+    expect(produced.after).toBe(0);
+  });
+
+  it('上限夹逼：恢复量超过上限时停在 max', () => {
+    const produced = resourcePatch(boardWithResources(), 'm1', '一环法术位', 99);
+    expect(produced.ok).toBe(true);
+    if (!produced.ok) return;
+    expect(produced.after).toBe(3);
+  });
+
+  it('资源不存在 / PC 不存在 → 拒绝（E-AI-01 上游，不产生 patch）', () => {
+    expect(resourcePatch(boardWithResources(), 'm1', '不存在的资源', -1)).toEqual({
+      ok: false,
+      reason: 'resource-not-found',
+    });
+    expect(resourcePatch(boardWithResources(), 'm9', '箭矢', -1)).toEqual({
+      ok: false,
+      reason: 'pc-not-found',
+    });
+  });
+
+  it('整体覆盖语义：patch 必须带原 conditions 与全部资源，否则 Host 维护的数据会被抹掉', () => {
+    const produced = resourcePatch(boardWithResources(), 'm1', '箭矢', -2);
+    expect(produced.ok).toBe(true);
+    if (!produced.ok) return;
+    const lock = applyStatePatch(boardWithResources(), produced.patch, 4);
+    expect(lock.ok).toBe(true);
+    if (!lock.ok) return;
+    // 条件与其他资源都在——这是「patch.pcs[key] 替换整条 PC」的必然要求
+    expect(lock.next.pcs['m1']?.conditions).toEqual([{ label: '重伤', note: '左臂' }]);
+    expect(lock.next.pcs['m1']?.resources).toEqual([
+      { name: '一环法术位', current: 2, max: 3, resetOn: 'long_rest' },
+      { name: '箭矢', current: 3, max: 20, resetOn: 'none' },
+    ]);
+  });
+
+  it('HP / 理智写路径同样带资源（同一整体覆盖语义）', () => {
+    const board5eWithRes = boardWithResources();
+    const hp = hpPatch(board5eWithRes, 'm1', 'damage', { ...lossRollOf(5), expr: '1d8' });
+    expect(hp.ok).toBe(true);
+    if (!hp.ok) return;
+    expect(hp.patch.pcs?.['m1']?.resources).toHaveLength(2);
+    expect(hp.patch.pcs?.['m1']?.conditions).toEqual([{ label: '重伤', note: '左臂' }]);
   });
 });

@@ -79,5 +79,27 @@ export type DamageDirective = z.infer<typeof DamageDirectiveSchema>;
 export type HealDirective = z.infer<typeof HealDirectiveSchema>;
 export type SanityDirective = z.infer<typeof SanityDirectiveSchema>;
 
-/** AI 指令联合（op 白名单：check / damage / heal / sanity） */
-export type AiDirective = CheckDirective | DamageDirective | HealDirective | SanityDirective;
+/**
+ * 资源计数器变动（T-M12-02，FR-38）：如「消耗一环法术位」= delta -1。
+ *
+ * 与 damage/heal 的差别是本指令**不掷骰**——法术位/箭矢的消耗天然是确定的「几个」，
+ * 没有随机结构可言。防篡改线的位置因此挪到别处：
+ * - 只收**相对变动量** delta，不收 current/value/amount 等绝对数值字段（strictObject 拒）；
+ * - 落板前一律 clamp(current+delta, 0, max)，AI 既不能把它顶穿上限也不能压成负数。
+ * 换言之 AI 能表达「消耗一个」，但无法指定「现在剩几个」——服务端权威不变。
+ */
+export const ResourceDirectiveSchema = z.strictObject({
+  op: z.literal('resource'),
+  target: PcTargetSchema,
+  /** 资源名，与状态板 PC 层 resources[].name 精确匹配 */
+  name: z.string().trim().min(1),
+  /** 变动量（正=恢复，负=消耗） */
+  delta: z.number().int(),
+  label: z.string().trim().min(1).optional(),
+});
+
+export type ResourceDirective = z.infer<typeof ResourceDirectiveSchema>;
+
+/** AI 指令联合（op 白名单：check / damage / heal / sanity / resource） */
+export type AiDirective =
+  CheckDirective | DamageDirective | HealDirective | SanityDirective | ResourceDirective;

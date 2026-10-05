@@ -1,4 +1,11 @@
-import type { Member, Message, RollCheck, Session, StateBoard } from '@behindveil/shared';
+import type {
+  Condition,
+  Member,
+  Message,
+  RollCheck,
+  Session,
+  StateBoard,
+} from '@behindveil/shared';
 
 /**
  * 导出渲染模型（T-M6-01，FR-12；对应 SDD §3.2 M8 行）。
@@ -45,7 +52,7 @@ export interface SnapshotPcExport {
   san: number | null;
   mp: number | null;
   luck: number | null;
-  conditions: string[];
+  conditions: Condition[];
 }
 
 /** 快照 HP 展示：COC 当前值；5e `current/max` */

@@ -40,6 +40,7 @@ const ALICE = {
     skills: { 侦查: 60, 图书馆使用: 50 },
   },
   conditions: [],
+  resources: [],
 } satisfies StateBoard['pcs'][string];
 const BOB = {
   sheet: {
@@ -62,7 +63,8 @@ const BOB = {
     build: '1',
     skills: { 聆听: 55, 急救: 50 },
   },
-  conditions: ['轻伤'],
+  conditions: [{ label: '轻伤' }],
+  resources: [],
 } satisfies StateBoard['pcs'][string];
 
 /** 5e 卡（T-M8-02）：敏捷系远程游荡者轮廓——敏捷 16（+3）、察觉熟练、运动不熟练 */
@@ -79,6 +81,7 @@ const EIN = {
     proficientSaves: ['dex', 'int'],
   },
   conditions: [],
+  resources: [],
 } satisfies StateBoard['pcs'][string];
 
 describe('createStateBoardRoster（T-M5-04）', () => {
@@ -107,7 +110,7 @@ describe('createStateBoardRoster（T-M5-04）', () => {
     const roster = createStateBoardRoster(
       boardOf({
         m1: ALICE,
-        m2: { sheet: { ...ALICE.sheet, skills: { 侦查: 35 } }, conditions: [] },
+        m2: { sheet: { ...ALICE.sheet, skills: { 侦查: 35 } }, conditions: [], resources: [] },
       }),
     );
     expect(roster.skillValue('pc:m2', '侦查')).toMatchObject({ value: 35 });

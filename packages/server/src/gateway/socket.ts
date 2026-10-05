@@ -36,7 +36,7 @@ import type { DirectiveScanEvent } from '../domain/ai-directive/scan.js';
 import { runAiTurn } from '../domain/ai-directive/loop.js';
 import type { LlmAdapter } from '../domain/llm.js';
 import { applyStatePatch, readStateBoard, saveStateBoard } from '../domain/stateboard/board.js';
-import { hpPatch, sanityLossPatch } from '../domain/stateboard/engine-writes.js';
+import { hpPatch, resourcePatch, sanityLossPatch } from '../domain/stateboard/engine-writes.js';
 import { createStateBoardRoster } from '../domain/stateboard/roster.js';
 import { loadModule } from '../domain/module/library.js';
 import { appendMessage, readMessagesAfter } from '../domain/session/messages.js';
@@ -1082,6 +1082,34 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
                 after: after.san,
                 desc: lossHint ? `KP 指定损失 ${lossExpr}` : tier.desc,
               };
+            });
+            return applied;
+          },
+          // 资源计数器（T-M12-02，FR-38）：不掷骰，队列内 clamp 后乐观锁落盘广播
+          applyResourceEffect: async (key, name, delta) => {
+            let applied: { before: number; after: number } | null = null;
+            await enqueue(roomId, async () => {
+              const board = await boardFor(roomId, sessionId);
+              const produced = resourcePatch(board, key, name, delta);
+              if (!produced.ok) return;
+              const lock = applyStatePatch(board, produced.patch, board.version);
+              if (!lock.ok) {
+                for (const socketId of alertTargets()) {
+                  emitError(
+                    io.to(socketId),
+                    'E-ST-01',
+                    '引擎写状态板时版本冲突，本次资源变动未落盘',
+                  );
+                }
+                emitChecked(io.to(`room:${roomId}`), 'state:broadcast', {
+                  stateBoard: lock.current,
+                });
+                return;
+              }
+              stateBoards.set(sessionId, lock.next);
+              await saveStateBoard(layout, roomId, sessionId, lock.next);
+              emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: lock.next });
+              applied = { before: produced.before, after: produced.after };
             });
             return applied;
           },

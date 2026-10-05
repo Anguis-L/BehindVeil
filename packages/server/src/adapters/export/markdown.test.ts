@@ -144,7 +144,7 @@ const messages: Message[] = [
     type: 'state_snapshot',
     stateBoard: {
       version: 1,
-      pcs: { m_alice: { sheet, conditions: ['轻伤'] } },
+      pcs: { m_alice: { sheet, conditions: [{ label: '轻伤' }], resources: [] } },
       scene: { name: '走廊', time: '深夜 23:40', publicDesc: '两侧墙纸剥落。' },
       facts: ['门是从里面锁上的'],
       updatedAt: '2026-09-25T20:00:07.000Z',

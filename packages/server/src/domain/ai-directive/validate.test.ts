@@ -82,6 +82,86 @@ describe('数值效果指令（T-M8-03/04 白名单扩值，设计 §5.4）', ()
   });
 
   it.each([
+    [
+      'resource 合法（消耗一环法术位）',
+      { op: 'resource', target: 'pc:alice', name: '一环法术位', delta: -1 },
+    ],
+    ['resource 合法（恢复）', { op: 'resource', target: 'pc:alice', name: '箭矢', delta: 5 }],
+    [
+      'resource 带 label',
+      { op: 'resource', target: 'pc:alice', name: '箭矢', delta: -2, label: '射一箭' },
+    ],
+  ])('%s → 通过', (_name, input) => {
+    expect(validateDirective(input)).toMatchObject({ ok: true });
+  });
+
+  // 防篡改线的位置（T-M12-02）：只收相对变动量，绝对数值字段一律拒——
+  // AI 能说「消耗一个」，不能说「现在剩几个」
+  it.each([
+    [
+      'resource 夹带 current',
+      { op: 'resource', target: 'pc:alice', name: '箭矢', delta: -1, current: 3 },
+      'current',
+    ],
+    [
+      'resource 夹带 value',
+      { op: 'resource', target: 'pc:alice', name: '箭矢', delta: -1, value: 3 },
+      'value',
+    ],
+    [
+      'resource 夹带 amount',
+      { op: 'resource', target: 'pc:alice', name: '箭矢', delta: -1, amount: 3 },
+      'amount',
+    ],
+    ['resource 缺 name', { op: 'resource', target: 'pc:alice', delta: -1 }, 'name'],
+    ['resource 缺 delta', { op: 'resource', target: 'pc:alice', name: '箭矢' }, 'delta'],
+  ])('%s → E-AI-01 拒绝（strictObject 防呆）', (_name, input, reasonPart) => {
+    const verdict = validateDirective(input);
+    expect(verdict).toMatchObject({ ok: false, code: 'E-AI-01' });
+    if (!verdict.ok) expect(verdict.reason).toContain(reasonPart);
+  });
+
+  it.each([
+    [
+      'resource 合法（消耗一环法术位）',
+      { op: 'resource', target: 'pc:alice', name: '一环法术位', delta: -1 },
+    ],
+    ['resource 合法（恢复）', { op: 'resource', target: 'pc:alice', name: '箭矢', delta: 5 }],
+    [
+      'resource 带 label',
+      { op: 'resource', target: 'pc:alice', name: '箭矢', delta: -2, label: '射一箭' },
+    ],
+  ])('%s → 通过', (_name, input) => {
+    expect(validateDirective(input)).toMatchObject({ ok: true });
+  });
+
+  // 防篡改线的位置（T-M12-02）：只收相对变动量，绝对数值字段一律拒——
+  // AI 能说「消耗一个」，不能说「现在剩几个」
+  it.each([
+    [
+      'resource 夹带 current',
+      { op: 'resource', target: 'pc:alice', name: '箭矢', delta: -1, current: 3 },
+      'current',
+    ],
+    [
+      'resource 夹带 value',
+      { op: 'resource', target: 'pc:alice', name: '箭矢', delta: -1, value: 3 },
+      'value',
+    ],
+    [
+      'resource 夹带 amount',
+      { op: 'resource', target: 'pc:alice', name: '箭矢', delta: -1, amount: 3 },
+      'amount',
+    ],
+    ['resource 缺 name', { op: 'resource', target: 'pc:alice', delta: -1 }, 'name'],
+    ['resource 缺 delta', { op: 'resource', target: 'pc:alice', name: '箭矢' }, 'delta'],
+  ])('%s → E-AI-01 拒绝（strictObject 防呆）', (_name, input, reasonPart) => {
+    const verdict = validateDirective(input);
+    expect(verdict).toMatchObject({ ok: false, code: 'E-AI-01' });
+    if (!verdict.ok) expect(verdict.reason).toContain(reasonPart);
+  });
+
+  it.each([
     ['damage 夹带 result', { op: 'damage', target: 'pc:alice', expr: '1d8', result: 7 }, 'result'],
     ['damage 夹带 total', { op: 'damage', target: 'pc:alice', expr: '1d8', total: 7 }, 'total'],
     ['heal 夹带 hp', { op: 'heal', target: 'pc:alice', expr: '1d4', hp: 10 }, 'hp'],
@@ -92,5 +172,41 @@ describe('数值效果指令（T-M8-03/04 白名单扩值，设计 §5.4）', ()
     const verdict = validateDirective(input);
     expect(verdict).toMatchObject({ ok: false, code: 'E-AI-01' });
     if (!verdict.ok) expect(verdict.reason).toContain(reasonPart);
+  });
+});
+
+describe('resource 指令的语义边界（T-M12-02）', () => {
+  it('delta 非整数 → 拒绝（法术位不能消耗半个）', () => {
+    const verdict = validateDirective({
+      op: 'resource',
+      target: 'pc:alice',
+      name: '箭矢',
+      delta: -1.5,
+    });
+    expect(verdict).toMatchObject({ ok: false, code: 'E-AI-01' });
+  });
+
+  it('未知 op 的白名单提示串随 OP_SCHEMAS 派生（加 resource 后文案同步）', () => {
+    const verdict = validateDirective({ op: 'teleport', target: 'pc:alice' });
+    expect(verdict).toMatchObject({ ok: false, code: 'E-AI-01' });
+    if (!verdict.ok) expect(verdict.reason).toContain('resource');
+  });
+});
+
+describe('resource 指令的语义边界（T-M12-02）', () => {
+  it('delta 非整数 → 拒绝（法术位不能消耗半个）', () => {
+    const verdict = validateDirective({
+      op: 'resource',
+      target: 'pc:alice',
+      name: '箭矢',
+      delta: -1.5,
+    });
+    expect(verdict).toMatchObject({ ok: false, code: 'E-AI-01' });
+  });
+
+  it('未知 op 的白名单提示串随 OP_SCHEMAS 派生（加 resource 后文案同步）', () => {
+    const verdict = validateDirective({ op: 'teleport', target: 'pc:alice' });
+    expect(verdict).toMatchObject({ ok: false, code: 'E-AI-01' });
+    if (!verdict.ok) expect(verdict.reason).toContain('resource');
   });
 });

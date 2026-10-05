@@ -292,6 +292,7 @@ describe('示例模组「雾桥驿站」开箱即跑（T-M9-01 / G-M9）', () =>
             proficientSaves: ['str', 'con'],
           },
           conditions: [],
+          resources: [],
         },
       },
       scene: { name: '', time: '', publicDesc: '' },

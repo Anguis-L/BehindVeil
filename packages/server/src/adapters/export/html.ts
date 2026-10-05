@@ -1,3 +1,4 @@
+import { conditionText } from '@behindveil/shared';
 import type { ExportEntry, ExportInput, JudgeLevel } from './render.js';
 import { hpTextOf, statTextOf, toExportEntries } from './render.js';
 
@@ -68,7 +69,7 @@ function renderSnapshot(entry: ExportEntry): string {
         `        <tr><td>${escapeHtml(pc.playerName)}</td><td>${escapeHtml(pc.memberName)}</td>` +
         `<td class="num">${hpTextOf(pc)}</td><td class="num">${statTextOf(pc.san)}</td>` +
         `<td class="num">${statTextOf(pc.mp)}</td><td class="num">${statTextOf(pc.luck)}</td>` +
-        `<td>${escapeHtml(pc.conditions.join('、') || '—')}</td></tr>`,
+        `<td>${escapeHtml(pc.conditions.map(conditionText).join('、') || '—')}</td></tr>`,
     )
     .join('\n');
   const facts = snap.facts.map((f) => `      <li>${escapeHtml(f)}</li>`).join('\n');

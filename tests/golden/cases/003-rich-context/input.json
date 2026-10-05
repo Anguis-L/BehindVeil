@@ -75,7 +75,7 @@
             "图书馆使用": 50
           }
         },
-        "conditions": ["轻伤"]
+        "conditions": [{ "label": "轻伤" }]
       }
     },
     "scene": {

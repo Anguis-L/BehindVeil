@@ -3,6 +3,7 @@ import {
   CheckDirectiveSchema,
   DamageDirectiveSchema,
   HealDirectiveSchema,
+  ResourceDirectiveSchema,
   SanityDirectiveSchema,
 } from './schema.js';
 import { z } from 'zod';
@@ -10,13 +11,17 @@ import { z } from 'zod';
 export type DirectiveValidation =
   { ok: true; directive: AiDirective } | { ok: false; code: 'E-AI-01'; reason: string };
 
-/** op → Schema 白名单（T-M8-03/04 扩值：check / damage / heal / sanity） */
+/** op → Schema 白名单（T-M8-03/04 扩值：check / damage / heal / sanity；T-M12-02 加 resource） */
 const OP_SCHEMAS: Record<string, z.ZodType<AiDirective>> = {
   check: CheckDirectiveSchema,
   damage: DamageDirectiveSchema,
   heal: HealDirectiveSchema,
   sanity: SanityDirectiveSchema,
+  resource: ResourceDirectiveSchema,
 };
+
+/** 白名单的人类可读串（E-AI-01 提示文案，与 OP_SCHEMAS 同源派生，防两处漂移） */
+const OP_WHITELIST_TEXT = Object.keys(OP_SCHEMAS).join(' / ');
 
 /**
  * op 白名单校验（T-M3-02 / T-M8-03，TDD §5.4 + 设计文档 v2 §5.4）。
@@ -37,7 +42,7 @@ export function validateDirective(parsed: unknown): DirectiveValidation {
     return {
       ok: false,
       code: 'E-AI-01',
-      reason: `未知 op: ${String(op)}（白名单：check / damage / heal / sanity）`,
+      reason: `未知 op: ${String(op)}（白名单：${OP_WHITELIST_TEXT}）`,
     };
   }
 

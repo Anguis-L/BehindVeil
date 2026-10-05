@@ -1,4 +1,4 @@
-import type { Message, WorldBookPosition } from '@behindveil/shared';
+import { conditionText, type Message, type WorldBookPosition } from '@behindveil/shared';
 import { scanWorldBook, type ScanHit } from '../domain/worldbook/scan.js';
 import type { LlmMessage } from '../domain/llm.js';
 import type { Tokenizer } from './tokenizer.js';
@@ -87,6 +87,14 @@ export const s2State: Stage = (ctx) => {
     lines.push(`场景：${scene.name}${scene.time ? `｜${scene.time}` : ''}`);
     if (scene.publicDesc) lines.push(scene.publicDesc);
   }
+  // 先攻（T-M12-03，FR-37）：紧凑单行，当前行动者用 ▸ 标记——预算账户要求 ≤15% 增量
+  const initiative = scene.initiative;
+  if (initiative && initiative.order.length > 0) {
+    const seq = initiative.order
+      .map((entry, i) => `${i === initiative.currentIdx ? '▸' : ''}${entry.label}(${entry.roll})`)
+      .join(' → ');
+    lines.push(`【先攻 R${initiative.round}】${seq}`);
+  }
 
   const pcEntries = Object.entries(stateBoard.pcs);
   if (pcEntries.length > 0) {
@@ -94,16 +102,22 @@ export const s2State: Stage = (ctx) => {
     for (const [memberId, pc] of pcEntries) {
       const { sheet } = pc;
       // 状态注入按规则书分流（T-M8-00 消费清单 #3）：5e 无 MP/SAN/DB，给 AC + HP current/max
+      // 资源计数器（T-M12-02，FR-38）：「名 当前/上限」紧凑并列，无资源时不占 token
+      const resources =
+        pc.resources.length > 0
+          ? `｜资源：${pc.resources.map((r) => `${r.name} ${r.current}/${r.max}`).join('、')}`
+          : '';
+      const stateLine = `状态：${pc.conditions.map(conditionText).join('、') || '无'}`;
       if (sheet.rulebook === 'dnd5e') {
         lines.push(
           `- [${memberId}] ${sheet.playerName}（${sheet.occupation}）` +
             `HP ${sheet.hp.current}/${sheet.hp.max}｜AC ${sheet.ac}｜` +
-            `状态：${pc.conditions.join('、') || '无'}`,
+            `${stateLine}${resources}`,
         );
       } else {
         lines.push(
           `- [${memberId}] ${sheet.playerName}（${sheet.occupation}）HP ${sheet.hp}｜MP ${sheet.mp}｜` +
-            `SAN ${sheet.san}｜DB ${sheet.db}｜体格 ${sheet.build}｜状态：${pc.conditions.join('、') || '无'}`,
+            `SAN ${sheet.san}｜DB ${sheet.db}｜体格 ${sheet.build}｜${stateLine}${resources}`,
         );
       }
     }

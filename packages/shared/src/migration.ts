@@ -15,8 +15,12 @@ import { z } from 'zod';
  * members.json 的 v0 根是数组（无法内联字段），v1 起重构为 `{ schemaVersion, members: [...] }`。
  */
 
-/** 当前存档版本。v2.0 封版存档 = 1；首个 v3 结构变更（M12 conditions 对象化）= 2 */
-export const SCHEMA_VERSION = 1;
+/**
+ * 当前存档版本。v2.0 封版存档 = 1；首个 v3 结构变更（M12 conditions 对象化）= 2。
+ * 版本是全仓统一的「档号」：非 state 存档在 v2 结构未变，链里仍需一节恒等推进，
+ * 否则它们会停在 1 而被启动版本门禁当成「未迁移的存量存档」拒开。
+ */
+export const SCHEMA_VERSION = 2;
 
 export const ARCHIVE_KINDS = [
   'room',
@@ -42,35 +46,89 @@ export interface Migrator {
   chain: Record<number, MigrationFn>;
 }
 
-/** 在文档根补写版本字段（放首位，便于人读） */
-function stamp(payload: Record<string, unknown>): Record<string, unknown> {
-  return { schemaVersion: SCHEMA_VERSION, ...payload };
+/**
+ * 在文档根补写版本字段（放首位，便于人读）。
+ * 必须先摘掉 payload 里的旧版本字段——否则展开会把它覆盖回来，
+ * 恒等推进节点（v1→v2 结构未变）会写出「版本没涨」的假象。
+ */
+function stamp(payload: Record<string, unknown>, version: number): Record<string, unknown> {
+  const { schemaVersion: _legacy, ...rest } = payload;
+  void _legacy;
+  return { schemaVersion: version, ...rest };
+}
+
+/** 恒等推进：结构未变，只把档号带到下一版 */
+function advance(kind: ArchiveKind): MigrationFn {
+  return (doc) => stamp(asObject(doc, kind), 2);
 }
 
 /**
- * 全量注册表：每类存档一条链。v3 首版所有链只有 v0→v1 补写节；
- * M12 conditions 对象化时在 state 链追加 v1→v2 节点。
+ * state v1→v2（FR-39）：`pcs[*].conditions` 由 `string[]` 升为 `{ label }[]`。
+ * 幂等——已是对象形态的条目原样保留，重复迁移不产生嵌套。
+ */
+function stateConditionsToObjects(doc: unknown): unknown {
+  const root = asObject(doc, 'state');
+  const pcs = root['pcs'];
+  if (pcs === undefined) return stamp(root, 2);
+  if (pcs === null || typeof pcs !== 'object' || Array.isArray(pcs)) {
+    throw new Error('state 存档的 pcs 不是对象，无法升级 conditions');
+  }
+  const nextPcs: Record<string, unknown> = {};
+  for (const [memberId, pc] of Object.entries(pcs as Record<string, unknown>)) {
+    if (pc === null || typeof pc !== 'object' || Array.isArray(pc)) {
+      throw new Error(`state 存档的 pcs.${memberId} 不是对象，无法升级 conditions`);
+    }
+    const record = pc as Record<string, unknown>;
+    const conditions = record['conditions'];
+    nextPcs[memberId] =
+      conditions === undefined
+        ? record
+        : { ...record, conditions: conditionsToObjects(conditions, memberId) };
+  }
+  return stamp({ ...root, pcs: nextPcs }, 2);
+}
+
+function conditionsToObjects(value: unknown, memberId: string): unknown {
+  if (!Array.isArray(value)) {
+    throw new Error(`state 存档的 pcs.${memberId}.conditions 不是数组，无法升级`);
+  }
+  return value.map((entry) => (typeof entry === 'string' ? { label: entry } : entry));
+}
+
+/**
+ * 全量注册表：每类存档一条链。v0→v1 是 v2.0 存量补写；v1→v2 中只有 state 有结构变更，
+ * 其余为恒等推进（保持全仓档号一致）。
  */
 export const MIGRATORS: Record<ArchiveKind, Migrator> = {
-  room: { currentVersion: SCHEMA_VERSION, chain: { 0: (doc) => stamp(asObject(doc, 'room')) } },
+  room: {
+    currentVersion: SCHEMA_VERSION,
+    chain: { 0: (doc) => stamp(asObject(doc, 'room'), 1), 1: advance('room') },
+  },
   members: {
     currentVersion: SCHEMA_VERSION,
     chain: {
       // v0 数组根 → v1 对象根（数组无法内联版本字段，设计 §5.2 落地注记）
-      0: (doc) => stamp({ members: doc }),
+      0: (doc) => stamp({ members: doc }, 1),
+      1: (doc) => stamp(asObject(doc, 'members'), 2),
     },
   },
   worldbook: {
     // T-M11-06 编辑器落地后启用（写入口见 server domain/worldbook/store.ts）
     currentVersion: SCHEMA_VERSION,
-    chain: { 0: (doc) => stamp(asObject(doc, 'worldbook')) },
+    chain: { 0: (doc) => stamp(asObject(doc, 'worldbook'), 1), 1: advance('worldbook') },
   },
-  roster: { currentVersion: SCHEMA_VERSION, chain: { 0: (doc) => stamp(asObject(doc, 'roster')) } },
+  roster: {
+    currentVersion: SCHEMA_VERSION,
+    chain: { 0: (doc) => stamp(asObject(doc, 'roster'), 1), 1: advance('roster') },
+  },
   session: {
     currentVersion: SCHEMA_VERSION,
-    chain: { 0: (doc) => stamp(asObject(doc, 'session')) },
+    chain: { 0: (doc) => stamp(asObject(doc, 'session'), 1), 1: advance('session') },
   },
-  state: { currentVersion: SCHEMA_VERSION, chain: { 0: (doc) => stamp(asObject(doc, 'state')) } },
+  state: {
+    currentVersion: SCHEMA_VERSION,
+    chain: { 0: (doc) => stamp(asObject(doc, 'state'), 1), 1: stateConditionsToObjects },
+  },
 };
 
 function asObject(doc: unknown, kind: string): Record<string, unknown> {

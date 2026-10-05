@@ -121,7 +121,7 @@ const messages: Message[] = [
     type: 'state_snapshot',
     stateBoard: {
       version: 2,
-      pcs: { m_alice: { sheet, conditions: [] } },
+      pcs: { m_alice: { sheet, conditions: [], resources: [] } },
       scene: { name: '阁楼', time: '深夜', publicDesc: '灰尘在光柱里浮动。' },
       facts: ['阁楼的箱子被撬过'],
       updatedAt: '2026-09-25T20:00:06.000Z',

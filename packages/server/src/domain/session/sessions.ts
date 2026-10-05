@@ -73,7 +73,7 @@ export async function createSession(
     pcs: Object.fromEntries(
       Object.entries(roster.pcs).map(([memberId, declared]) => [
         memberId,
-        { sheet: declared.sheet, conditions: [] },
+        { sheet: declared.sheet, conditions: [], resources: [] },
       ]),
     ),
     // 模组 init-state（T-M5-05，TC-FR-10-003）：scene/facts 为模组定义的初始值

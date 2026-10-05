@@ -5,8 +5,20 @@ import type { RandomSource } from '../dice/random.js';
 import type { LlmAdapter, LlmMessage } from '../llm.js';
 import type { RuleBook } from '../rulebook/types.js';
 import type { DirectiveSuccessTracker } from './degrade.js';
-import { executeCheck, executeHp, executeSanity, type PcRoster } from './executor.js';
-import type { CheckDirective, DamageDirective, HealDirective, SanityDirective } from './schema.js';
+import {
+  executeCheck,
+  executeHp,
+  executeResource,
+  executeSanity,
+  type PcRoster,
+} from './executor.js';
+import type {
+  CheckDirective,
+  DamageDirective,
+  HealDirective,
+  ResourceDirective,
+  SanityDirective,
+} from './schema.js';
 import { DirectiveStreamScanner, type DirectiveScanEvent } from './scan.js';
 
 /**
@@ -84,6 +96,16 @@ export interface AiTurnPorts {
     after: number;
     desc: string;
   } | null>;
+  /**
+   * 引擎写路径（T-M12-02，FR-38）：资源计数器——在房间队列内对**当前板**现算
+   * `clamp(current+delta, 0, max)` patch 并乐观锁落盘广播。不掷骰（消耗量是确定的），
+   * 但同样走审计之外的 state:broadcast 通道；返回 null = 板侧拒绝。
+   */
+  applyResourceEffect(
+    key: string,
+    name: string,
+    delta: number,
+  ): Promise<{ before: number; after: number } | null>;
   /** 组装当前 prompt：读盘消息 → 管线 → LlmMessage[]（每请求重建，回注自动入上下文） */
   buildMessages(): Promise<LlmMessage[]>;
   /** 持久化 + 广播 DiceMsg（房间串行队列内，TDD §5.4） */
@@ -213,7 +235,31 @@ export async function runAiTurn(triggerSeq: number, ports: AiTurnPorts): Promise
             ports.alertKp('E-AI-01', reason);
           };
 
-          if (directive.op === 'sanity') {
+          if (directive.op === 'resource') {
+            // 资源计数器（T-M12-02）：不掷骰，直接队列内 clamp 写板 → 回注
+            const result = executeResource(directive, deps);
+            if (!result.ok) {
+              recordFail(result.reason);
+            } else {
+              recordOk();
+              effects.push(
+                (async () => {
+                  const applied = await ports.applyResourceEffect(
+                    result.key,
+                    result.name,
+                    result.delta,
+                  );
+                  if (!applied) {
+                    ports.alertKp('E-AI-01', '状态板写入失败，本次资源变动未落盘');
+                    return;
+                  }
+                  await ports.emitDirectiveResult(
+                    resourceResultText(directive, result.pcName, result.name, applied),
+                  );
+                })(),
+              );
+            }
+          } else if (directive.op === 'sanity') {
             const result = executeSanity(directive, deps);
             if (!result.ok) {
               recordFail(result.reason);
@@ -353,6 +399,18 @@ export function sanityResultText(
     `【理智检定】${pcName}${label}：${checkRoll.expr} → ${checkRoll.total}${verdict}，` +
     `${applied.desc} = ${applied.lossRoll.total}，SAN ${applied.before} → ${applied.after}`
   );
+}
+
+/** 资源变动回注文案（T-M12-02）：资源名、变动方向与前后余量（不掷骰，无骰值） */
+export function resourceResultText(
+  directive: ResourceDirective,
+  pcName: string,
+  name: string,
+  applied: { before: number; after: number },
+): string {
+  const label = directive.label ? `（${directive.label}）` : '';
+  const verb = directive.delta > 0 ? '恢复' : '消耗';
+  return `【资源】${pcName}${label}：${name} ${verb} ${Math.abs(directive.delta)}，${applied.before} → ${applied.after}`;
 }
 
 function outcomeText(check: RollCheck): string {

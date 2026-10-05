@@ -1,4 +1,4 @@
-import type { StateBoard, StatePatch } from '@behindveil/shared';
+import type { Resource, StateBoard, StatePatch } from '@behindveil/shared';
 import type { ParsedRoll } from '../dice/evaluator.js';
 import type { RuleBook } from '../rulebook/types.js';
 
@@ -51,6 +51,7 @@ export function sanityLossPatch(
         [target]: {
           sheet: { ...pc.sheet, san: pc.sheet.san - applied },
           conditions: pc.conditions,
+          resources: pc.resources,
         },
       },
     },
@@ -88,7 +89,49 @@ export function hpPatch(
         [target]: {
           sheet: { ...pc.sheet, hp: { ...pc.sheet.hp, current: next } },
           conditions: pc.conditions,
+          resources: pc.resources,
         },
+      },
+    },
+  };
+}
+
+export type ResourcePatchResult =
+  | { ok: true; patch: StatePatch; before: number; after: number; resource: Resource }
+  | { ok: false; reason: 'pc-not-found' | 'resource-not-found' };
+
+/**
+ * 资源计数器变动 → state patch（T-M12-02，FR-38）：
+ * `current = clamp(current + delta, 0, max)`，applied 为 clamp 后实际变动量。
+ *
+ * 与 HP 同款纯函数：不掷骰、不做 IO，patch 交 applyStatePatch 走与 Host 相同的
+ * 乐观锁写路径。**整体覆盖语义**（patch.pcs[key] 替换整条 PC）因此必须带上
+ * conditions 与 resources 原值——漏带会把 Host 维护的资源一并抹掉。
+ */
+export function resourcePatch(
+  board: StateBoard,
+  target: string,
+  name: string,
+  delta: number,
+): ResourcePatchResult {
+  const pc = board.pcs[target];
+  if (!pc) return { ok: false, reason: 'pc-not-found' };
+  const index = pc.resources.findIndex((r) => r.name === name);
+  const current = pc.resources[index];
+  if (index < 0 || !current) return { ok: false, reason: 'resource-not-found' };
+
+  const next = Math.min(Math.max(current.current + delta, 0), current.max);
+  const updated: Resource = { ...current, current: next };
+  const resources = [...pc.resources];
+  resources[index] = updated;
+  return {
+    ok: true,
+    before: current.current,
+    after: next,
+    resource: updated,
+    patch: {
+      pcs: {
+        [target]: { sheet: pc.sheet, conditions: pc.conditions, resources },
       },
     },
   };

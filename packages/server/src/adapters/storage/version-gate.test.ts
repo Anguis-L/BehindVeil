@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { SCHEMA_VERSION } from '@behindveil/shared';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createServer } from '../../index.js';
 import { createDataLayout } from './layout.js';
@@ -38,12 +39,13 @@ describe('scanArchiveVersions / assertArchivesUpToDate', () => {
     await expect(assertArchivesUpToDate(layout.root)).resolves.toEqual(scan);
   });
 
-  it('全部 v1 存档合规', async () => {
+  it('全部当前版本存档合规', async () => {
     const layout = await makeDataDir();
-    await seed(layout, 'rooms/r1/room.json', JSON.stringify({ schemaVersion: 1, id: 'r1' }));
-    await seed(layout, 'rooms/r1/members.json', JSON.stringify({ schemaVersion: 1, members: [] }));
-    await seed(layout, 'rooms/r1/sessions/s1/session.json', JSON.stringify({ schemaVersion: 1 }));
-    await seed(layout, 'rooms/r1/sessions/s1/state.json', JSON.stringify({ schemaVersion: 1 }));
+    const current = { schemaVersion: SCHEMA_VERSION };
+    await seed(layout, 'rooms/r1/room.json', JSON.stringify({ ...current, id: 'r1' }));
+    await seed(layout, 'rooms/r1/members.json', JSON.stringify({ ...current, members: [] }));
+    await seed(layout, 'rooms/r1/sessions/s1/session.json', JSON.stringify(current));
+    await seed(layout, 'rooms/r1/sessions/s1/state.json', JSON.stringify(current));
 
     const scan = await scanArchiveVersions(layout.root);
     expect(scan.checked).toBe(4);
@@ -56,23 +58,27 @@ describe('scanArchiveVersions / assertArchivesUpToDate', () => {
 
     const scan = await scanArchiveVersions(layout.root);
     expect(scan.issues).toEqual([
-      { relativePath: 'rooms/r1/room.json', kind: 'room', found: 0, expected: 1 },
+      { relativePath: 'rooms/r1/room.json', kind: 'room', found: 0, expected: SCHEMA_VERSION },
     ]);
   });
 
-  it('版本字段非法 → found=invalid；超前版本 → found=2', async () => {
+  it('版本字段非法 → found=invalid；超前版本 → found=当前+1', async () => {
     const layout = await makeDataDir();
     await seed(layout, 'rooms/r1/room.json', JSON.stringify({ schemaVersion: 'x' }));
-    await seed(layout, 'rooms/r1/sessions/s1/state.json', JSON.stringify({ schemaVersion: 2 }));
+    await seed(
+      layout,
+      'rooms/r1/sessions/s1/state.json',
+      JSON.stringify({ schemaVersion: SCHEMA_VERSION + 1 }),
+    );
 
     const scan = await scanArchiveVersions(layout.root);
-    expect(scan.issues.map((i) => i.found).sort()).toEqual([2, 'invalid']);
+    expect(scan.issues.map((i) => i.found).sort()).toEqual([SCHEMA_VERSION + 1, 'invalid']);
   });
 
   it('损坏 JSON 不算版本问题（恢复器辖区）；缺失文件不计', async () => {
     const layout = await makeDataDir();
     await seed(layout, 'rooms/r1/room.json', '{ broken');
-    await seed(layout, 'rooms/r1/roster.json', JSON.stringify({ schemaVersion: 1 }));
+    await seed(layout, 'rooms/r1/roster.json', JSON.stringify({ schemaVersion: SCHEMA_VERSION }));
 
     const scan = await scanArchiveVersions(layout.root);
     expect(scan.checked).toBe(1);
@@ -103,7 +109,11 @@ describe('createServer 启动集成：版本不符拒绝启动', () => {
 
   it('合规存档（或空目录）正常启动', async () => {
     const layout = await makeDataDir();
-    await seed(layout, 'rooms/r1/room.json', JSON.stringify({ schemaVersion: 1, id: 'r1' }));
+    await seed(
+      layout,
+      'rooms/r1/room.json',
+      JSON.stringify({ schemaVersion: SCHEMA_VERSION, id: 'r1' }),
+    );
 
     const app = await createServer({ dataDir: layout.root, logger: false });
     await app.close();

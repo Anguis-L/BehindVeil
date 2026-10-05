@@ -1,7 +1,11 @@
 <script setup lang="ts">
+import { computed, ref } from 'vue';
 import type { Message } from '@behindveil/shared';
+import { useSessionStore } from '../stores/session';
 
-defineProps<{
+const store = useSessionStore();
+
+const props = defineProps<{
   msg: Message;
   senderName: string;
   judgeLabel: string | null;
@@ -13,6 +17,45 @@ defineProps<{
   /** nat20 / nat1 徽章（仅 5e：面值判定，COC 的大成功是骰值 1 而非 nat20） */
   natBadge: string | null;
 }>();
+
+/** 先攻提请已发出的本地反馈（不落盘：提请本身是一条密语消息） */
+const initiativeAsked = ref(false);
+
+const canJoinInitiative = computed(
+  () => props.msg.type === 'dice' && !props.msg.hidden && store.stateBoard !== null,
+);
+
+/**
+ * 「加入先攻」（T-M12-03，FR-37）：Host 直接写板；玩家只能提请（密语给 Host）。
+ * 看板红线——只搬运骰值，不做任何轮次推进或自动结算。
+ */
+function joinInitiative(): void {
+  const board = store.stateBoard;
+  if (!board) return;
+  const label = props.senderName;
+  const roll = props.msg.type === 'dice' ? props.msg.roll.total : 0;
+  if (store.role !== 'host') {
+    const host = store.members?.find((m) => m.role === 'host');
+    if (host) {
+      store.whisper(host.id, `【先攻提请】${label} 掷出 ${roll}，请 Host 加入先攻看板`);
+      initiativeAsked.value = true;
+    }
+    return;
+  }
+  const scene = board.scene;
+  const entry = {
+    ref: (props.msg.type === 'dice' ? props.msg.senderId : undefined) ?? `npc:${label}`,
+    label,
+    roll,
+  };
+  const order = [...(scene.initiative?.order ?? []), entry].sort((a, b) => b.roll - a.roll);
+  store.updateState({
+    scene: {
+      ...scene,
+      initiative: { order, currentIdx: 0, round: scene.initiative?.round ?? 1 },
+    },
+  });
+}
 </script>
 
 <template>
@@ -67,6 +110,12 @@ defineProps<{
       <span>保留 {{ msg.hidden ? '[隐藏]' : JSON.stringify(msg.roll.kept) }}</span>
       <span>流水号 #{{ msg.roll.audit.seq }}</span>
       <span>服务端掷骰 · 可复现</span>
+    </div>
+    <div v-if="canJoinInitiative" class="bv-dice-card__actions">
+      <button class="bv-board__btn bv-board__btn--ghost" @click="joinInitiative">
+        {{ store.role === 'host' ? '加入先攻' : '提请加入先攻' }}
+      </button>
+      <span v-if="initiativeAsked" class="bv-dice-card__hint">已密语 Host，等其录入</span>
     </div>
   </article>
 
@@ -201,6 +250,16 @@ defineProps<{
   color: var(--bv-judge);
   font-family: ui-monospace, monospace;
   letter-spacing: 0.05em;
+}
+.bv-dice-card__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--bv-space-2);
+  margin-top: var(--bv-space-1);
+}
+.bv-dice-card__hint {
+  color: var(--bv-text-tertiary);
+  font-size: 12px;
 }
 .bv-dice-card__audit {
   display: flex;

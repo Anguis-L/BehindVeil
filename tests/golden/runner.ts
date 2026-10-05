@@ -21,6 +21,8 @@ import { fileURLToPath } from 'node:url';
 import { buildPrompt } from '../../packages/server/dist/pipeline/index.js';
 import { createHeuristicTokenizer } from '../../packages/server/dist/pipeline/tokenizer.js';
 import { MessageSchema } from '../../packages/shared/dist/message.js';
+import { StateBoardSchema } from '../../packages/shared/dist/domain.js';
+import { StateBoardSchema } from '../../packages/shared/dist/domain.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -126,6 +128,17 @@ export function runGoldenCaseSync(goldenCase: GoldenCase): GoldenResult {
     const parsed = MessageSchema.safeParse(message);
     if (!parsed.success) {
       diffs.push(`input.messages[${index}] 不符合 MessageSchema：${parsed.error.message}`);
+    }
+  }
+
+  // 状态板同样过一遍共享契约（T-M12-01/02）：裸 JSON 快照不会自带 v3 新字段的默认值
+  // （如 resources），不 parse 就与真实运行时的输入不同构——用例会假绿或假红。
+  if (input.stateBoard) {
+    const parsed = StateBoardSchema.safeParse(input.stateBoard);
+    if (!parsed.success) {
+      diffs.push(`input.stateBoard 不符合 StateBoardSchema：${parsed.error.message}`);
+    } else {
+      input.stateBoard = parsed.data;
     }
   }
 

@@ -184,17 +184,88 @@ export type Dnd5eSheet = z.infer<typeof Dnd5eSheetSchema>;
 export const PCSheetSchema = z.discriminatedUnion('rulebook', [Coc7SheetSchema, Dnd5eSheetSchema]);
 export type PCSheet = z.infer<typeof PCSheetSchema>;
 
+/**
+ * 状态条目（v3 FR-39）：由裸字符串升级为对象，承载「说明」与「到期提示」。
+ * 迁移器首个真实用例——v1 的 `string` 由 state 链 v1→v2 节点升为 `{ label }`。
+ */
+export const ConditionSchema = z.object({
+  /** 状态名，如「重伤」「疯狂(临时)」 */
+  label: z.string(),
+  /** 补充说明，如「左腿，行动 -20%」 */
+  note: z.string().optional(),
+  /** 到期提示（人读文本，不做任何自动解除——看板红线），如「3 回合后」「长休后」 */
+  expiresHint: z.string().optional(),
+});
+export type Condition = z.infer<typeof ConditionSchema>;
+
+/**
+ * 状态条目的单行文本：note 以括号附注。
+ * expiresHint 刻意不入——它是给 Host 看的到期提示（看板红线：不做自动解除），
+ * 进 prompt 只会涨 token 且诱导 AI 自行到期。UI 与导出各自按需展示。
+ */
+export function conditionText(condition: Condition): string {
+  return condition.note ? `${condition.label}（${condition.note}）` : condition.label;
+}
+
+/**
+ * 通用资源计数器（v3 FR-38 / ADR-3-07）：法术位、弹药、理智点余量之类「有上限的消耗品」。
+ * 挂在状态板 PC 层（与 conditions 并列）而非 PCSheet——规则书不感知、机制通用，
+ * 且避免 M8 判别联合式全仓消费面改造重演。
+ * `resetOn` 只是给 Host 的标签，服务端不做任何自动重置（看板红线）。
+ */
+export const RESOURCE_RESET_ON = ['short_rest', 'long_rest', 'none'] as const;
+export type ResourceResetOn = (typeof RESOURCE_RESET_ON)[number];
+
+export const ResourceSchema = z.object({
+  /** 资源名，如「一环法术位」「箭矢」 */
+  name: z.string(),
+  current: z.number(),
+  max: z.number(),
+  resetOn: z.enum(RESOURCE_RESET_ON).default('none'),
+});
+export type Resource = z.infer<typeof ResourceSchema>;
+
 export const StateBoardPcSchema = z.object({
   sheet: PCSheetSchema,
-  /** 如 ["疯狂(临时)", "重伤"] */
-  conditions: z.array(z.string()),
+  /** 如 [{ label: "疯狂(临时)", note: "见血即触发" }] */
+  conditions: z.array(ConditionSchema),
+  /** 缺省空数组：v2.0 存档无此字段，加字段带默认即向后兼容 */
+  resources: z.array(ResourceSchema).default([]),
 });
 export type StateBoardPc = z.infer<typeof StateBoardPcSchema>;
+
+/**
+ * 先攻条目（v3 FR-37）：ref 是状态板内的定位键——PC 用 memberId，NPC 用 `npc:<名字>`。
+ * roll 是先攻值（由玩家掷骰产生、Host 录入或确认），看板只做排序与展示。
+ */
+export const InitiativeEntrySchema = z.object({
+  ref: z.string(),
+  label: z.string(),
+  roll: z.number(),
+});
+export type InitiativeEntry = z.infer<typeof InitiativeEntrySchema>;
+
+/**
+ * 先攻看板（ADR-3-06：状态板 scene 扩展，复用 state:update / state:broadcast 既有通道）。
+ * 红线：只做数据与展示——currentIdx / round 的推进一律由 Host 手动点，
+ * 服务端与前端都不含任何「自动结算/自动推进」代码路径。
+ */
+export const InitiativeSchema = z.object({
+  /** 按先攻值降序保存；展示即此顺序 */
+  order: z.array(InitiativeEntrySchema),
+  /** 当前行动者在 order 中的下标 */
+  currentIdx: z.number().int(),
+  /** 轮次，从 1 起 */
+  round: z.number().int().nonnegative(),
+});
+export type Initiative = z.infer<typeof InitiativeSchema>;
 
 export const StateBoardSceneSchema = z.object({
   name: z.string(),
   time: z.string(),
   publicDesc: z.string(),
+  /** 缺省 = 本场景无先攻（v2.0 行为）；null = Host 显式清除 */
+  initiative: InitiativeSchema.nullable().optional(),
 });
 export type StateBoardScene = z.infer<typeof StateBoardSceneSchema>;
 

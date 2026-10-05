@@ -1,3 +1,4 @@
+import { SCHEMA_VERSION } from '@behindveil/shared';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -271,7 +272,7 @@ describe('世界书编辑器 REST（FR-35）', () => {
     const raw = JSON.parse(
       await readFile(path.join(layout.roomsDir, roomId, 'worldbook.json'), 'utf8'),
     ) as Record<string, unknown>;
-    expect(raw['schemaVersion']).toBe(1);
+    expect(raw['schemaVersion']).toBe(SCHEMA_VERSION);
   });
 
   it('模组世界书只读：GET 可得，不存在的模组 404；没有 PUT 接口', async () => {

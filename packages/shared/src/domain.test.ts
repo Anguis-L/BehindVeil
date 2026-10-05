@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   CharacterCardV3Schema,
+  ConditionSchema,
+  InitiativeSchema,
   PCSheetSchema,
+  ResourceSchema,
   RoomSchema,
   SessionSchema,
   StateBoardSchema,
+  conditionText,
 } from './domain.js';
 
 /**
@@ -60,7 +64,7 @@ const session = {
 
 const stateBoard = {
   version: 1,
-  pcs: { member_1: { sheet, conditions: ['重伤'] } },
+  pcs: { member_1: { sheet, conditions: [{ label: '重伤' }], resources: [] } },
   scene: { name: '书房', time: '1924-03-12 夜', publicDesc: '壁炉噼啪作响' },
   facts: ['门从内侧反锁'],
   updatedAt: '2026-09-25T00:00:00.000Z',
@@ -155,7 +159,7 @@ describe('StateBoardSchema（TDD §3.7）', () => {
   it('接受合法状态板', () => {
     const parsed = StateBoardSchema.parse(stateBoard);
     expect(parsed.version).toBe(1);
-    expect(parsed.pcs['member_1']?.conditions).toEqual(['重伤']);
+    expect(parsed.pcs['member_1']?.conditions).toEqual([{ label: '重伤' }]);
   });
 
   it('version 为乐观锁，不可为负（E-ST-01 依赖）', () => {
@@ -237,5 +241,153 @@ describe('CharacterCardV3Schema（TDD §3.3）', () => {
     expect(
       CharacterCardV3Schema.safeParse({ ...card, data: { ...card.data, extensions: {} } }).success,
     ).toBe(true);
+  });
+});
+
+describe('ConditionSchema（T-M12-01，FR-39）', () => {
+  it('label 必填，note / expiresHint 选填', () => {
+    expect(ConditionSchema.parse({ label: '重伤' })).toEqual({ label: '重伤' });
+    const full = ConditionSchema.parse({
+      label: '疯狂(临时)',
+      note: '见血触发',
+      expiresHint: '长休后',
+    });
+    expect(full.note).toBe('见血触发');
+    expect(full.expiresHint).toBe('长休后');
+  });
+
+  it('缺 label 拒绝（迁移器产出的形态必须是对象）', () => {
+    expect(ConditionSchema.safeParse({ note: '没有名字' }).success).toBe(false);
+    // 裸字符串不再是合法状态——v1 形态只能经迁移函数进入
+    expect(ConditionSchema.safeParse('轻伤').success).toBe(false);
+  });
+
+  it('conditionText：note 以括号附注，expiresHint 不入（防诱导 AI 自行到期）', () => {
+    expect(conditionText({ label: '重伤' })).toBe('重伤');
+    expect(conditionText({ label: '重伤', note: '左臂' })).toBe('重伤（左臂）');
+    expect(conditionText({ label: '重伤', expiresHint: '3 回合' })).toBe('重伤');
+  });
+});
+
+describe('ResourceSchema（T-M12-02，FR-38）', () => {
+  it('resetOn 缺省 none', () => {
+    expect(ResourceSchema.parse({ name: '箭矢', current: 5, max: 20 })).toEqual({
+      name: '箭矢',
+      current: 5,
+      max: 20,
+      resetOn: 'none',
+    });
+  });
+
+  it('resetOn 只收短休/长休/不重置', () => {
+    expect(
+      ResourceSchema.safeParse({ name: 'x', current: 0, max: 1, resetOn: 'daily' }).success,
+    ).toBe(false);
+  });
+
+  it('PC 层 resources 缺省空数组（v2.0 存档无此字段，加字段带默认即兼容）', () => {
+    const parsed = StateBoardSchema.safeParse({
+      ...stateBoard,
+      pcs: { member_1: { sheet: stateBoard.pcs['member_1']?.sheet, conditions: [] } },
+    });
+    expect(parsed.success && parsed.data.pcs['member_1']?.resources).toEqual([]);
+  });
+});
+
+describe('InitiativeSchema（T-M12-03，FR-37）', () => {
+  it('order / currentIdx / round 三件套', () => {
+    const parsed = InitiativeSchema.parse({
+      order: [
+        { ref: 'm1', label: '爱丽丝', roll: 18 },
+        { ref: 'npc:哥布林', label: '哥布林', roll: 12 },
+      ],
+      currentIdx: 0,
+      round: 2,
+    });
+    expect(parsed.order).toHaveLength(2);
+  });
+
+  it('currentIdx 必须整数（看板推进是 Host 手动点，不允许小数态）', () => {
+    expect(InitiativeSchema.safeParse({ order: [], currentIdx: 0.5, round: 1 }).success).toBe(
+      false,
+    );
+  });
+
+  it('scene.initiative 缺省 = 无先攻（v2.0 行为）', () => {
+    expect(StateBoardSchema.parse(stateBoard).scene.initiative).toBeUndefined();
+  });
+});
+
+describe('ConditionSchema（T-M12-01，FR-39）', () => {
+  it('label 必填，note / expiresHint 选填', () => {
+    expect(ConditionSchema.parse({ label: '重伤' })).toEqual({ label: '重伤' });
+    const full = ConditionSchema.parse({
+      label: '疯狂(临时)',
+      note: '见血触发',
+      expiresHint: '长休后',
+    });
+    expect(full.note).toBe('见血触发');
+    expect(full.expiresHint).toBe('长休后');
+  });
+
+  it('缺 label 拒绝（迁移器产出的形态必须是对象）', () => {
+    expect(ConditionSchema.safeParse({ note: '没有名字' }).success).toBe(false);
+    // 裸字符串不再是合法状态——v1 形态只能经迁移函数进入
+    expect(ConditionSchema.safeParse('轻伤').success).toBe(false);
+  });
+
+  it('conditionText：note 以括号附注，expiresHint 不入（防诱导 AI 自行到期）', () => {
+    expect(conditionText({ label: '重伤' })).toBe('重伤');
+    expect(conditionText({ label: '重伤', note: '左臂' })).toBe('重伤（左臂）');
+    expect(conditionText({ label: '重伤', expiresHint: '3 回合' })).toBe('重伤');
+  });
+});
+
+describe('ResourceSchema（T-M12-02，FR-38）', () => {
+  it('resetOn 缺省 none', () => {
+    expect(ResourceSchema.parse({ name: '箭矢', current: 5, max: 20 })).toEqual({
+      name: '箭矢',
+      current: 5,
+      max: 20,
+      resetOn: 'none',
+    });
+  });
+
+  it('resetOn 只收短休/长休/不重置', () => {
+    expect(
+      ResourceSchema.safeParse({ name: 'x', current: 0, max: 1, resetOn: 'daily' }).success,
+    ).toBe(false);
+  });
+
+  it('PC 层 resources 缺省空数组（v2.0 存档无此字段，加字段带默认即兼容）', () => {
+    const parsed = StateBoardSchema.safeParse({
+      ...stateBoard,
+      pcs: { member_1: { sheet: stateBoard.pcs['member_1']?.sheet, conditions: [] } },
+    });
+    expect(parsed.success && parsed.data.pcs['member_1']?.resources).toEqual([]);
+  });
+});
+
+describe('InitiativeSchema（T-M12-03，FR-37）', () => {
+  it('order / currentIdx / round 三件套', () => {
+    const parsed = InitiativeSchema.parse({
+      order: [
+        { ref: 'm1', label: '爱丽丝', roll: 18 },
+        { ref: 'npc:哥布林', label: '哥布林', roll: 12 },
+      ],
+      currentIdx: 0,
+      round: 2,
+    });
+    expect(parsed.order).toHaveLength(2);
+  });
+
+  it('currentIdx 必须整数（看板推进是 Host 手动点，不允许小数态）', () => {
+    expect(InitiativeSchema.safeParse({ order: [], currentIdx: 0.5, round: 1 }).success).toBe(
+      false,
+    );
+  });
+
+  it('scene.initiative 缺省 = 无先攻（v2.0 行为）', () => {
+    expect(StateBoardSchema.parse(stateBoard).scene.initiative).toBeUndefined();
   });
 });

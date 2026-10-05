@@ -6,7 +6,13 @@ import { DiceExpressionError, parseDiceExpr } from '../dice/parser.js';
 import { DND5E_DEFAULT_DC, createRuleBook } from '../rulebook/index.js';
 import type { RuleBook } from '../rulebook/types.js';
 import { resolvePc } from '../stateboard/roster.js';
-import type { CheckDirective, DamageDirective, HealDirective, SanityDirective } from './schema.js';
+import type {
+  CheckDirective,
+  DamageDirective,
+  HealDirective,
+  ResourceDirective,
+  SanityDirective,
+} from './schema.js';
 
 /** 名册查询产物：found=false 区分查无人/查无技能（KP 告警文案需要） */
 export type RosterLookup =
@@ -196,4 +202,66 @@ export function executeSanity(
   const random = deps.random ?? createCsprngRandom();
   const checkRoll = rollDice(`1d100<=${sheet.san}`, { random, rulebook, kind: 'sanity' });
   return { ok: true, pcName: sheet.playerName, key: resolved.key, checkRoll };
+}
+
+export type ResourceExecution =
+  | {
+      ok: true;
+      pcName: string;
+      /** 目标在状态板内的键 */
+      key: string;
+      /** 命中的资源名（回注文案用；与指令同名，大小写与空白均已 trim） */
+      name: string;
+      delta: number;
+    }
+  | { ok: false; code: 'E-AI-01'; reason: string };
+
+/**
+ * 资源计数器执行器（T-M12-02，FR-38）：**不掷骰**——法术位/箭矢的消耗是确定的「几个」，
+ * 没有随机结构（区别于 damage/heal 的表达式）。此处只做防呆：PC 存在、资源名存在、
+ * 且资源确实有可变动空间（已满还让恢复 / 已空还让消耗 = AI 表达自相矛盾，归 E-AI-01
+ * 并由 KP 告警，不静默 clamp 成零变动）。实际 clamp 落板在网关队列内的 resourcePatch。
+ */
+export function executeResource(
+  directive: ResourceDirective,
+  deps: EffectExecutorDeps,
+): ResourceExecution {
+  const board = deps.board;
+  const resolved = board ? resolvePc(board, directive.target.slice('pc:'.length)) : null;
+  if (!board || !resolved) {
+    return { ok: false, code: 'E-AI-01', reason: `名册查无 PC：${directive.target}` };
+  }
+  const resource = resolved.pc.resources.find((r) => r.name === directive.name);
+  if (!resource) {
+    return {
+      ok: false,
+      code: 'E-AI-01',
+      reason: `${resolved.pc.sheet.playerName} 没有名为「${directive.name}」的资源计数器`,
+    };
+  }
+  if (directive.delta === 0) {
+    return { ok: false, code: 'E-AI-01', reason: `资源变动量为 0，指令无意义：${directive.name}` };
+  }
+  const target = resource.current + directive.delta;
+  if (target < 0) {
+    return {
+      ok: false,
+      code: 'E-AI-01',
+      reason: `「${directive.name}」余量不足（当前 ${resource.current}，需消耗 ${Math.abs(directive.delta)}）`,
+    };
+  }
+  if (target > resource.max) {
+    return {
+      ok: false,
+      code: 'E-AI-01',
+      reason: `「${directive.name}」恢复量超过上限（当前 ${resource.current}，上限 ${resource.max}）`,
+    };
+  }
+  return {
+    ok: true,
+    pcName: resolved.pc.sheet.playerName,
+    key: resolved.key,
+    name: directive.name,
+    delta: directive.delta,
+  };
 }

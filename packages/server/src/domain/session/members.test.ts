@@ -1,3 +1,4 @@
+import { SCHEMA_VERSION } from '@behindveil/shared';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -41,7 +42,7 @@ describe('readMembers（容错口径）', () => {
 
   it('v1 信封缺 members 字段（不是数组）→ 空数组，不抛错', async () => {
     const layout = await makeLayout();
-    await seedMembersFile(layout, 'room-1', '{"schemaVersion":1}');
+    await seedMembersFile(layout, 'room-1', `{"schemaVersion":${SCHEMA_VERSION}}`);
     expect(await readMembers(layout, 'room-1')).toEqual([]);
   });
 
@@ -51,7 +52,10 @@ describe('readMembers（容错口径）', () => {
     await seedMembersFile(
       layout,
       'room-1',
-      JSON.stringify({ schemaVersion: 1, members: [good, { junk: true }, 'not-an-object'] }),
+      JSON.stringify({
+        schemaVersion: SCHEMA_VERSION,
+        members: [good, { junk: true }, 'not-an-object'],
+      }),
     );
 
     const members = await readMembers(layout, 'room-1');

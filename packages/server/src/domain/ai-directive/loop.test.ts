@@ -21,7 +21,7 @@ import {
   sanityResultText,
   type AiTurnPorts,
 } from './loop.js';
-import { hpPatch, sanityLossPatch } from '../stateboard/engine-writes.js';
+import { hpPatch, resourcePatch, sanityLossPatch } from '../stateboard/engine-writes.js';
 import { applyStatePatch } from '../stateboard/board.js';
 import { rollDice } from '../dice/evaluator.js';
 import { Coc7RuleBook } from '../rulebook/coc7.js';
@@ -91,6 +91,14 @@ interface Harness {
     before: number;
     after: number;
   }>;
+  /** 资源计数器变动记录（T-M12-02，FR-38） */
+  resourceEffects: Array<{
+    key: string;
+    name: string;
+    delta: number;
+    before: number;
+    after: number;
+  }>;
 }
 
 function harness(
@@ -114,6 +122,13 @@ function harness(
     sanRoll: number;
     lossRoll: ParsedRoll;
     loss: number;
+    before: number;
+    after: number;
+  }> = [];
+  const resourceEffects: Array<{
+    key: string;
+    name: string;
+    delta: number;
     before: number;
     after: number;
   }> = [];
@@ -192,6 +207,16 @@ function harness(
         desc: lossHint ? `KP 指定损失 ${lossExpr}` : tier.desc,
       };
     },
+    applyResourceEffect: async (key, name, delta) => {
+      if (!liveBoard) return null;
+      const produced = resourcePatch(liveBoard, key, name, delta);
+      if (!produced.ok) return null;
+      const lock = applyStatePatch(liveBoard, produced.patch, liveBoard.version);
+      if (!lock.ok) return null;
+      Object.assign(liveBoard, lock.next);
+      resourceEffects.push({ key, name, delta, before: produced.before, after: produced.after });
+      return { before: produced.before, after: produced.after };
+    },
     buildMessages: async () => [{ role: 'user', content: '玩家：我翻查书桌。' }],
     emitDice: async (roll) => {
       dice.push(roll);
@@ -232,6 +257,7 @@ function harness(
     records,
     hpEffects,
     sanityEffects,
+    resourceEffects,
   };
 }
 
@@ -626,6 +652,7 @@ const board5e = (current = 22, max = 22): StateBoard => ({
         proficientSaves: ['str', 'con'],
       },
       conditions: [],
+      resources: [],
     },
   },
   scene: { name: '', time: '', publicDesc: '' },
@@ -658,6 +685,7 @@ const boardCoc7 = (san = 55): StateBoard => ({
         skills: { 侦查: 60 },
       },
       conditions: [],
+      resources: [],
     },
   },
   scene: { name: '', time: '', publicDesc: '' },

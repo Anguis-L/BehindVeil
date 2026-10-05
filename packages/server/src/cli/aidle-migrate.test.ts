@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
+import { SCHEMA_VERSION } from '@behindveil/shared';
 import { createDataLayout } from '../adapters/storage/layout.js';
 import { runMigrate } from './aidle-migrate.js';
 
@@ -146,22 +147,24 @@ describe('runMigrate', () => {
     const roomRaw = JSON.parse(
       await readFile(path.join(root, 'rooms/room-old/room.json'), 'utf8'),
     ) as Record<string, unknown>;
-    expect(roomRaw['schemaVersion']).toBe(1);
+    expect(roomRaw['schemaVersion']).toBe(SCHEMA_VERSION);
     expect(roomRaw['hostToken']).toBe('ht_secret');
 
     // members：数组根 → 对象根
     const membersRaw = JSON.parse(
       await readFile(path.join(root, 'rooms/room-old/members.json'), 'utf8'),
     ) as { schemaVersion: number; members: unknown[] };
-    expect(membersRaw.schemaVersion).toBe(1);
+    expect(membersRaw.schemaVersion).toBe(SCHEMA_VERSION);
     expect(membersRaw.members).toHaveLength(2);
 
     // session / state payload 完整保留
     const state = JSON.parse(
       await readFile(path.join(root, 'rooms/room-old/sessions/ses_old/state.json'), 'utf8'),
     ) as { schemaVersion: number; pcs: Record<string, unknown> };
-    expect(state.schemaVersion).toBe(1);
+    expect(state.schemaVersion).toBe(SCHEMA_VERSION);
     expect(Object.keys(state.pcs)).toEqual(['m2']);
+    // 迁移器首演（T-M12-01，FR-39）：v1 的裸字符串状态升为 { label }
+    expect(state.pcs['m2']).toMatchObject({ conditions: [{ label: '轻伤' }] });
 
     // JSONL 不迁移，内容原样
     const messages = await readFile(
@@ -232,14 +235,14 @@ describe('runMigrate', () => {
     expect(await backupDirs(root)).toHaveLength(1);
   });
 
-  it('混合存量：v2.0 旧件与 v1 新件并存，只升级旧件', async () => {
+  it('混合存量：v2.0 旧件与当前版本新件并存，只升级旧件', async () => {
     const root = await makeDataDir();
     await seedV20Archive(root, 'room-old');
     await seed(
       root,
       'rooms/room-new/room.json',
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: SCHEMA_VERSION,
         id: 'room-new',
         name: '新团',
         createdAt: '2026-10-03T10:00:00.000Z',
@@ -259,6 +262,6 @@ describe('runMigrate', () => {
       string,
       unknown
     >;
-    expect(newRoom['schemaVersion']).toBe(1);
+    expect(newRoom['schemaVersion']).toBe(SCHEMA_VERSION);
   });
 });

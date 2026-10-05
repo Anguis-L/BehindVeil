@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue';
 import { useSessionStore } from '../stores/session';
+import { conditionText } from '@behindveil/shared';
 import type {
   Coc7Sheet,
+  Condition,
   Dnd5eAbility,
+  Initiative,
   PCSheet,
+  Resource,
+  ResourceResetOn,
   StateBoardPc,
   StatePatch,
 } from '@behindveil/shared';
@@ -22,19 +27,32 @@ const editable = computed(() => store.role === 'host' && store.stateBoard !== nu
 
 /** Host 编辑草稿按规则书分型：两套卡的数值面不同，保存时各自并回 sheet */
 type PcDraft =
-  | { rulebook: 'coc7'; san: number; hp: number; mp: number; conditions: string[] }
-  | { rulebook: 'dnd5e'; hpCurrent: number; hpMax: number; conditions: string[] };
+  | {
+      rulebook: 'coc7';
+      san: number;
+      hp: number;
+      mp: number;
+      conditions: Condition[];
+      resources: Resource[];
+    }
+  | {
+      rulebook: 'dnd5e';
+      hpCurrent: number;
+      hpMax: number;
+      conditions: Condition[];
+      resources: Resource[];
+    };
 
 /** 本地编辑草稿：进入编辑时深拷贝当前板，保存时整体作为 patch 提交 */
 const draft = reactive<{
   active: boolean;
-  scene: { name: string; time: string; publicDesc: string };
+  scene: { name: string; time: string; publicDesc: string; initiative: Initiative | null };
   facts: string[];
   newFact: string;
   pcs: Record<string, PcDraft>;
 }>({
   active: false,
-  scene: { name: '', time: '', publicDesc: '' },
+  scene: { name: '', time: '', publicDesc: '', initiative: null },
   facts: [],
   newFact: '',
   pcs: {},
@@ -45,7 +63,7 @@ watch(
   (board) => {
     if (!board || !draft.active) return;
     // 广播到达（自己保存成功 / 他人冲突对齐）时刷新草稿底稿，但保留未保存的输入
-    draft.scene = { ...board.scene };
+    draft.scene = { ...board.scene, initiative: cloneInitiative(board.scene.initiative) };
     draft.facts = [...board.facts];
     for (const [id, pc] of Object.entries(board.pcs)) {
       if (draft.pcs[id]) continue; // 编辑中不覆盖已展开的行
@@ -55,23 +73,32 @@ watch(
 );
 
 function pickEditable(pc: StateBoardPc): PcDraft {
-  const conditions = [...pc.conditions];
+  // 状态条目是对象（v3 FR-39）：逐条浅拷贝，避免草稿与原板共用引用
+  const conditions = pc.conditions.map((c) => ({ ...c }));
   if (pc.sheet.rulebook === 'dnd5e') {
     return {
       rulebook: 'dnd5e',
       hpCurrent: pc.sheet.hp.current,
       hpMax: pc.sheet.hp.max,
       conditions,
+      resources: pc.resources.map((r) => ({ ...r })),
     };
   }
-  return { rulebook: 'coc7', san: pc.sheet.san, hp: pc.sheet.hp, mp: pc.sheet.mp, conditions };
+  return {
+    rulebook: 'coc7',
+    san: pc.sheet.san,
+    hp: pc.sheet.hp,
+    mp: pc.sheet.mp,
+    conditions,
+    resources: pc.resources.map((r) => ({ ...r })),
+  };
 }
 
 function beginEdit(): void {
   const board = store.stateBoard;
   if (!board) return;
   draft.active = true;
-  draft.scene = { ...board.scene };
+  draft.scene = { ...board.scene, initiative: cloneInitiative(board.scene.initiative) };
   draft.facts = [...board.facts];
   draft.pcs = Object.fromEntries(
     Object.entries(board.pcs).map(([id, pc]) => [id, pickEditable(pc)]),
@@ -80,6 +107,70 @@ function beginEdit(): void {
 
 function cancelEdit(): void {
   draft.active = false;
+}
+
+/** 先攻看板（T-M12-03，FR-37）：全部操作都是 Host 手动点，无任何自动推进 */
+function cloneInitiative(source: Initiative | null | undefined): Initiative | null {
+  return source ? { ...source, order: source.order.map((e) => ({ ...e })) } : null;
+}
+
+function initiativeDraft(): Initiative | null {
+  return draft.scene.initiative;
+}
+
+function ensureInitiative(): Initiative {
+  if (!draft.scene.initiative) {
+    draft.scene.initiative = { order: [], currentIdx: 0, round: 1 };
+  }
+  return draft.scene.initiative;
+}
+
+function addInitiativeEntry(): void {
+  ensureInitiative().order.push({ ref: `npc:${Date.now()}`, label: '', roll: 0 });
+}
+
+function removeInitiativeEntry(index: number): void {
+  const init = initiativeDraft();
+  if (!init) return;
+  init.order.splice(index, 1);
+  if (init.currentIdx >= init.order.length) init.currentIdx = 0;
+}
+
+/** 按先攻值降序重排（录入顺序不必有序，排序是展示口径） */
+function sortInitiative(): void {
+  const init = initiativeDraft();
+  if (!init) return;
+  init.order.sort((a, b) => b.roll - a.roll);
+  init.currentIdx = 0;
+}
+
+function stepInitiative(delta: number): void {
+  const init = initiativeDraft();
+  if (!init || init.order.length === 0) return;
+  const next = init.currentIdx + delta;
+  if (next >= init.order.length) {
+    init.currentIdx = 0;
+    init.round += 1;
+  } else if (next < 0) {
+    init.currentIdx = init.order.length - 1;
+    if (init.round > 1) init.round -= 1;
+  } else {
+    init.currentIdx = next;
+  }
+}
+
+function setInitiativeField<K extends 'label' | 'roll'>(
+  index: number,
+  field: K,
+  value: string,
+): void {
+  const entry = initiativeDraft()?.order[index];
+  if (!entry) return;
+  if (field === 'label') entry.label = value;
+  else {
+    const parsed = Number(value);
+    entry.roll = Number.isFinite(parsed) ? parsed : 0;
+  }
 }
 
 function addFact(): void {
@@ -91,6 +182,59 @@ function addFact(): void {
 
 function removeFact(index: number): void {
   draft.facts.splice(index, 1);
+}
+
+/** 状态条目编辑（FR-39）：标签必填，说明与到期提示选填——到期只是给人看的提示，不做自动解除 */
+function addCondition(memberId: string): void {
+  draft.pcs[memberId]?.conditions.push({ label: '' });
+}
+
+function removeCondition(memberId: string, index: number): void {
+  draft.pcs[memberId]?.conditions.splice(index, 1);
+}
+
+function addResource(memberId: string): void {
+  draft.pcs[memberId]?.resources.push({ name: '', current: 0, max: 0, resetOn: 'none' });
+}
+
+function removeResource(memberId: string, index: number): void {
+  draft.pcs[memberId]?.resources.splice(index, 1);
+}
+
+function setResourceNumber(
+  memberId: string,
+  index: number,
+  field: 'current' | 'max',
+  value: string,
+): void {
+  const res = draft.pcs[memberId]?.resources[index];
+  if (!res) return;
+  const parsed = Number(value);
+  res[field] = Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0;
+}
+
+function setResourceMeta(
+  memberId: string,
+  index: number,
+  field: 'name' | 'resetOn',
+  value: string,
+): void {
+  const res = draft.pcs[memberId]?.resources[index];
+  if (!res) return;
+  if (field === 'name') res.name = value;
+  else res.resetOn = value as ResourceResetOn;
+}
+
+function setConditionField<K extends 'label' | 'note' | 'expiresHint'>(
+  memberId: string,
+  index: number,
+  field: K,
+  value: string,
+): void {
+  const cond = draft.pcs[memberId]?.conditions[index];
+  if (!cond) return;
+  if (value === '') delete cond[field];
+  else cond[field] = value;
 }
 
 function save(): void {
@@ -107,7 +251,10 @@ function save(): void {
           id,
           {
             sheet,
-            conditions: edited ? edited.conditions.filter((c) => c.trim() !== '') : pc.conditions,
+            conditions: edited
+              ? edited.conditions.filter((c) => c.label.trim() !== '')
+              : pc.conditions,
+            resources: edited ? edited.resources.filter((r) => r.name.trim() !== '') : pc.resources,
           },
         ];
       }),
@@ -213,6 +360,84 @@ function hpPercent(current: number, max: number): number {
         placeholder="场景描述"
       ></textarea>
 
+      <!-- 先攻看板（T-M12-03，FR-37）：只读展示 + Host 手动维护 -->
+      <template v-if="store.stateBoard.scene.initiative">
+        <h3 class="bv-board__section">
+          先攻
+          <span class="bv-board__round">R{{ store.stateBoard.scene.initiative.round }}</span>
+        </h3>
+        <ol class="bv-board__initiative">
+          <li
+            v-for="(entry, i) in store.stateBoard.scene.initiative.order"
+            :key="entry.ref"
+            class="bv-board__init-entry"
+            :class="{
+              'bv-board__init-entry--current': i === store.stateBoard.scene.initiative.currentIdx,
+            }"
+          >
+            <span class="bv-board__init-roll">{{ entry.roll }}</span>
+            <span class="bv-board__init-label">{{ entry.label }}</span>
+          </li>
+        </ol>
+      </template>
+      <template v-if="draft.active">
+        <div class="bv-board__cond-edit">
+          <div class="bv-board__init-actions">
+            <button class="bv-board__btn bv-board__btn--ghost" @click="ensureInitiative">
+              {{ draft.scene.initiative ? '编辑先攻' : '新建先攻' }}
+            </button>
+            <template v-if="draft.scene.initiative">
+              <button class="bv-board__btn bv-board__btn--ghost" @click="addInitiativeEntry">
+                + 条目
+              </button>
+              <button class="bv-board__btn bv-board__btn--ghost" @click="sortInitiative">
+                按值排序
+              </button>
+              <button class="bv-board__btn bv-board__btn--ghost" @click="stepInitiative(-1)">
+                ← 上一个
+              </button>
+              <button class="bv-board__btn bv-board__btn--ghost" @click="stepInitiative(1)">
+                下一个 →
+              </button>
+              <button
+                class="bv-board__btn bv-board__btn--ghost"
+                @click="draft.scene.initiative = null"
+              >
+                清除
+              </button>
+            </template>
+          </div>
+          <div
+            v-for="(entry, i) in draft.scene.initiative?.order ?? []"
+            :key="i"
+            class="bv-board__cond-row"
+          >
+            <span class="bv-board__init-idx">{{
+              i === draft.scene.initiative?.currentIdx ? '▸' : ''
+            }}</span>
+            <input
+              :value="entry.label"
+              class="bv-board__input bv-board__input--cond"
+              placeholder="名字（如 哥布林）"
+              @input="setInitiativeField(i, 'label', ($event.target as HTMLInputElement).value)"
+            />
+            <input
+              :value="String(entry.roll)"
+              class="bv-board__input bv-board__num"
+              title="先攻值"
+              @input="setInitiativeField(i, 'roll', ($event.target as HTMLInputElement).value)"
+            />
+            <button
+              class="bv-board__btn bv-board__btn--ghost"
+              title="移除"
+              @click="removeInitiativeEntry(i)"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      </template>
+
       <h3 class="bv-board__section">已确立事实</h3>
       <ul v-if="store.stateBoard.facts.length > 0 || draft.active" class="bv-board__facts">
         <template v-if="draft.active">
@@ -309,26 +534,107 @@ function hpPercent(current: number, max: number): number {
 
         <div class="bv-board__pc-stats">
           <span
-            v-for="cond in pc.conditions"
-            :key="cond"
+            v-for="(cond, ci) in pc.conditions"
+            :key="ci"
             class="bv-board__condition"
-            :class="{ 'bv-board__condition--bad': cond.includes('重伤') || cond.includes('疯狂') }"
+            :class="{
+              'bv-board__condition--bad':
+                cond.label.includes('重伤') || cond.label.includes('疯狂'),
+            }"
+            :title="
+              cond.expiresHint
+                ? `${conditionText(cond)}｜到期：${cond.expiresHint}`
+                : conditionText(cond)
+            "
           >
-            {{ cond }}
+            {{ conditionText(cond) }}
           </span>
         </div>
-        <div v-if="draft.active && draft.pcs[id]" class="bv-board__edit-row">
-          <input
-            :value="draft.pcs[id]!.conditions.join('，')"
-            class="bv-board__input"
-            placeholder="状态（逗号分隔，如 疯狂(临时)，重伤）"
-            @input="
-              draft.pcs[id]!.conditions = ($event.target as HTMLInputElement).value
-                .split(/[，,、]/)
-                .map((c) => c.trim())
-                .filter((c) => c !== '')
-            "
-          />
+        <div v-if="draft.active && draft.pcs[id]" class="bv-board__cond-edit">
+          <div v-for="(cond, ci) in draft.pcs[id]!.conditions" :key="ci" class="bv-board__cond-row">
+            <input
+              :value="cond.label"
+              class="bv-board__input bv-board__input--cond"
+              placeholder="状态名（如 重伤）"
+              @input="setConditionField(id, ci, 'label', ($event.target as HTMLInputElement).value)"
+            />
+            <input
+              :value="cond.note ?? ''"
+              class="bv-board__input bv-board__input--cond"
+              placeholder="说明（选填）"
+              @input="setConditionField(id, ci, 'note', ($event.target as HTMLInputElement).value)"
+            />
+            <input
+              :value="cond.expiresHint ?? ''"
+              class="bv-board__input bv-board__input--cond"
+              placeholder="到期（选填）"
+              @input="
+                setConditionField(id, ci, 'expiresHint', ($event.target as HTMLInputElement).value)
+              "
+            />
+            <button
+              class="bv-board__btn bv-board__btn--ghost"
+              title="移除该状态"
+              @click="removeCondition(id, ci)"
+            >
+              ×
+            </button>
+          </div>
+          <button class="bv-board__btn bv-board__btn--ghost" @click="addCondition(id)">
+            + 状态
+          </button>
+        </div>
+
+        <div v-if="pc.resources.length > 0" class="bv-board__pc-resources">
+          <span v-for="res in pc.resources" :key="res.name" class="bv-board__resource">
+            {{ res.name }} {{ res.current }}/{{ res.max }}
+          </span>
+        </div>
+        <div v-if="draft.active && draft.pcs[id]" class="bv-board__cond-edit">
+          <div v-for="(res, ri) in draft.pcs[id]!.resources" :key="ri" class="bv-board__cond-row">
+            <input
+              :value="res.name"
+              class="bv-board__input bv-board__input--cond"
+              placeholder="资源名（如 一环法术位）"
+              @input="setResourceMeta(id, ri, 'name', ($event.target as HTMLInputElement).value)"
+            />
+            <input
+              :value="String(res.current)"
+              class="bv-board__input bv-board__num"
+              title="当前值"
+              @input="
+                setResourceNumber(id, ri, 'current', ($event.target as HTMLInputElement).value)
+              "
+            />
+            <input
+              :value="String(res.max)"
+              class="bv-board__input bv-board__num"
+              title="上限"
+              @input="setResourceNumber(id, ri, 'max', ($event.target as HTMLInputElement).value)"
+            />
+            <select
+              :value="res.resetOn"
+              class="bv-board__input"
+              title="重置时机（仅标签，服务端不自动重置）"
+              @change="
+                setResourceMeta(id, ri, 'resetOn', ($event.target as HTMLSelectElement).value)
+              "
+            >
+              <option value="none">不重置</option>
+              <option value="short_rest">短休</option>
+              <option value="long_rest">长休</option>
+            </select>
+            <button
+              class="bv-board__btn bv-board__btn--ghost"
+              title="移除该资源"
+              @click="removeResource(id, ri)"
+            >
+              ×
+            </button>
+          </div>
+          <button class="bv-board__btn bv-board__btn--ghost" @click="addResource(id)">
+            + 资源
+          </button>
         </div>
       </div>
 
@@ -512,6 +818,77 @@ function hpPercent(current: number, max: number): number {
 .bv-board__edit-row {
   display: flex;
   gap: var(--bv-space-2);
+}
+/* 状态条目编辑区（FR-39）：每条目一行三字段，独占竖排 */
+.bv-board__cond-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bv-space-1);
+}
+.bv-board__cond-row {
+  display: flex;
+  align-items: center;
+  gap: var(--bv-space-1);
+}
+.bv-board__initiative {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.bv-board__init-entry {
+  display: flex;
+  align-items: baseline;
+  gap: var(--bv-space-2);
+  padding: 1px var(--bv-space-1);
+  border-radius: var(--bv-radius-card);
+  font-size: 12px;
+  color: var(--bv-text-secondary);
+}
+.bv-board__init-entry--current {
+  background: var(--bv-bg-elevated);
+  color: var(--bv-text-primary);
+}
+.bv-board__init-roll {
+  min-width: 24px;
+  text-align: right;
+  font-family: var(--bv-font-mono, monospace);
+}
+.bv-board__init-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--bv-space-1);
+}
+.bv-board__init-idx {
+  min-width: 12px;
+  color: var(--bv-accent, #c79640);
+}
+.bv-board__round {
+  color: var(--bv-text-tertiary);
+  font-size: 12px;
+}
+.bv-board__pc-resources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--bv-space-1);
+  margin-top: var(--bv-space-1);
+}
+.bv-board__resource {
+  padding: 0 var(--bv-space-1);
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: var(--bv-radius-card);
+  background: var(--bv-bg-elevated);
+  color: var(--bv-text-secondary);
+  font-size: 12px;
+}
+.bv-board__input--cond:first-child {
+  flex: 1 1 auto;
+}
+.bv-board__input--cond {
+  flex: 1 1 0;
+  min-width: 64px;
 }
 .bv-board__num {
   width: 64px;

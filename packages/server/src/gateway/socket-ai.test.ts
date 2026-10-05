@@ -172,6 +172,7 @@ async function startAiServer(
                 skills: { 侦查: 60, 图书馆使用: 50, 聆听: 45, 急救: 50, 攀爬: 65 },
               },
         conditions: [],
+        resources: [],
       },
     },
     scene: { name: '', time: '', publicDesc: '' },

@@ -1,3 +1,4 @@
+import { conditionText } from '@behindveil/shared';
 import type { ExportEntry, ExportInput } from './render.js';
 import { hpTextOf, statTextOf, toExportEntries } from './render.js';
 
@@ -45,7 +46,7 @@ function renderSnapshot(entry: ExportEntry): string {
     lines.push('|---|---|---:|---:|---:|---:|---|');
     for (const pc of snap.pcs) {
       lines.push(
-        `| ${pc.playerName} | ${pc.memberName} | ${hpTextOf(pc)} | ${statTextOf(pc.san)} | ${statTextOf(pc.mp)} | ${statTextOf(pc.luck)} | ${pc.conditions.join('、') || '—'} |`,
+        `| ${pc.playerName} | ${pc.memberName} | ${hpTextOf(pc)} | ${statTextOf(pc.san)} | ${statTextOf(pc.mp)} | ${statTextOf(pc.luck)} | ${pc.conditions.map(conditionText).join('、') || '—'} |`,
       );
     }
   }
