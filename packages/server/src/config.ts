@@ -26,6 +26,18 @@ const ConfigFileSchema = z.object({
       baseUrl: z.string().optional(),
       timeoutMs: z.number().int().positive().default(60_000),
       maxTokens: z.number().int().positive().default(2048),
+      /**
+       * 嵌入独立配置段（v3 FR-33 / ADR-3-01）：与 chat provider 解耦——
+       * 部分 provider 无嵌入接口是现实。缺省整段 = 向量召回关闭（行为 = v2.0）。
+       */
+      embedding: z
+        .object({
+          provider: z.string().default('openai-compat'),
+          model: z.string().min(1),
+          baseUrl: z.string().optional(),
+          timeoutMs: z.number().int().positive().optional(),
+        })
+        .optional(),
     })
     .prefault({}),
 });
@@ -38,6 +50,18 @@ export interface LlmConfig {
   maxTokens: number;
   /** 仅来自环境变量 AIDLE_LLM_KEY；未设置时为 undefined */
   apiKey: string | undefined;
+  /** 嵌入密钥：AIDLE_EMBEDDING_KEY 优先，回退 AIDLE_LLM_KEY（同一 provider 多端点常见） */
+  embeddingApiKey: string | undefined;
+  /** 嵌入独立配置段（v3 FR-33）；undefined = 向量召回关闭（行为 = v2.0） */
+  embedding: EmbeddingConfig | undefined;
+}
+
+/** llm.embedding 配置段（ADR-3-01）：provider/model 独立于 chat */
+export interface EmbeddingConfig {
+  provider: string;
+  model: string;
+  baseUrl: string | undefined;
+  timeoutMs: number | undefined;
 }
 
 export interface AppConfig {
@@ -79,6 +103,15 @@ export function loadConfig(opts: {
       timeoutMs: parsed.llm.timeoutMs,
       maxTokens: parsed.llm.maxTokens,
       apiKey: env['AIDLE_LLM_KEY'],
+      embeddingApiKey: env['AIDLE_EMBEDDING_KEY'] ?? env['AIDLE_LLM_KEY'],
+      embedding: parsed.llm.embedding
+        ? {
+            provider: parsed.llm.embedding.provider,
+            model: parsed.llm.embedding.model,
+            baseUrl: parsed.llm.embedding.baseUrl,
+            timeoutMs: parsed.llm.embedding.timeoutMs,
+          }
+        : undefined,
     },
     adminToken: env['AIDLE_ADMIN_TOKEN'],
     backupDir: env['AIDLE_BACKUP_DIR'],

@@ -109,6 +109,23 @@ export const KpMetricsSchema = z.object({
 });
 export type KpMetricsPayload = z.infer<typeof KpMetricsSchema>;
 
+/**
+ * AI 梗概提案确认（v3 T-M11-04，FR-36 / ADR-3-09）：Host 只读。
+ * 确认（可手改文本）后写回 session.synopsis；D-01 的 Host 权威保留——
+ * AI 只产提案，写盘永远经 Host 确认。
+ */
+export const SynopsisConfirmSchema = z.object({
+  sessionId: z.string().min(1),
+  /** Host 确认（可能已手改）的梗概正文；空串等同清除 */
+  text: z.string().max(2000),
+});
+export type SynopsisConfirmPayload = z.infer<typeof SynopsisConfirmSchema>;
+
+export const SynopsisDismissSchema = z.object({
+  sessionId: z.string().min(1),
+});
+export type SynopsisDismissPayload = z.infer<typeof SynopsisDismissSchema>;
+
 // ---- 服务端 → 客户端（TDD §4.2，出站同样须过 Schema）----
 
 export const MsgBroadcastSchema = z.object({
@@ -195,6 +212,16 @@ export type KpMetricsResultPayload = z.infer<typeof KpMetricsResultSchema>;
 export const ErrorAppSchema = AppErrorSchema;
 export type ErrorAppPayload = z.infer<typeof ErrorAppSchema>;
 
+/** AI 梗概提案（v3 T-M11-04，FR-36）：仅投递 Host/副 Host，不进消息流 */
+export const SynopsisProposedSchema = z.object({
+  sessionId: z.string(),
+  /** AI 生成（≤400 字）的梗概提案正文 */
+  proposal: z.string(),
+  /** 提案生成时间（ISO8601） */
+  createdAt: z.string(),
+});
+export type SynopsisProposedPayload = z.infer<typeof SynopsisProposedSchema>;
+
 // ---- 事件白名单（TDD §8：非白名单事件即断连）----
 
 export const CLIENT_EVENTS = [
@@ -207,6 +234,8 @@ export const CLIENT_EVENTS = [
   'state:snapshot',
   'kp:previewPrompt',
   'kp:metrics',
+  'synopsis:confirm',
+  'synopsis:dismiss',
 ] as const;
 export type ClientEventName = (typeof CLIENT_EVENTS)[number];
 
@@ -217,6 +246,7 @@ export const SERVER_EVENTS = [
   'state:broadcast',
   'kp:promptPreview',
   'kp:metricsResult',
+  'synopsis:proposed',
   'error:app',
 ] as const;
 export type ServerEventName = (typeof SERVER_EVENTS)[number];
@@ -232,6 +262,8 @@ export const CLIENT_EVENT_SCHEMAS = {
   'state:snapshot': StateSnapshotSchema,
   'kp:previewPrompt': KpPreviewPromptSchema,
   'kp:metrics': KpMetricsSchema,
+  'synopsis:confirm': SynopsisConfirmSchema,
+  'synopsis:dismiss': SynopsisDismissSchema,
 } as const satisfies Record<ClientEventName, z.ZodType>;
 
 /** 出站事件 → Schema 映射（出站广播前的自检） */
@@ -242,6 +274,7 @@ export const SERVER_EVENT_SCHEMAS = {
   'state:broadcast': StateBroadcastSchema,
   'kp:promptPreview': KpPromptPreviewSchema,
   'kp:metricsResult': KpMetricsResultSchema,
+  'synopsis:proposed': SynopsisProposedSchema,
   'error:app': ErrorAppSchema,
 } as const satisfies Record<ServerEventName, z.ZodType>;
 

@@ -17,6 +17,8 @@ import {
   type RollResult,
   type ServerEventName,
   type Session,
+  type SynopsisConfirmPayload,
+  type SynopsisDismissPayload,
   type SystemMsgSubtype,
 } from '@behindveil/shared';
 import type { FastifyInstance } from 'fastify';
@@ -41,8 +43,10 @@ import { appendMessage, readMessagesAfter } from '../domain/session/messages.js'
 import { addMember, readMembers, updateMemberRole } from '../domain/session/members.js';
 import { generateHostToken } from '../domain/session/ids.js';
 import { findByInviteCode, readRoomFile, saveRoomFile } from '../domain/session/rooms.js';
-import { createSession, readSession } from '../domain/session/sessions.js';
-import { buildPreviewTrace } from '../observability/preview.js';
+import { createSession, readSession, updateSynopsis } from '../domain/session/sessions.js';
+import { dismissProposal, proposeSynopsis } from '../domain/session/synopsis.js';
+import { GlobalIndex, indexEntryOf } from '../observability/global-index.js';
+import { buildPreviewTrace, type RecallContext } from '../observability/preview.js';
 import { MetricsCollector } from '../observability/metrics.js';
 import type {
   DiceRollPayload,
@@ -106,6 +110,17 @@ export interface GatewayDeps {
    * 缺省时网关自建一个（房内 `kp:metrics` 仍可用，只是不进全局端点）。
    */
   metrics?: MetricsCollector;
+  /**
+   * 向量召回上下文（v3 T-M11-03，FR-33）：llm.embedding 配置且装配成功才有。
+   * 缺省 = 向量召回关闭（S3.5 跳过，行为与 v2.0 逐字节一致）。
+   */
+  recall?: RecallContext;
+  /**
+   * 跨房间全局消息索引（v3 T-M11-05，FR-34）：消息落盘同批追加一份索引行。
+   * 注入口供测试对拍；缺省网关自建（写 `data/index/global.jsonl`）。
+   * 传 false 显式关闭（索引是纯增益，关闭不影响任何主链路行为）。
+   */
+  globalIndex?: GlobalIndex | false;
 }
 
 export interface GatewayHandle {
@@ -200,10 +215,18 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   const random = createCsprngRandom();
   /** 指标收集器（T-M6-03）：与装配根共用实例，缺省自建（见 GatewayDeps.metrics） */
   const metrics = deps.metrics ?? new MetricsCollector();
+  /** 跨房间全局索引（T-M11-05，FR-34）：false = 显式关闭 */
+  const globalIndex =
+    deps.globalIndex === false
+      ? null
+      : (deps.globalIndex ?? new GlobalIndex(layout.globalIndexFile));
 
   app.addHook('onClose', async () => {
     io.disconnectSockets(true);
     io.removeAllListeners();
+    // 索引句柄**不在关服时主动关闭**：关服瞬间可能有在途的 append 正握着它，
+    // 主动 close 会让那次追加抛「file closed」并刷一行无意义的告警。
+    // 索引是追加型派生数据（损坏可重建），句柄交给进程退出时回收即可。
   });
 
   // 握手第一关：协议版本（AsyncAPI「握手三校验」之一；邀请码/满员在 room:join 事件校验）
@@ -279,6 +302,12 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
         return;
       case 'state:snapshot':
         await handleStateSnapshot(socket);
+        return;
+      case 'synopsis:confirm':
+        await handleSynopsisConfirm(socket, payload as SynopsisConfirmPayload, ack);
+        return;
+      case 'synopsis:dismiss':
+        await handleSynopsisDismiss(socket, payload as SynopsisDismissPayload, ack);
         return;
       default:
         return;
@@ -395,6 +424,20 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     const message = buildMessage(sessionId, appendable, seq);
     await appendMessage(layout, roomId, sessionId, message, storeFor(roomId, sessionId));
     seqCounters.set(sessionId, seq);
+
+    // 全局索引同批追加（FR-34）：与消息落盘同一队列操作，零新增写路径。
+    // 索引是纯增益（损坏可 aidle-reindex 重建），失败只告警、绝不阻断主链路。
+    if (globalIndex) {
+      try {
+        await globalIndex.append(indexEntryOf(roomId, sessionId, message));
+      } catch (err) {
+        console.warn(
+          `[gateway] 全局索引追加失败（可用 aidle-reindex 重建）：${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
 
     const payload = { msg: message };
     if (routing.mode === 'room') {
@@ -816,6 +859,57 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   }
 
   /**
+   * AI 梗概确认（v3 T-M11-04，FR-36 / D-01）：Host only——确认（可手改）后写回
+   * session.synopsis。D-01 的 Host 权威保留：唯一写入口是这里，AI 只产提案。
+   */
+  async function handleSynopsisConfirm(
+    socket: Socket,
+    data: SynopsisConfirmPayload,
+    ack: Ack,
+  ): Promise<void> {
+    const me = presence.get(socket.id);
+    if (!me) {
+      ack?.({ ok: false, code: 'E-ROOM-01', message: '尚未加入房间' });
+      return;
+    }
+    if (me.role !== 'host') {
+      ack?.({ ok: false, code: 'E-ROOM-01', message: '仅 Host 可确认梗概' });
+      return;
+    }
+    const session = await readSession(layout, me.roomId, data.sessionId);
+    if (!session || session.roomId !== me.roomId) {
+      ack?.({ ok: false, code: 'E-ROOM-01', message: '会话不存在' });
+      return;
+    }
+    const updated = await updateSynopsis(layout, me.roomId, data.sessionId, data.text);
+    if (!updated) {
+      ack?.({ ok: false, code: 'E-ROOM-01', message: '会话不存在' });
+      return;
+    }
+    dismissProposal(data.sessionId);
+    ack?.({ ok: true, synopsis: updated.synopsis });
+  }
+
+  /** 丢弃梗概提案（Host only）：提案不入盘，直接清内存态 */
+  async function handleSynopsisDismiss(
+    socket: Socket,
+    data: SynopsisDismissPayload,
+    ack: Ack,
+  ): Promise<void> {
+    const me = presence.get(socket.id);
+    if (!me) {
+      ack?.({ ok: false, code: 'E-ROOM-01', message: '尚未加入房间' });
+      return;
+    }
+    if (me.role !== 'host') {
+      ack?.({ ok: false, code: 'E-ROOM-01', message: '仅 Host 可处理梗概提案' });
+      return;
+    }
+    dismissProposal(data.sessionId);
+    ack?.({ ok: true });
+  }
+
+  /**
    * 指令失败块留档（T-M3-07，测试文档 §12.4）：解析失败 / 白名单拒绝的原始文本
    * 追加到 `data/logs/ai-directive.jsonl`，供回归分析「KP 到底吐错了什么」。
    * 留档失败不影响回合（可观测旁路，绝不能反过来打断跑团）。
@@ -898,6 +992,8 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
           : baseChat;
         // 规则书随会话（T-M7-04）：AI 检定骰、玩家骰与引擎写路径的损失表共用同一套判定
         const sessionRulebook = sessionRuleBook(session);
+        // 梗概提案（T-M11-04）：捕获本轮管线 trace，回合结束后链外判断是否生成
+        let turnTrace: import('../pipeline/types.js').PipelineTrace | undefined;
         await runAiTurn(triggerSeq, {
           llm: instrumentLlm(llm, sessionId),
           chat,
@@ -992,7 +1088,11 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
           // 规则书随会话（T-M7-04）：AI 检定骰与玩家骰走同一套判定
           rulebook: sessionRulebook,
           tracker,
-          buildMessages: async () => (await buildPreviewTrace(layout, roomId, sessionId)).messages,
+          buildMessages: async () => {
+            const trace = await buildPreviewTrace(layout, roomId, sessionId, {}, deps.recall);
+            turnTrace = trace;
+            return trace.messages;
+          },
           emitDice: async (roll) => {
             await enqueue(roomId, async () => {
               const diceRoll = await recordDice(roomId, sessionId, roll, { hidden: false });
@@ -1040,6 +1140,38 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
             );
           },
         });
+        // AI 梗概提案（T-M11-04，ADR-3-09 链外）：回合完成后判断，不占主叙事循环。
+        // 开关 settings.aiSynopsis（默认关）；trim>0 才生成；失败静默回退无提案。
+        if (session?.settings.aiSynopsis === true && turnTrace) {
+          const s5 = turnTrace.stages.find((s) => s.name === 'S5-history-trim');
+          const detail = s5?.detail as { total?: number; kept?: number } | undefined;
+          if (detail && (detail.total ?? 0) > (detail.kept ?? 0)) {
+            void proposeSynopsis({
+              layout,
+              roomId,
+              sessionId,
+              totalMessages: detail.total ?? 0,
+              keptMessages: detail.kept ?? 0,
+              keepCount: session.settings.maxHistoryMessages,
+              llm,
+              chat,
+              recordLlmCall: (latencyMs, usage) =>
+                metrics.recordLlmCall(sessionId, latencyMs, usage),
+              recordLlmFailure: (latencyMs) => metrics.recordLlmFailure(sessionId, latencyMs),
+            })
+              .then((proposal) => {
+                if (!proposal) return;
+                for (const socketId of alertTargets()) {
+                  emitChecked(io.to(socketId), 'synopsis:proposed', {
+                    sessionId,
+                    proposal: proposal.proposal,
+                    createdAt: proposal.createdAt,
+                  });
+                }
+              })
+              .catch(() => undefined); // 链外尽力而为
+          }
+        }
       } catch (err) {
         // buildMessages/持久化侧未预期失败：对 Host 告警，回合终止（消息主链路不受影响）
         console.error('[gateway] AI 回合失败：', err);
@@ -1102,9 +1234,13 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       emitError(socket, 'E-ROOM-01', '尚未开团，暂无 prompt 可预览');
       return;
     }
-    const trace = await buildPreviewTrace(layout, me.roomId, room.activeSessionId, {
-      seq: data.seq,
-    });
+    const trace = await buildPreviewTrace(
+      layout,
+      me.roomId,
+      room.activeSessionId,
+      { seq: data.seq },
+      deps.recall,
+    );
     emitChecked(socket, 'kp:promptPreview', { pipeline: trace });
   }
 

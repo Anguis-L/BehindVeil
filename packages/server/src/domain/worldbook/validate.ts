@@ -1,11 +1,12 @@
 import { WorldBookSchema, type WorldBook } from '@behindveil/shared';
-import { readFile } from 'node:fs/promises';
 import type { DataLayout } from '../../adapters/storage/layout.js';
+import { readRoomWorldBook } from './store.js';
 
 /**
  * 世界书载入校验器（T-M2-06，决议 D-08）。
  *
- * v1 无可视化编辑器：世界书 JSON 手编 + 载入校验（防范围蔓延）。
+ * v1 无可视化编辑器：世界书 JSON 手编 + 载入校验（防范围蔓延）；
+ * v3 T-M11-06 编辑器落地，写路径收编进 store.ts（带 schemaVersion 信封）。
  * - 结构错误（Schema 不符 / uid 重复 / at_depth 缺 depth）→ 拒绝载入，抛错带定位；
  * - 语义隐患（非法正则、非常驻条目空 key）→ 告警放行（运行时容错与扫描降级一致）。
  */
@@ -74,33 +75,15 @@ export interface WorldBookLoadResult {
 /**
  * 载入房间级手编世界书 `data/rooms/<roomId>/worldbook.json`。
  * 文件不存在 → 空 WorldBook（手编可选）；JSON 坏或结构错误 → 抛错（载入时拦截）。
+ *
+ * T-M11-06 起委托 store.ts（编辑器写路径与管线读路径共用同一口径，含版本迁移），
+ * 保留本导出是为了不动既有调用点。
  */
 export async function loadWorldBook(
   layout: DataLayout,
   roomId: string,
 ): Promise<WorldBookLoadResult> {
-  let text: string;
-  try {
-    text = await readFile(layout.worldbookFile(roomId), 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { book: { entries: [] }, warnings: [] };
-    }
-    throw new Error(`世界书读取失败：${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch (err) {
-    throw new Error(`世界书 JSON 解析失败：${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  const result = validateWorldBook(raw);
-  if (!result.ok || result.book === null) {
-    throw new Error(`世界书校验未通过：\n${result.errors.join('\n')}`);
-  }
-  return { book: result.book, warnings: result.warnings };
+  return readRoomWorldBook(layout, roomId);
 }
 
 function isRegexForm(keyword: string): boolean {

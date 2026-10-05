@@ -21,6 +21,7 @@
     "perf:record": "node scripts/perf-record.mjs",
     "aidle-migrate": "node packages/server/dist/cli/aidle-migrate.js",
     "aidle-verify-backup": "node packages/server/dist/cli/aidle-verify-backup.js",
+    "aidle-reindex": "node packages/server/dist/cli/aidle-reindex.js",
     "check:licenses": "node scripts/check-licenses.mjs",
     "verify": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm test:coverage && pnpm perf && pnpm check:licenses"
   },

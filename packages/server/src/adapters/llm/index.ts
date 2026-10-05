@@ -25,6 +25,16 @@ export interface LlmProviderConfig {
   apiKey?: string;
 }
 
+/** llm.embedding 配置段（v3 FR-33 / ADR-3-01）：与 chat 解耦的嵌入 provider */
+export interface EmbeddingProviderConfig {
+  provider: string;
+  model: string;
+  baseUrl?: string;
+  timeoutMs?: number;
+  /** AIDLE_EMBEDDING_KEY ?? AIDLE_LLM_KEY（config.ts 已归一） */
+  apiKey?: string;
+}
+
 export function createLlmAdapter(cfg: LlmProviderConfig): LlmAdapter {
   if (cfg.provider === 'ollama') {
     return createOllamaAdapter({
@@ -42,6 +52,32 @@ export function createLlmAdapter(cfg: LlmProviderConfig): LlmAdapter {
     baseUrl: cfg.baseUrl,
     apiKey: cfg.apiKey,
     model: cfg.model || undefined,
+    timeoutMs: cfg.timeoutMs,
+  });
+}
+
+/**
+ * 嵌入适配器装配（v3 T-M11-01 / ADR-3-01）：返回的 LlmAdapter 实例只消费 embed()。
+ * ollama 走其 /v1 OpenAI 兼容层（embed 实现与 openai-compat 同一份代码）。
+ * 装配失败（缺 baseUrl 等）由调用方降级为「向量召回关闭」并告警，不阻断启动。
+ */
+export function createEmbedAdapter(cfg: EmbeddingProviderConfig): LlmAdapter {
+  if (cfg.provider === 'ollama') {
+    return createOllamaAdapter({
+      baseUrl: cfg.baseUrl,
+      embedModel: cfg.model,
+      timeoutMs: cfg.timeoutMs,
+    });
+  }
+  if (!cfg.baseUrl) {
+    throw new Error(
+      `嵌入 provider "${cfg.provider}" 需要在配置中提供 llm.embedding.baseUrl（兼容端点根）`,
+    );
+  }
+  return createOpenAiCompatAdapter({
+    baseUrl: cfg.baseUrl,
+    apiKey: cfg.apiKey,
+    embedModel: cfg.model,
     timeoutMs: cfg.timeoutMs,
   });
 }

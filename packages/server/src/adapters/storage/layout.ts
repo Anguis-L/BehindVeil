@@ -25,6 +25,8 @@ export interface DataLayout {
   readonly indexDir: string;
   /** 热备游标（T-M10-02，FR-31）：{offset, mtimeMs, size} per file，原子写 */
   readonly backupCursorFile: string;
+  /** 跨房间全局消息索引（v3 FR-34）：data/index/global.jsonl，追加型可重建 */
+  readonly globalIndexFile: string;
   readonly auditDiceFile: string;
   /** AI 指令失败块留档（T-M3-07：解析失败/白名单拒绝的原始文本，供回归分析） */
   readonly directiveLogFile: string;
@@ -35,6 +37,8 @@ export interface DataLayout {
   worldbookFile(roomId: string): string;
   /** 房间级 PC 声明（T-M5-04，SDD §5.1：开团前声明，开团时装配进状态板初始） */
   rosterFile(roomId: string): string;
+  /** 房间世界书向量缓存（v3 FR-33 / ADR-3-02）：{uid, hash, dim, vector} 追加型 JSONL */
+  wbVectorsFile(roomId: string): string;
   sessionsDir(roomId: string): string;
   sessionDir(roomId: string, sessionId: string): string;
   sessionFile(roomId: string, sessionId: string): string;
@@ -53,6 +57,7 @@ export function createDataLayout(root: string): DataLayout {
     logsDir: join(root, 'logs'),
     indexDir: join(root, 'index'),
     backupCursorFile: join(root, 'index', 'backup-cursor.json'),
+    globalIndexFile: join(root, 'index', 'global.jsonl'),
     auditDiceFile: join(root, 'logs', 'audit-dice.jsonl'),
     directiveLogFile: join(root, 'logs', 'ai-directive.jsonl'),
     roomDir: (roomId) => join(roomsDir, roomId),
@@ -60,6 +65,7 @@ export function createDataLayout(root: string): DataLayout {
     membersFile: (roomId) => join(roomsDir, roomId, 'members.json'),
     worldbookFile: (roomId) => join(roomsDir, roomId, 'worldbook.json'),
     rosterFile: (roomId) => join(roomsDir, roomId, 'roster.json'),
+    wbVectorsFile: (roomId) => join(roomsDir, roomId, 'wb-vectors.jsonl'),
     sessionsDir: (roomId) => join(roomsDir, roomId, 'sessions'),
     sessionDir: (roomId, sessionId) => join(roomsDir, roomId, 'sessions', sessionId),
     sessionFile: (roomId, sessionId) =>

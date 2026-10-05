@@ -1,5 +1,6 @@
 import {
   DEFAULT_NAT20_RULE,
+  type GlobalIndexEntry,
   type Nat20Rule,
   type PipelineTracePayload,
   type Session,
@@ -228,6 +229,47 @@ export function sessionStateLabel(session: Session): string {
 /** ISO8601（UTC）→ `YYYY-MM-DD HH:mm UTC`，短到能塞进右栏 */
 export function formatIsoShort(iso: string): string {
   return iso.length >= 16 ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : iso;
+}
+
+// ---- 跨房间检索（v3 T-M11-05，FR-34）----
+
+/** 索引行类型 → 界面短标签（与消息流同一套叫法，避免 KP 认两套词） */
+const SEARCH_TYPE_LABELS: Record<GlobalIndexEntry['type'], string> = {
+  ic: '扮演',
+  ooc: '场外',
+  system: '系统',
+  dice: '掷骰',
+  narration: '叙事',
+  state_snapshot: '快照',
+};
+
+/**
+ * 组装 `GET /search` 查询串。
+ * 抽成纯函数是为了可测：roomId/limit 缺省不出现在串里（服务端才用默认值，
+ * 前端不该替服务端猜），关键词空串也不该发出请求。
+ */
+export function buildSearchQuery(q: string, roomId?: string, limit?: number): string | null {
+  const trimmed = q.trim();
+  if (trimmed === '') return null;
+  const params = new URLSearchParams({ q: trimmed });
+  if (roomId !== undefined && roomId !== '') params.set('roomId', roomId);
+  if (limit !== undefined && Number.isInteger(limit) && limit > 0) {
+    params.set('limit', String(limit));
+  }
+  return `?${params.toString()}`;
+}
+
+/** 命中行的来源标签：`扮演 · r_abc/ses_x #12`——跨房间检索要一眼看出是哪一团的 */
+export function formatSearchHit(entry: GlobalIndexEntry): string {
+  const label = SEARCH_TYPE_LABELS[entry.type] ?? entry.type;
+  const room = entry.roomId.length > 12 ? `${entry.roomId.slice(0, 12)}…` : entry.roomId;
+  return `${label} · ${room}/${entry.sessionId} #${entry.seq}`;
+}
+
+/** 掷骰行与快照行没有正文，界面要有个说法，不能显示成空白 */
+export function formatSearchContent(entry: GlobalIndexEntry): string {
+  if (entry.content !== '') return entry.content;
+  return entry.type === 'state_snapshot' ? '（状态板快照）' : '（无文本）';
 }
 
 // ---- LLM 参数校验（PATCH /rooms/{id}/sessions/{sid}/settings）----

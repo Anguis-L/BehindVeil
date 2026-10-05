@@ -15,10 +15,24 @@ export interface JsonlReadResult {
   badLines: number;
 }
 
+export interface JsonlStoreOptions {
+  /**
+   * 是否参与崩溃注入计数（默认 true）。
+   *
+   * 故障注入按「第 n 次持久化写」定位崩溃点（TC-NFR-06-001 等），计数序列必须只由
+   * 主链路写构成才对得上断言。辅助型追加写（如 v3 FR-34 全局索引）应传 false：
+   * 它不承载 WAP 语义，参与了反而会让「第 3 条消息后崩溃」错位到索引写。
+   */
+  crashHook?: boolean;
+}
+
 export class JsonlStore {
   private handle: FileHandle | null = null;
 
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly filePath: string,
+    private readonly options: JsonlStoreOptions = {},
+  ) {}
 
   /** 追加一条记录（写前持久化：返回时已 fsync） */
   async append(entry: unknown): Promise<void> {
@@ -28,7 +42,7 @@ export class JsonlStore {
     const handle = await this.ensureOpen();
     await handle.write(`${JSON.stringify(entry)}\n`, null, 'utf8');
     await handle.sync();
-    maybeCrashAfterWrite();
+    if (this.options.crashHook !== false) maybeCrashAfterWrite();
   }
 
   /** 全量读取。坏行跳过并计数，不抛错 */

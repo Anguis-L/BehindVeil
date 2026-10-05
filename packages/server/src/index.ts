@@ -7,7 +7,8 @@ import { APP_NAME, PROTOCOL_VERSION } from '@behindveil/shared';
 import { recover } from './adapters/storage/recovery.js';
 import { createDataLayout } from './adapters/storage/layout.js';
 import { assertArchivesUpToDate } from './adapters/storage/version-gate.js';
-import { createLlmAdapter } from './adapters/llm/index.js';
+import { createEmbedAdapter, createLlmAdapter } from './adapters/llm/index.js';
+import type { RecallContext } from './observability/preview.js';
 import { createMockLlm } from './adapters/llm/mock.js';
 import type { LlmAdapter } from './domain/llm.js';
 import { loadConfig } from './config.js';
@@ -18,6 +19,8 @@ import { registerMetricsRoutes } from './gateway/http/metrics.js';
 import { registerModuleRoutes } from './gateway/http/modules.js';
 import { registerPcRoutes } from './gateway/http/pcs.js';
 import { registerRoomRoutes } from './gateway/http/rooms.js';
+import { registerSearchRoutes } from './gateway/http/search.js';
+import { registerWorldBookRoutes } from './gateway/http/worldbook.js';
 import { attachGateway } from './gateway/socket.js';
 import { BackupSyncer } from './adapters/backup/syncer.js';
 import { MetricsCollector } from './observability/metrics.js';
@@ -138,6 +141,37 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
     }
   }
 
+  // 嵌入适配器（v3 T-M11-01 / ADR-3-01，FR-33）：llm.embedding 配置段独立装配，
+  // 与 chat provider 解耦。未配置或装配失败 = 向量召回关闭（行为 = v2.0，可关断红线）。
+  let recall: RecallContext | undefined;
+  if (opts.llm && 'embed' in opts.llm && typeof opts.llm.embed === 'function') {
+    // 测试装配口注入的适配器自带 embed（MockLlm embedDim）→ 直接启用召回
+    const embed = opts.llm.embed.bind(opts.llm);
+    recall = { embed };
+    app.log.info('向量召回启用（装配注入的 LLM 适配器具备 embed 能力）');
+  } else if (cfg.llm.embedding) {
+    try {
+      const embedAdapter = createEmbedAdapter({
+        provider: cfg.llm.embedding.provider,
+        model: cfg.llm.embedding.model,
+        baseUrl: cfg.llm.embedding.baseUrl,
+        timeoutMs: cfg.llm.embedding.timeoutMs,
+        apiKey: cfg.llm.embeddingApiKey,
+      });
+      recall = { embed: (texts) => embedAdapter.embed!(texts) };
+      app.log.info(
+        { provider: cfg.llm.embedding.provider, model: cfg.llm.embedding.model },
+        '向量召回启用（llm.embedding 已配置）',
+      );
+    } catch (err) {
+      app.log.warn(
+        `嵌入适配器装配失败，向量召回关闭（纯关键词召回不受影响）：${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   // 2026-09-25 代码审查修复：未设 AIDLE_ADMIN_TOKEN 时管理面是全开放的，
   // 自托管用户往往不知情——启动时明确告警一行（README 同步写明）
   if (cfg.adminToken === undefined) {
@@ -149,6 +183,10 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
   registerPcRoutes(app, { layout, adminToken: cfg.adminToken });
   registerModuleRoutes(app, { layout, adminToken: cfg.adminToken });
   registerExportRoutes(app, { layout, adminToken: cfg.adminToken });
+  // 跨房间检索（T-M11-05，FR-34）：管理面只读出口，走全局索引
+  registerSearchRoutes(app, { layout, adminToken: cfg.adminToken });
+  // 世界书编辑器（T-M11-06，FR-35）：房间层 RW + 模组层只读
+  registerWorldBookRoutes(app, { layout, adminToken: cfg.adminToken });
   // 指标收集器（T-M6-03）：进程内单例，网关埋点与 GET /metrics 共用同一实例
   const metrics = new MetricsCollector();
   const gateway = attachGateway(app, {
@@ -161,6 +199,7 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
       maxTokens: cfg.llm.maxTokens,
     },
     metrics,
+    ...(recall ? { recall } : {}),
   });
   // 指令成功率取网关累计口径（R-01 唯一统计源），此处只做出口
   registerMetricsRoutes(app, {

@@ -46,6 +46,13 @@ export interface LlmAdapter {
   /** 适配器标识：'openai-compat' | 'ollama' | 'mock' */
   readonly id: string;
   chat(req: ChatRequest, onDelta: (delta: string) => void): Promise<ChatResponse>;
+  /**
+   * 文本向量化（v3 FR-33 / ADR-3-01，可选能力）：世界书向量召回用。
+   * 与 chat 解耦——嵌入 provider 由 llm.embedding 独立配置段装配成独立适配器实例，
+   * 本方法只在该实例上被调用；未实现（或未配置嵌入模型）视为向量召回关闭。
+   * 返回向量与输入一一对应；实现方负责重试与 E-LLM-01 语义。
+   */
+  embed?(texts: string[]): Promise<Float32Array[]>;
 }
 
 /**

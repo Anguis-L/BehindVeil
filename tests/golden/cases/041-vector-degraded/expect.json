@@ -1,0 +1,22 @@
+{
+  "stageNames": ["S1", "S2", "S3", "S3", "S4", "S5", "S6", "S7"],
+  "traceDetails": {
+    "S3.5-vector-recall": {
+      "vectorHitCount": 0,
+      "addedUids": [],
+      "degraded": true,
+      "degradedReason": "provider 请求超时"
+    },
+    "S4-budget-cut": {
+      "includedUids": [1],
+      "includedSources": [
+        {
+          "uid": 1,
+          "source": "keyword"
+        }
+      ]
+    }
+  },
+  "contains": ["渔火条目：泊位边的长明灯。"],
+  "notContains": ["嵌入故障时这条不得注入。"]
+}

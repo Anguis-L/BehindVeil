@@ -12,6 +12,8 @@ export const OLLAMA_DEFAULT_TIMEOUT_MS = 300_000;
 export interface OllamaConfig {
   baseUrl?: string;
   model?: string;
+  /** 嵌入模型名（v3 FR-33）：走 Ollama 的 /v1/embeddings OpenAI 兼容层 */
+  embedModel?: string;
   timeoutMs?: number;
   /** fetch 注入点（测试用） */
   fetchImpl?: typeof fetch;
@@ -25,6 +27,7 @@ export function createOllamaAdapter(config: OllamaConfig = {}): LlmAdapter {
   return new OllamaAdapter({
     baseUrl: config.baseUrl ?? OLLAMA_DEFAULT_BASE_URL,
     model: config.model,
+    embedModel: config.embedModel,
     timeoutMs: config.timeoutMs ?? OLLAMA_DEFAULT_TIMEOUT_MS,
     fetchImpl: config.fetchImpl,
   });

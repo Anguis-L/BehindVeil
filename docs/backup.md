@@ -58,6 +58,24 @@ node packages/server/dist/cli/aidle-migrate.js [dataDir]
 
 幂等：全部存档已是当前版本时直接成功返回，不产生备份目录。**迁移必须在服务端停止后运行**。
 
+## 3.5 跨房间索引与 aidle-reindex（M11，FR-34）
+
+`data/index/global.jsonl` 是**派生索引**：消息落盘时同批追加一行，供 `GET /search` 跨房间检索
+（KP 事后找「那句话发生在哪个团」）。它永不回写消息本体，坏了就重建：
+
+```bash
+pnpm aidle-reindex              # 等价于下行；dataDir 默认 ./data
+node packages/server/dist/cli/aidle-reindex.js [dataDir]
+```
+
+要点：
+
+- **重建 = 先删后建**（函数自带幂等，重复执行不会叠加），报告条目数与消息坏行数；
+  消息坏行只如实上报，重建**不修复消息**（那是恢复器/迁移器的辖区）。
+- 索引不在迁移管辖内（它不是存档），也不必备份——丢了大不了重建一次。
+- 索引是 Host 视角完整版，**含暗骰行**：可见性过滤只发生在消息投递通道
+  （`GET /rooms/{id}/messages`），两套口径不混用。
+
 ## 4. 恢复演练清单（建议每季度走一遍）
 
 - [ ] 停服务；确认 `aidle-verify-backup` 对热备目录全绿（退出码 0）

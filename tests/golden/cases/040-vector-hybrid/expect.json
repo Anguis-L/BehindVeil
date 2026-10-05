@@ -1,0 +1,42 @@
+{
+  "stageNames": ["S1", "S2", "S3", "S3", "S4", "S5", "S6", "S7"],
+  "traceDetails": {
+    "S3-worldbook-scan": {
+      "hitUids": [1, 2]
+    },
+    "S3.5-vector-recall": {
+      "vectorHitCount": 4,
+      "addedUids": [5],
+      "skippedAlreadyHit": 1,
+      "skippedDisabled": 1,
+      "skippedUnknown": 1,
+      "embeddedEntries": 1,
+      "reusedEntries": 3,
+      "truncatedForMemory": false,
+      "degraded": false
+    },
+    "S4-budget-cut": {
+      "includedUids": [1, 2, 5],
+      "includedSources": [
+        {
+          "uid": 1,
+          "source": "keyword"
+        },
+        {
+          "uid": 2,
+          "source": "keyword"
+        },
+        {
+          "uid": 5,
+          "source": "vector"
+        }
+      ]
+    }
+  },
+  "contains": [
+    "渔火条目：泊位边的长明灯。",
+    "雾号条目：码头的雾号每十分钟响一次。",
+    "航图条目（仅向量召回）：旧航图标注着沉船的位置。"
+  ],
+  "notContains": ["已停用条目不应被向量召回并入。"]
+}

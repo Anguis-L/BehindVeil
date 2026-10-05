@@ -69,6 +69,10 @@
 | DELETE | `/modules/{moduleId}` | 卸载模组；活跃会话引用中回 409 + E-MOD-01（D-09，M5） |
 | POST | `/rooms/{id}/host-transfer` | Host 转让：`{ hostToken, toMemberId }`，旧 token 轮换失效（M8；鉴权用 hostToken，不用 X-Admin-Token） |
 | PUT | `/rooms/{id}/co-host` | 设/撤副 Host：`{ hostToken, memberId \| null }`（M8；同上，hostToken 鉴权） |
+| GET | `/rooms/{id}/worldbook` | 读房间世界书条目（M11 编辑器） |
+| PUT | `/rooms/{id}/worldbook` | **全量保存**房间世界书（结构错误 400 且不落盘；语义隐患 200 + warnings，M11） |
+| GET | `/modules/{id}/worldbook` | 读模组世界书（**只读**，模组包是外部资产；要改就复制到房间层，M11） |
+| GET | `/search` | 跨房间消息检索：`?q=&roomId=&limit=`（M11；走 `data/index/global.jsonl`，结果含暗骰行） |
 
 模组以目录形态放置（`data/modules/<id>/` + manifest + 三件套），zip 上传不在此列。
 

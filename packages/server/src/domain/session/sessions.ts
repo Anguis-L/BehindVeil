@@ -173,3 +173,20 @@ export async function setActiveSession(
   await saveRoomFile(layout, room);
   return session;
 }
+
+/**
+ * 梗概写回（v3 T-M11-04，FR-36 / D-01）：Host 确认后的 AI 梗概（或 Host 手编）落
+ * session.synopsis。Host 权威保留——唯一写入口在这里，AI 只产提案不落盘。
+ */
+export async function updateSynopsis(
+  layout: DataLayout,
+  roomId: string,
+  sessionId: string,
+  synopsis: string,
+): Promise<Session | null> {
+  const session = await readSession(layout, roomId, sessionId);
+  if (!session) return null;
+  const updated: Session = { ...session, synopsis };
+  await saveSession(layout, roomId, updated);
+  return updated;
+}

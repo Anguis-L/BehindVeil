@@ -27,6 +27,28 @@ export interface MessagePage {
   lastSeq: number;
 }
 
+/**
+ * seq 升序的已落盘消息（seq ≤ upto；坏行跳过，与启动恢复同一容错口径）。
+ * KP 预览（T-M2-05）与 AI 梗概（T-M11-04）共用同一读取口径。
+ */
+export async function readMessagesUpTo(
+  layout: DataLayout,
+  roomId: string,
+  sessionId: string,
+  upto: number | undefined,
+  store: JsonlStore = new JsonlStore(layout.messagesFile(roomId, sessionId)),
+): Promise<Message[]> {
+  const { records } = await store.readAll();
+  const messages: Message[] = [];
+  for (const record of records) {
+    const parsed = MessageSchema.safeParse(record);
+    if (parsed.success && (upto === undefined || parsed.data.seq <= upto)) {
+      messages.push(parsed.data);
+    }
+  }
+  return messages.sort((a, b) => a.seq - b.seq);
+}
+
 export interface ReadMessagesOptions {
   /** 返回 seq < beforeSeq 的消息（向前翻页） */
   beforeSeq?: number;

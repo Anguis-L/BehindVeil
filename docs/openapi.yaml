@@ -198,6 +198,211 @@ paths:
         '500':
           $ref: '#/components/responses/Internal'
 
+  /search:
+    get:
+      operationId: searchMessages
+      tags: [可观测]
+      summary: 跨房间消息检索
+      description: |
+        v3 FR-34：在**全部房间**的已落盘消息里做关键词子串检索，用于 KP 事后
+        「那句话发生在哪个团」。
+
+        几点口径要说明：
+
+        - 数据来自 `data/index/global.jsonl`——消息落盘时同批追加的派生索引，
+          损坏或缺失时用 `pnpm aidle-reindex` 全量重建；索引永不回写消息本体。
+        - **结果含暗骰行**（`hidden: true`）。索引是管理面 Host 视角完整版：
+          隐藏的是广播范围，不是凭据（与骰子审计流水同一哲学）。
+          玩家侧要翻历史请走 `GET /rooms/{roomId}/messages`（按身份过滤暗骰/密语），
+          两套可见性口径不混用。
+        - 命中按 seq 降序，默认 50 条（上限 200）；要翻全文走上面那个消息端点。
+        - 只读端点，永不写索引。
+      x-status: implemented
+      x-milestone: M11
+      x-source: 'packages/server/src/gateway/http/search.ts（T-M11-05）'
+      security:
+        - adminToken: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: 关键词（子串匹配，大小写敏感）
+          schema:
+            type: string
+          example: 灯塔
+        - name: roomId
+          in: query
+          required: false
+          description: 限定单个房间；缺省全房间
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: 单页条数，上限 200
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: 命中行（seq 降序）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [query, hits]
+                properties:
+                  query:
+                    type: string
+                  hits:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GlobalIndexEntry'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /rooms/{roomId}/worldbook:
+    parameters:
+      - $ref: '#/components/parameters/RoomId'
+    get:
+      operationId: getRoomWorldBook
+      tags: [世界书]
+      summary: 读取房间世界书
+      description: |
+        v3 FR-35：世界书编辑器（KP 控制台「世界书」标签）的读取端。
+        文件不存在时返回空条目数组（世界书是可选的）。
+
+        落盘形态自 M11 起为 `{ schemaVersion, entries }`（收编进迁移管辖，
+        与 room/members 同一口径）；**手编的裸 `{entries}` 照样读得进**，
+        不强制先跑 `pnpm aidle-migrate`。
+      x-status: implemented
+      x-milestone: M11
+      x-source: 'packages/server/src/gateway/http/worldbook.ts（T-M11-06）'
+      security:
+        - adminToken: []
+      responses:
+        '200':
+          description: 房间世界书条目 + 语义告警
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries, warnings]
+                properties:
+                  entries:
+                    $ref: '#/components/schemas/WorldBook'
+                  warnings:
+                    type: array
+                    description: 语义隐患（不阻断，如「非常驻条目 key 为空，永远不会命中」）
+                    items:
+                      type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+    put:
+      operationId: putRoomWorldBook
+      tags: [世界书]
+      summary: 全量保存房间世界书
+      description: |
+        v3 FR-35：编辑器的唯一写入口——**全量替换**（不是增量 patch）。
+        保存前一律过 `validateWorldBook`（决议 D-08 不变）：
+
+        - 结构错误（uid 重复 / `position=at_depth` 缺 depth / Schema 不符）→ **400 拒绝落盘**，
+          原文件分毫不动——宁可拒绝保存，也不把坏世界书留给下次开团；
+        - 语义隐患（空关键词、非法正则）→ 200 保存成功，响应带回 `warnings`。
+
+        写盘走原子写（tmp + fsync + rename），崩在任意点旧文件完好。
+        模组层世界书不在此列（只读，见 `/modules/{moduleId}/worldbook`）。
+      x-status: implemented
+      x-milestone: M11
+      x-source: 'packages/server/src/gateway/http/worldbook.ts（T-M11-06）'
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorldBook'
+      responses:
+        '200':
+          description: 保存成功（含语义告警）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries, warnings]
+                properties:
+                  entries:
+                    $ref: '#/components/schemas/WorldBook'
+                  warnings:
+                    type: array
+                    items:
+                      type: string
+        '400':
+          description: 结构校验未通过（未落盘）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /modules/{moduleId}/worldbook:
+    parameters:
+      - name: moduleId
+        in: path
+        required: true
+        description: 模组 ID（manifest.id）
+        schema:
+          type: string
+        example: mountains-of-madness
+    get:
+      operationId: getModuleWorldBook
+      tags: [世界书]
+      summary: 读取模组世界书（只读）
+      description: |
+        v3 FR-35：模组包是外部资产，**不提供写接口**。要改就在编辑器里
+        「复制到房间层」再编辑——复制会把 uid 重排（模组 uid 与房间 uid 会撞），
+        落点仍是 `PUT /rooms/{roomId}/worldbook`。
+
+        模组未装载/校验不通过时 404（E-MOD-01）。
+      x-status: implemented
+      x-milestone: M11
+      x-source: 'packages/server/src/gateway/http/worldbook.ts（T-M11-06）'
+      security:
+        - adminToken: []
+      responses:
+        '200':
+          description: 模组世界书条目（只读）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries, warnings]
+                properties:
+                  entries:
+                    $ref: '#/components/schemas/WorldBook'
+                  warnings:
+                    type: array
+                    items:
+                      type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 模组不存在或无法装载（E-MOD-01）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /rooms:
     post:
       operationId: createRoom
@@ -1488,6 +1693,37 @@ components:
     # ---- 系统 ----
 
     # ---- 可观测（T-M6-03）----
+
+    GlobalIndexEntry:
+      type: object
+      description: |
+        跨房间索引行（v3 FR-34，`shared/src/search.ts` 契约）。
+        消息落盘时同批追加到 `data/index/global.jsonl`，`GET /search` 直接返回它
+        （冗余了 content，不回源取详情）。
+      required: [roomId, sessionId, seq, type, senderId, ts, content]
+      properties:
+        roomId:
+          type: string
+        sessionId:
+          type: string
+        seq:
+          type: integer
+          minimum: 0
+        type:
+          type: string
+          enum: [ic, ooc, system, dice, narration, state_snapshot]
+        senderId:
+          type: string
+          description: 系统消息为空串（无发送者）；dice 缺省引擎代掷
+        ts:
+          type: string
+          format: date-time
+        hidden:
+          type: boolean
+          description: 仅 dice 消息可能有——暗骰标记（索引是 Host 视角完整版）
+        content:
+          type: string
+          description: 可检索文本；dice 为「骰式 = 结果」；快照为空串
 
     Metrics:
       type: object

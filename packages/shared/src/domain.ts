@@ -47,6 +47,18 @@ export const SessionSettingsSchema = z
      */
     contextWindowTokens: z.number().int().positive().default(32_768),
     outputReserveTokens: z.number().int().positive().default(2_048),
+    /**
+     * 向量召回 topK（v3 FR-33，可选而非 default：旧会话数据无此字段时保持缺失、
+     * 不改写落盘结构，消费侧按 DEFAULT_VECTOR_RECALL_K=8 兜底）。
+     */
+    vectorRecallK: z.number().int().min(1).max(64).optional(),
+    /** 向量召回相似度阈值（余弦下限）；消费侧按 DEFAULT_VECTOR_RECALL_THRESHOLD=0.78 兜底 */
+    vectorRecallThreshold: z.number().min(0).max(1).optional(),
+    /**
+     * AI 剧情梗概开关（v3 FR-36，ADR-3-09）：S5 裁剪发生后链外生成梗概提案，
+     * Host 确认后回写 session.synopsis。缺省关（v3 首期灰度，NFR-11 默认配置零负担）。
+     */
+    aiSynopsis: z.boolean().optional(),
   })
   // S7 硬顶 = context - reserve（TDD §5.1）：配置颠倒会让硬顶为负、历史裁空仍超限
   .refine((s) => s.contextWindowTokens > s.outputReserveTokens, {

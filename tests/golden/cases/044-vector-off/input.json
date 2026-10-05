@@ -1,0 +1,98 @@
+{
+  "session": {
+    "provider": "openai-compat",
+    "model": "deepseek-chat",
+    "temperature": 0.8,
+    "maxHistoryMessages": 40,
+    "worldBookBudgetTokens": 2000,
+    "scanDepth": 8,
+    "contextWindowTokens": 32768,
+    "outputReserveTokens": 2048
+  },
+  "kpCard": {
+    "spec": "chara_card_v3",
+    "data": {
+      "name": "守秘人",
+      "description": "测试KP",
+      "scenario": "",
+      "first_mes": "",
+      "mes_example": "",
+      "extensions": {}
+    }
+  },
+  "messages": [
+    {
+      "seq": 1,
+      "ts": "2026-09-25T00:00:00.000Z",
+      "sessionId": "ses_1",
+      "type": "ic",
+      "senderId": "member_1",
+      "content": "码头上渔火点点，雾号在远处响起"
+    }
+  ],
+  "stateBoard": {
+    "version": 0,
+    "pcs": {},
+    "scene": {
+      "name": "",
+      "time": "",
+      "publicDesc": ""
+    },
+    "facts": [],
+    "updatedAt": "2026-09-25T00:00:00.000Z"
+  },
+  "worldBook": {
+    "entries": [
+      {
+        "uid": 1,
+        "key": ["码头"],
+        "keysecondary": [],
+        "selectiveLogic": 0,
+        "content": "渔火条目：泊位边的长明灯。",
+        "position": "after_char",
+        "order": 0,
+        "weight": 100,
+        "constant": false,
+        "disabled": false
+      },
+      {
+        "uid": 2,
+        "key": ["雾号"],
+        "keysecondary": [],
+        "selectiveLogic": 0,
+        "content": "雾号条目：码头的雾号每十分钟响一次。",
+        "position": "after_char",
+        "order": 1,
+        "weight": 90,
+        "constant": false,
+        "disabled": false
+      },
+      {
+        "uid": 5,
+        "key": ["旧航图"],
+        "keysecondary": [],
+        "selectiveLogic": 0,
+        "content": "航图条目（仅向量召回）：旧航图标注着沉船的位置。",
+        "position": "after_char",
+        "order": 2,
+        "weight": 80,
+        "constant": false,
+        "disabled": false
+      },
+      {
+        "uid": 6,
+        "key": ["废弃条目"],
+        "keysecondary": [],
+        "selectiveLogic": 0,
+        "content": "已停用条目不应被向量召回并入。",
+        "position": "after_char",
+        "order": 3,
+        "weight": 70,
+        "constant": false,
+        "disabled": true
+      }
+    ]
+  },
+  "pcRoster": "",
+  "synopsis": ""
+}

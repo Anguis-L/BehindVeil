@@ -7,8 +7,9 @@ import { z } from 'zod';
  * - v2.0 封版存档定 `SCHEMA_VERSION = 1`（补写即迁移链 v0→v1 节点）；
  * - v3 起结构性变更从 2 起编号，**凡结构变更必须同卡交付迁移函数**（章程化）；
  * - 消息 JSONL（messages/audit-dice/ai-directive）追加型不迁移；
- * - 用户资产（cards/、modules/、房间级 worldbook.json）不在此管辖：内容归导入者所有，
- *   完整性由装载时 zod 校验兜底（worldbook 待 M11 编辑器落地服务端写路径后收编，本注册表先占位）。
+ * - 用户资产（cards/、modules/）不在此管辖：内容归导入者所有，完整性由装载时 zod 校验兜底；
+ * - 房间级 worldbook.json 于 M11（T-M11-06 编辑器）起收编：服务端第一次握有写路径，
+ *   落盘即带信封；手编的裸 `{entries}` 仍按版本 0 读取（不强制先跑迁移）。
  *
  * 迁移函数是纯函数：`chain[v]` 把版本 v 的文档升到 v+1，输入输出都是「落盘文档」本身。
  * members.json 的 v0 根是数组（无法内联字段），v1 起重构为 `{ schemaVersion, members: [...] }`。
@@ -60,7 +61,7 @@ export const MIGRATORS: Record<ArchiveKind, Migrator> = {
     },
   },
   worldbook: {
-    // 占位：M11 房间层编辑器落地服务端写路径后启用（gate/CLI 届时收编）
+    // T-M11-06 编辑器落地后启用（写入口见 server domain/worldbook/store.ts）
     currentVersion: SCHEMA_VERSION,
     chain: { 0: (doc) => stamp(asObject(doc, 'worldbook')) },
   },

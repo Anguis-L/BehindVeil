@@ -16,6 +16,12 @@ export interface ScanHit {
   matchedKeys: string[];
   /** 命中的二级关键词（进 trace 供 KP 预览） */
   matchedSecondary: string[];
+  /**
+   * 召回来源（v3 FR-33 / ADR-3-03 可观测红线）：constant=常驻/kpOnly 恒命中，
+   * keyword=关键词命中，vector=仅靠向量召回进入（S3.5 并集）。
+   * 纯 scanWorldBook 调用（不经管线 S3）无此字段。
+   */
+  source?: 'keyword' | 'constant' | 'vector';
 }
 
 export interface ScanOptions {

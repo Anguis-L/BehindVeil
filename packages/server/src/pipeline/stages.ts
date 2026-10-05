@@ -127,7 +127,13 @@ export const s2State: Stage = (ctx) => {
 /** S3 世界书扫描：最近 scanDepth 条消息 → 命中条目集（TDD §5.2） */
 export const s3WorldbookScan: Stage = (ctx) => {
   const scanned = ctx.input.messages.slice(-ctx.input.session.scanDepth);
-  const hits = scanWorldBook(scanned.map(scanTextOf), ctx.input.worldBook);
+  const hits = scanWorldBook(scanned.map(scanTextOf), ctx.input.worldBook).map((hit) => ({
+    ...hit,
+    // 召回来源标注（v3 FR-33 / ADR-3-03）：constant/kpOnly 恒命中单独标注，其余为关键词
+    source: (hit.entry.constant || hit.entry.extensions?.kpOnly === true
+      ? 'constant'
+      : 'keyword') as ScanHit['source'],
+  }));
   ctx.bundle.scanHits = hits;
   const scannedMessageCount = scanned.length;
   return trace('S3-worldbook-scan', 0, {
@@ -141,6 +147,61 @@ export const s3WorldbookScan: Stage = (ctx) => {
       constant: h.entry.constant,
       kpOnly: h.entry.extensions?.kpOnly === true,
     })),
+  });
+};
+
+/**
+ * S3.5 向量召回并集（v3 FR-33 / ADR-3-03）：把查询向量 topK 中尚未命中的条目并入
+ * S4 候选集，trace 标注来源（keyword/vector/constant）。仅在 input.vectorRecall 存在
+ * （已配置嵌入且本轮未降级）时注册执行——缺省时整段跳过，行为与 v2.0 逐字节一致。
+ */
+export const s35VectorRecall: Stage = (ctx) => {
+  const recall = ctx.input.vectorRecall;
+  if (!recall) return trace('S3.5-vector-recall', 0, { skipped: true });
+
+  const seen = new Set(ctx.bundle.scanHits.map((h) => h.entry.uid));
+  const byUid = new Map(ctx.input.worldBook.entries.map((e) => [e.uid, e]));
+  const addedUids: number[] = [];
+  let skippedUnknown = 0;
+  let skippedDisabled = 0;
+  let skippedAlreadyHit = 0;
+
+  for (const hit of [...recall.hits].sort((a, b) => b.score - a.score)) {
+    const entry = byUid.get(hit.uid);
+    if (!entry) {
+      skippedUnknown += 1;
+      continue;
+    }
+    if (entry.disabled) {
+      skippedDisabled += 1;
+      continue;
+    }
+    if (seen.has(hit.uid)) {
+      skippedAlreadyHit += 1;
+      continue;
+    }
+    seen.add(hit.uid);
+    ctx.bundle.scanHits.push({
+      entry,
+      matchedKeys: [],
+      matchedSecondary: [],
+      source: 'vector',
+    });
+    addedUids.push(hit.uid);
+  }
+
+  return trace('S3.5-vector-recall', 0, {
+    vectorHitCount: recall.hits.length,
+    addedUids,
+    skippedAlreadyHit,
+    skippedDisabled,
+    skippedUnknown,
+    embeddedEntries: recall.meta.embeddedEntries,
+    reusedEntries: recall.meta.reusedEntries,
+    memoryBytes: recall.meta.memoryBytes,
+    truncatedForMemory: recall.meta.truncatedForMemory,
+    degraded: recall.degraded === true,
+    degradedReason: recall.degradedReason ?? null,
   });
 };
 
@@ -177,6 +238,8 @@ export const s4BudgetCut: Stage = (ctx) => {
     includedUids: included.map((h) => h.entry.uid),
     droppedUids: dropped.map((h) => h.entry.uid),
     usedTokens: used,
+    // 召回来源标注（v3 FR-33 可观测红线）：vector = 仅靠向量召回进入的条目
+    includedSources: included.map((h) => ({ uid: h.entry.uid, source: h.source ?? 'keyword' })),
   });
 };
 
@@ -318,8 +381,9 @@ export function formatMessageLine(msg: Message): string {
   }
 }
 
-/** 扫描文本提取：叙述类取 content；骰式与结构化状态不参与关键词匹配（数值噪声） */
-function scanTextOf(msg: Message): string {
+/** 扫描文本提取：叙述类取 content；骰式与结构化状态不参与关键词匹配（数值噪声）。
+ * 导出供向量召回服务复用（查询文本与关键词扫描语料同源，T-M11-03）。 */
+export function scanTextOf(msg: Message): string {
   switch (msg.type) {
     case 'ic':
     case 'ooc':

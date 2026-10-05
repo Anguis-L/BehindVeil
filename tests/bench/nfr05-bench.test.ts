@@ -1,8 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 // 直接吃源码：吃 dist 的话，源码改了不重新构建就测不到（且 dist 缺失会静默降级）
 import { scanWorldBook } from '../../packages/server/src/domain/worldbook/scan.js';
 import { buildPrompt } from '../../packages/server/src/pipeline/index.js';
 import { createHeuristicTokenizer } from '../../packages/server/src/pipeline/tokenizer.js';
+import { createDataLayout } from '../../packages/server/src/adapters/storage/layout.js';
+import { createMockLlm } from '../../packages/server/src/adapters/llm/mock.js';
+import {
+  clearRecallCache,
+  prepareVectorRecall,
+} from '../../packages/server/src/domain/worldbook/recall.js';
+import { VECTOR_INDEX_MAX_BYTES } from '../../packages/server/src/domain/worldbook/vector-index.js';
 import { BENCH_MESSAGES, buildBenchInput, buildF01WorldBook, p95 } from './fixture-f01.js';
 
 /**
@@ -48,6 +58,72 @@ describe('扫描基准（TC-NFR-05-001）', () => {
     }
 
     expect(p95(samples)).toBeLessThan(50);
+  });
+});
+
+const benchDirs: string[] = [];
+
+afterAll(async () => {
+  clearRecallCache();
+  for (const dir of benchDirs.splice(0)) {
+    await Promise.race([
+      rm(dir, { recursive: true, force: true }).catch(() => undefined),
+      new Promise((r) => setTimeout(r, 2_000)),
+    ]);
+  }
+});
+
+/**
+ * 混合召回基准（v3 T-M11-07，设计 §5.1 账户「世界书混合召回」）。
+ *
+ * 预算：p95 ≤ max(50ms, 基线+20%) @500 条目。这里按绝对半边 50ms 把守
+ * （相对半边由 tests/perf 的 baseline.json 负责，两半合起来才是 max() 形）。
+ * 取**稳态**（缓存命中后只做查询嵌入 + topK）：首次全量嵌入是编辑频次的一次性成本，
+ * 不在每次 AI 回合的热路径上。维度按真实嵌入模型的 1536 维计量，内存顺带守住 64MB 硬顶。
+ */
+describe('混合召回基准（FR-33 预算）', () => {
+  it('F-01 500 条目 × 1536 维，稳态 p95 < 50ms 且索引内存远低于 64MB 硬顶', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'bv-bench-recall-'));
+    benchDirs.push(dir);
+    const layout = createDataLayout(dir);
+    const book = buildF01WorldBook();
+    const llm = createMockLlm({ script: [], embedDim: 1536 });
+    const embed = (texts: string[]): Promise<Float32Array[]> => llm.embed(texts);
+    const queryTexts = BENCH_MESSAGES.map((m) => m.content);
+
+    // 预热：首轮全量嵌入（一次性成本），后续走缓存
+    const warm = await prepareVectorRecall({
+      layout,
+      roomId: 'bench',
+      book,
+      queryTexts,
+      k: 8,
+      threshold: 0.78,
+      embed,
+    });
+    expect(warm).not.toBeNull();
+
+    const samples: number[] = [];
+    for (let i = 0; i < 100; i += 1) {
+      const t0 = performance.now();
+      await prepareVectorRecall({
+        layout,
+        roomId: 'bench',
+        book,
+        queryTexts,
+        k: 8,
+        threshold: 0.78,
+        embed,
+      });
+      samples.push(performance.now() - t0);
+    }
+
+    expect(p95(samples)).toBeLessThan(50);
+
+    // 内存：500 × 1536 × 4B ≈ 3MB，离 64MB 硬顶有量级余量（ADR-3-02）
+    const bytes = warm!.meta.memoryBytes;
+    expect(bytes).toBeGreaterThan(0);
+    expect(bytes).toBeLessThan(VECTOR_INDEX_MAX_BYTES);
   });
 });
 

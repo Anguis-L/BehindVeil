@@ -33,6 +33,11 @@ export interface OpenAiCompatConfig {
   apiKey?: string;
   /** 覆盖 ChatRequest.model（Ollama 等需要指定本地模型时使用） */
   model?: string;
+  /**
+   * 嵌入模型名（v3 FR-33）：配置了才具备 embed 能力（LlmAdapter.embed）；
+   * 未配置时 embed() 抛 E-LLM-01（向量召回按未配置处理）。
+   */
+  embedModel?: string;
   /** 单次尝试超时 ms（覆盖连接到流结束的全程），默认 60s */
   timeoutMs?: number;
   /** 退避基数 ms：第 n 次重试等待 retryDelayMs * 2^n，默认 500 */
@@ -57,6 +62,7 @@ export class OpenAiCompatAdapter implements LlmAdapter {
   private readonly baseUrl: string;
   private readonly apiKey: string | undefined;
   private readonly modelOverride: string | undefined;
+  private readonly embedModel: string | undefined;
   private readonly timeoutMs: number;
   private readonly retryDelayMs: number;
   private readonly maxRetries: number;
@@ -66,6 +72,7 @@ export class OpenAiCompatAdapter implements LlmAdapter {
     this.baseUrl = config.baseUrl.replace(/\/+$/, '');
     this.apiKey = config.apiKey;
     this.modelOverride = config.model;
+    this.embedModel = config.embedModel;
     this.timeoutMs = config.timeoutMs ?? 60_000;
     this.retryDelayMs = config.retryDelayMs ?? 500;
     this.maxRetries = config.maxRetries ?? 2;
@@ -84,6 +91,82 @@ export class OpenAiCompatAdapter implements LlmAdapter {
       }
     }
     throw toLlmError(lastError);
+  }
+
+  /**
+   * 文本向量化（v3 FR-33）：POST {baseUrl}/embeddings（OpenAI 兼容形状，
+   * Ollama 的 /v1 兼容层同形状，无需单独实现）。重试语义与 chat 一致
+   * （5xx/超时指数退避，耗尽抛 E-LLM-01）。
+   */
+  async embed(texts: string[]): Promise<Float32Array[]> {
+    if (!this.embedModel) {
+      throw new LlmError('E-LLM-01', '未配置嵌入模型（llm.embedding.model），embed 不可用', {
+        retryable: false,
+      });
+    }
+    if (texts.length === 0) return [];
+
+    let lastError: unknown = new LlmError('E-LLM-01', '嵌入请求未发起');
+    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+      try {
+        return await this.embedOnce(texts);
+      } catch (err) {
+        lastError = err;
+        if (!(err instanceof RetryableError) || attempt === this.maxRetries) break;
+        await delay(this.retryDelayMs * 2 ** attempt);
+      }
+    }
+    throw toLlmError(lastError);
+  }
+
+  private async embedOnce(texts: string[]): Promise<Float32Array[]> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await this.fetchImpl(`${this.baseUrl}/embeddings`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+        },
+        body: JSON.stringify({ model: this.embedModel, input: texts }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const body = (await res.text().catch(() => '')).slice(0, 200);
+        if (res.status >= 500) {
+          throw new RetryableError(`provider 返回 ${res.status}：${body}`, res.status);
+        }
+        throw new LlmError('E-LLM-01', `嵌入请求被拒绝（${res.status}）：${body}`, {
+          status: res.status,
+          retryable: false,
+        });
+      }
+      const payload = (await res.json()) as {
+        data?: Array<{ index?: number; embedding?: number[] }>;
+      };
+      const rows = payload.data ?? [];
+      if (rows.length !== texts.length) {
+        throw new RetryableError(`嵌入返回条数不符：请求 ${texts.length}，返回 ${rows.length}`);
+      }
+      // index 升序排列后与输入一一对应（个别 provider 不保证顺序）
+      const ordered = [...rows]
+        .map((row, i) => ({ index: row.index ?? i, embedding: row.embedding }))
+        .sort((a, b) => a.index - b.index);
+      const out: Float32Array[] = [];
+      for (const [i, row] of ordered.entries()) {
+        if (!Array.isArray(row.embedding)) {
+          throw new RetryableError(`嵌入第 ${i} 条缺少向量`);
+        }
+        out.push(new Float32Array(row.embedding));
+      }
+      return out;
+    } catch (err) {
+      if (err instanceof LlmError || err instanceof RetryableError) throw err;
+      throw new RetryableError(describeError(err));
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async attemptOnce(

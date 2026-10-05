@@ -2,17 +2,21 @@
 import { computed, ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session';
 import {
+  buildSearchQuery,
   formatCostCny,
   formatHitKeywords,
   formatIsoShort,
   formatLatency,
   formatPercent,
+  formatSearchContent,
+  formatSearchHit,
   formatTokenCount,
   parseSettingsDraft,
   sessionStateLabel,
   summarizeTrace,
   type SettingsDraft,
 } from '../kp-console.js';
+import type { GlobalIndexEntry } from '@behindveil/shared';
 
 /**
  * KP 控制台（T-M6-04/05，FR-13 / R-02）：房间页右栏的第三个标签，不是独立页面——
@@ -142,6 +146,54 @@ async function saveSettings(): Promise<void> {
 /** 刷新列表后表单会跟着回填，省掉「保存后还要手动刷」的一步 */
 async function refreshSessions(): Promise<void> {
   await store.loadSessions();
+}
+
+// ---- 跨房间检索（v3 T-M11-05，FR-34）----
+/** 默认只在本房搜；勾上「全部房间」才跨团（索引是 Host 视角完整版，含暗骰行） */
+const searchQuery = ref('');
+const searchAllRooms = ref(false);
+const searchHits = ref<GlobalIndexEntry[]>([]);
+const searchNotice = ref('');
+const searchError = ref('');
+const searchLoading = ref(false);
+
+async function doSearch(): Promise<void> {
+  const qs = buildSearchQuery(
+    searchQuery.value,
+    searchAllRooms.value ? undefined : store.roomId,
+    50,
+  );
+  if (qs === null) {
+    searchError.value = '请输入关键词';
+    return;
+  }
+  searchError.value = '';
+  searchNotice.value = '';
+  searchLoading.value = true;
+  try {
+    const res = await fetch(`/search${qs}`, {
+      headers: store.adminToken ? { 'X-Admin-Token': store.adminToken } : {},
+    });
+    const payload: unknown = await res.json().catch(() => null);
+    if (!res.ok) {
+      const message =
+        typeof payload === 'object' &&
+        payload !== null &&
+        typeof (payload as { message?: unknown }).message === 'string'
+          ? (payload as { message: string }).message
+          : `检索失败（${res.status}）`;
+      throw new Error(message);
+    }
+    const hits = (payload as { hits?: unknown }).hits;
+    searchHits.value = Array.isArray(hits) ? (hits as GlobalIndexEntry[]) : [];
+    searchNotice.value =
+      searchHits.value.length === 0 ? '没有命中——索引只含本服务落盘的消息。' : '';
+  } catch (error) {
+    searchHits.value = [];
+    searchError.value = error instanceof Error ? error.message : '检索失败';
+  } finally {
+    searchLoading.value = false;
+  }
 }
 </script>
 
@@ -297,6 +349,48 @@ async function refreshSessions(): Promise<void> {
                 结束
               </button>
             </div>
+          </li>
+        </ul>
+      </section>
+
+      <!-- 跨房间检索（FR-34）：事后找「那句话发生在哪个团」，走管理面只读索引 -->
+      <section class="bv-kp__block">
+        <h3 class="bv-kp__title">跨房间检索</h3>
+        <p class="bv-kp__hint">
+          搜全部已落盘消息（含本房以外的团）。需要管理令牌；结果是 Host 视角完整版，含暗骰行。
+        </p>
+        <div class="bv-kp__row">
+          <input
+            v-model="searchQuery"
+            class="bv-kp__input"
+            placeholder="关键词"
+            @keydown.enter="doSearch"
+          />
+          <button
+            class="bv-kp__btn"
+            type="button"
+            :disabled="searchLoading || !searchQuery.trim()"
+            @click="doSearch"
+          >
+            {{ searchLoading ? '检索中…' : '检索' }}
+          </button>
+        </div>
+        <label class="bv-kp__check">
+          <input v-model="searchAllRooms" type="checkbox" />
+          <span>搜索全部房间（不勾则只看本房）</span>
+        </label>
+        <p v-if="searchError" class="bv-kp__err">{{ searchError }}</p>
+        <p v-else-if="searchNotice" class="bv-kp__hint">{{ searchNotice }}</p>
+        <ul v-if="searchHits.length > 0" class="bv-kp__list">
+          <li v-for="hit in searchHits" :key="`${hit.roomId}:${hit.sessionId}:${hit.seq}`">
+            <div class="bv-kp__kv">
+              <span>{{ formatSearchHit(hit) }}</span>
+              <span class="bv-kp__mono">{{ formatIsoShort(hit.ts) }}</span>
+            </div>
+            <p class="bv-kp__hit">
+              <span v-if="hit.hidden" class="bv-kp__badge">暗骰</span>
+              <span class="bv-kp__keys">{{ formatSearchContent(hit) }}</span>
+            </p>
           </li>
         </ul>
       </section>
@@ -611,6 +705,13 @@ async function refreshSessions(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: var(--bv-space-1);
+  font-size: 12px;
+  color: var(--bv-text-secondary);
+}
+.bv-kp__check {
+  display: flex;
+  align-items: center;
+  gap: var(--bv-space-2);
   font-size: 12px;
   color: var(--bv-text-secondary);
 }

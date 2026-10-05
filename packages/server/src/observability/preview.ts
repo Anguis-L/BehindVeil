@@ -1,12 +1,19 @@
-import { MessageSchema, type CharacterCardV3, type Message } from '@behindveil/shared';
-import { JsonlStore } from '../adapters/storage/jsonl-store.js';
+import type { CharacterCardV3 } from '@behindveil/shared';
 import type { DataLayout } from '../adapters/storage/layout.js';
 import { loadWorldBook } from '../domain/worldbook/validate.js';
+import {
+  DEFAULT_VECTOR_RECALL_K,
+  DEFAULT_VECTOR_RECALL_THRESHOLD,
+  prepareVectorRecall,
+  type EmbedFn,
+} from '../domain/worldbook/recall.js';
+import { scanTextOf } from '../pipeline/stages.js';
 import { readStateBoard } from '../domain/stateboard/board.js';
+import { readMessagesUpTo } from '../domain/session/messages.js';
 import { readSession } from '../domain/session/sessions.js';
 import { buildPrompt } from '../pipeline/index.js';
 import { createHeuristicTokenizer } from '../pipeline/tokenizer.js';
-import type { PipelineTrace } from '../pipeline/types.js';
+import type { PipelineInput, PipelineTrace } from '../pipeline/types.js';
 
 /**
  * KP prompt 预览（T-M2-05，FR-13 / TDD §9）：以当前落盘状态组装 PipelineInput 并跑
@@ -35,11 +42,20 @@ export interface PreviewOptions {
   seq?: number;
 }
 
+/**
+ * 向量召回上下文（v3 FR-33）：嵌入函数由装配根注入（llm.embedding 已配置才有）。
+ * 缺省 = 向量召回关闭，PipelineInput 无 vectorRecall → S3.5 跳过（行为 = v2.0）。
+ */
+export interface RecallContext {
+  embed: EmbedFn;
+}
+
 export async function buildPreviewTrace(
   layout: DataLayout,
   roomId: string,
   sessionId: string,
   opts: PreviewOptions = {},
+  recall?: RecallContext,
 ): Promise<PipelineTrace> {
   const session = await readSession(layout, roomId, sessionId);
   if (!session) throw new Error(`会话不存在：${sessionId}`);
@@ -47,6 +63,27 @@ export async function buildPreviewTrace(
   const messages = await readMessagesUpTo(layout, roomId, sessionId, opts.seq);
   const stateBoard = await readStateBoard(layout, roomId, sessionId);
   const { book } = await loadWorldBook(layout, roomId);
+
+  // S3.5 向量召回（T-M11-03）：查询语料与关键词扫描同源（最近 scanDepth 条叙述文本）
+  let vectorRecall: PipelineInput['vectorRecall'];
+  if (recall?.embed) {
+    const outcome = await prepareVectorRecall({
+      layout,
+      roomId,
+      book,
+      queryTexts: messages.slice(-session.settings.scanDepth).map(scanTextOf),
+      k: session.settings.vectorRecallK ?? DEFAULT_VECTOR_RECALL_K,
+      threshold: session.settings.vectorRecallThreshold ?? DEFAULT_VECTOR_RECALL_THRESHOLD,
+      embed: recall.embed,
+    });
+    if (outcome) {
+      vectorRecall = {
+        hits: outcome.hits,
+        meta: outcome.meta,
+        ...(outcome.degraded ? { degraded: true, degradedReason: outcome.degradedReason } : {}),
+      };
+    }
+  }
 
   return buildPrompt(
     {
@@ -57,25 +94,8 @@ export async function buildPreviewTrace(
       worldBook: book,
       pcRoster: '',
       synopsis: session.synopsis,
+      ...(vectorRecall ? { vectorRecall } : {}),
     },
     createHeuristicTokenizer(),
   );
-}
-
-/** seq 升序的已落盘消息（seq ≤ upto；坏行跳过，与启动恢复同一容错口径） */
-async function readMessagesUpTo(
-  layout: DataLayout,
-  roomId: string,
-  sessionId: string,
-  upto: number | undefined,
-): Promise<Message[]> {
-  const { records } = await new JsonlStore(layout.messagesFile(roomId, sessionId)).readAll();
-  const messages: Message[] = [];
-  for (const record of records) {
-    const parsed = MessageSchema.safeParse(record);
-    if (parsed.success && (upto === undefined || parsed.data.seq <= upto)) {
-      messages.push(parsed.data);
-    }
-  }
-  return messages.sort((a, b) => a.seq - b.seq);
 }

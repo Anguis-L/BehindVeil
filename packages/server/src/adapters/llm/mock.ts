@@ -42,29 +42,71 @@ export interface MockLlmOptions {
    * 注入就失去意义（50 轮回归 TC-FR-05-011 依赖它真实产生失败样本）。
    */
   errorRate?: number;
+  /**
+   * embed 维度（v3 FR-33，向量召回测试用）：配置了才具备 embed 能力。
+   * 向量由文本内容的确定性哈希推导——同文本同向量、异文本近必异向量，
+   * 无网络依赖，供混合召回单测与黄金用例使用。
+   */
+  embedDim?: number;
 }
 
 export interface MockLlmAdapter extends LlmAdapter {
   /** 每次调用的请求留痕（契约对拍与回归分析用） */
   readonly calls: ChatRequest[];
+  /**
+   * Mock 恒提供 embed 方法（未配 embedDim 时抛 E-LLM-01）——此处收窄 LlmAdapter 的
+   * 可选签名，让「未配置即不可用」在类型层面也可见，测试可直接调用。
+   */
+  embed(texts: string[]): Promise<Float32Array[]>;
 }
 
 export function createMockLlm(
   options: MockLlmOptions & { script?: MockScriptStep[] } = {},
 ): MockLlmAdapter {
-  return new MockLlmAdapterImpl(options.script ?? [], options.errorRate ?? 0);
+  return new MockLlmAdapterImpl(options.script ?? [], options.errorRate ?? 0, options.embedDim);
 }
 
 class MockLlmAdapterImpl implements MockLlmAdapter {
   readonly id = 'mock';
-  readonly calls: ChatRequest[] = [];
+
+  readonly calls: ChatRequest[];
 
   private cursor = 0;
+  private readonly embedDim: number | undefined;
 
   constructor(
     private readonly script: MockScriptStep[],
     private readonly errorRate: number,
-  ) {}
+    embedDim?: number,
+  ) {
+    this.calls = [];
+    this.embedDim = embedDim;
+  }
+
+  /**
+   * 确定性伪向量：字符袋（char-bag）直方图归一化——共享字符多的文本余弦更高，
+   * 给混合召回单测提供真实的相似度排序语义；同文本恒同向量，无网络依赖。
+   */
+  async embed(texts: string[]): Promise<Float32Array[]> {
+    if (this.embedDim === undefined) {
+      throw new LlmError('E-LLM-01', 'MockLlm 未配置 embedDim，embed 不可用', {
+        retryable: false,
+      });
+    }
+    const dim = this.embedDim;
+    return texts.map((text) => {
+      const vector = new Float32Array(dim);
+      for (const ch of text) {
+        const slot = ch.charCodeAt(0) % dim;
+        vector[slot] = (vector[slot] ?? 0) + 1;
+      }
+      let norm = 0;
+      for (const v of vector) norm += v * v;
+      norm = Math.sqrt(norm) || 1;
+      for (let i = 0; i < dim; i += 1) vector[i] = (vector[i] ?? 0) / norm;
+      return vector;
+    });
+  }
 
   async chat(req: ChatRequest, onDelta: (delta: string) => void): Promise<ChatResponse> {
     this.calls.push(req);

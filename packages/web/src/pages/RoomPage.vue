@@ -8,6 +8,7 @@ import MessageCard from '../components/MessageCard.vue';
 import KpConsole from '../components/KpConsole.vue';
 import StateBoardPanel from '../components/StateBoardPanel.vue';
 import CardImportPanel from '../components/CardImportPanel.vue';
+import WorldBookEditor from '../components/WorldBookEditor.vue';
 
 const store = useSessionStore();
 const draft = ref('');
@@ -15,16 +16,18 @@ const mode = ref<'ic' | 'ooc'>('ic');
 const moduleId = ref('');
 const listEl = ref<HTMLElement | null>(null);
 
-/** 右栏标签（tokens.css：--bv-rail-right 角色 / 手记 / KP 控制台 / 状态板 / 卡库） */
-type RailTab = 'roster' | 'notes' | 'kp' | 'board' | 'cards';
+/** 右栏标签（tokens.css：--bv-rail-right 角色 / 手记 / KP 控制台 / 状态板 / 卡库 / 世界书） */
+type RailTab = 'roster' | 'notes' | 'kp' | 'board' | 'cards' | 'worldbook';
 const railTab = ref<RailTab>('board');
-const railTabs: Array<{ key: RailTab; label: string }> = [
+/** 世界书编辑器仅 Host 可见（读写房间世界书，与 KP 控制台同权限级别） */
+const railTabs = computed<Array<{ key: RailTab; label: string }>>(() => [
   { key: 'board', label: '状态板' },
   { key: 'roster', label: '角色' },
   { key: 'notes', label: '手记' },
   { key: 'kp', label: 'KP 控制台' },
   { key: 'cards', label: '卡库' },
-];
+  ...(store.role === 'host' ? [{ key: 'worldbook' as const, label: '世界书' }] : []),
+]);
 
 /**
  * 窄屏抽屉（T-M6-07，NFR-01）。
@@ -300,6 +303,7 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
 
         <StateBoardPanel v-if="railTab === 'board'" />
         <CardImportPanel v-else-if="railTab === 'cards'" />
+        <WorldBookEditor v-else-if="railTab === 'worldbook'" />
         <template v-else-if="railTab === 'kp'">
           <template v-if="store.role === 'host'">
             <button
