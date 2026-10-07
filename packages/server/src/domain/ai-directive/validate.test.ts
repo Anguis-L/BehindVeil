@@ -192,21 +192,3 @@ describe('resource 指令的语义边界（T-M12-02）', () => {
     if (!verdict.ok) expect(verdict.reason).toContain('resource');
   });
 });
-
-describe('resource 指令的语义边界（T-M12-02）', () => {
-  it('delta 非整数 → 拒绝（法术位不能消耗半个）', () => {
-    const verdict = validateDirective({
-      op: 'resource',
-      target: 'pc:alice',
-      name: '箭矢',
-      delta: -1.5,
-    });
-    expect(verdict).toMatchObject({ ok: false, code: 'E-AI-01' });
-  });
-
-  it('未知 op 的白名单提示串随 OP_SCHEMAS 派生（加 resource 后文案同步）', () => {
-    const verdict = validateDirective({ op: 'teleport', target: 'pc:alice' });
-    expect(verdict).toMatchObject({ ok: false, code: 'E-AI-01' });
-    if (!verdict.ok) expect(verdict.reason).toContain('resource');
-  });
-});

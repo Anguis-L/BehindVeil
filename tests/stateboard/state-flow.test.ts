@@ -395,3 +395,112 @@ describe('快照机制（T-M5-07，SDD §5.4）', () => {
     expect(reminder.content).toContain('20 条消息');
   });
 });
+
+describe('先攻看板广播一致性（T-M12-04，FR-37 / ADR-3-06）', () => {
+  // 先攻数据骑既有 state:update / state:broadcast 通道（零新增 socket 事件）：
+  // Host 手动维护，本组用例看板数据对全员一致、乐观锁照常生效。
+  it('Host 写入 scene.initiative → version+1 落盘，Host 与玩家收到的看板逐字段一致', async () => {
+    const h = await setupRoom();
+    const initiative = {
+      order: [
+        { ref: h.memberA, label: '爱丽丝', roll: 18 },
+        { ref: 'npc:哥布林', label: '哥布林', roll: 12 },
+      ],
+      currentIdx: 1,
+      round: 2,
+    };
+    h.host.emit('state:update', {
+      patch: { scene: { name: '雾桥', time: '夜', publicDesc: '雾很重', initiative } },
+      expectedVersion: 0,
+    });
+    await waitUntil(
+      () => stateBoards(h, h.playerA).some((b) => b['version'] === 1),
+      'player 收到带先攻的广播',
+    );
+
+    for (const socket of [h.host, h.playerA]) {
+      expect(stateBoards(h, socket).at(-1)).toMatchObject({
+        version: 1,
+        scene: { name: '雾桥', initiative },
+      });
+    }
+    // 两端收到的 scene 对象（含先攻三件套与顺序数组）逐字段一致
+    expect(stateBoards(h, h.host).at(-1)?.['scene']).toEqual(
+      stateBoards(h, h.playerA).at(-1)?.['scene'],
+    );
+    // 落盘一致性：state.json 里的先攻与广播一致
+    const raw = JSON.parse(
+      await readFile(
+        path.join(h.dataDir, 'rooms', h.roomId, 'sessions', h.sessionId, 'state.json'),
+        'utf8',
+      ),
+    ) as { scene: { initiative?: unknown } };
+    expect(raw.scene.initiative).toEqual(initiative);
+  });
+
+  it('过期 expectedVersion 的先攻编辑 → E-ST-01 拒绝 + 广播最新版（先攻不被迟到写入覆盖）', async () => {
+    const h = await setupRoom();
+    const initiative = {
+      order: [{ ref: 'npc:哥布林', label: '哥布林', roll: 9 }],
+      currentIdx: 0,
+      round: 1,
+    };
+    h.host.emit('state:update', {
+      patch: { scene: { name: '雾桥', time: '夜', publicDesc: '雾很重', initiative } },
+      expectedVersion: 0,
+    });
+    await waitUntil(() => stateBoards(h, h.host).some((b) => b['version'] === 1), '先攻生效');
+
+    // 迟到的先攻调整（仍按 version 0 提交）：被拒，且随后广播对齐到最新板
+    h.host.emit('state:update', {
+      patch: {
+        scene: {
+          name: '雾桥',
+          time: '夜',
+          publicDesc: '雾很重',
+          initiative: { ...initiative, currentIdx: 1 },
+        },
+      },
+      expectedVersion: 0,
+    });
+    await waitUntil(
+      () => (h.errors.get(h.host) ?? []).some((e) => e['code'] === 'E-ST-01'),
+      'host 收到 E-ST-01',
+    );
+    await waitUntil(
+      () => stateBoards(h, h.host).filter((b) => b['version'] === 1).length >= 2,
+      '冲突后广播最新版',
+    );
+    const latest = stateBoards(h, h.host)
+      .filter((b) => b['version'] === 1)
+      .at(-1);
+    expect(
+      (latest?.['scene'] as { initiative?: { currentIdx: number } }).initiative?.currentIdx,
+    ).toBe(0);
+    expect(
+      stateBoards(h, h.playerA)
+        .filter((b) => b['version'] === 1)
+        .at(-1)?.['scene'],
+    ).toEqual(latest?.['scene']);
+  });
+
+  it('player 写先攻被拒（E-ROOM-01），不产生广播（看板维护权在 Host）', async () => {
+    const h = await setupRoom();
+    h.playerA.emit('state:update', {
+      patch: {
+        scene: {
+          name: '雾桥',
+          time: '夜',
+          publicDesc: '雾很重',
+          initiative: { order: [], currentIdx: 0, round: 1 },
+        },
+      },
+      expectedVersion: 0,
+    });
+    await waitUntil(
+      () => (h.errors.get(h.playerA) ?? []).some((e) => e['code'] === 'E-ROOM-01'),
+      'player 收到拒绝',
+    );
+    expect(stateBoards(h, h.playerA)).toHaveLength(0);
+  });
+});

@@ -22,7 +22,6 @@ import { buildPrompt } from '../../packages/server/dist/pipeline/index.js';
 import { createHeuristicTokenizer } from '../../packages/server/dist/pipeline/tokenizer.js';
 import { MessageSchema } from '../../packages/shared/dist/message.js';
 import { StateBoardSchema } from '../../packages/shared/dist/domain.js';
-import { StateBoardSchema } from '../../packages/shared/dist/domain.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 

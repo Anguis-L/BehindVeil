@@ -940,3 +940,93 @@ describe('数值效果回注文案（T-M8-03/04）', () => {
     );
   });
 });
+
+describe('resource 闭环（T-M12-02 实现 / T-M12-04 补编排侧，FR-38）', () => {
+  /** 带箭矢的 5e 板：夹紧边界（0/max）与 E-AI-01 拒绝在 executor/engine-writes 专测 */
+  const board5eWithArrows = (current: number): StateBoard => {
+    const base = board5e();
+    base.pcs['alice'] = {
+      ...base.pcs['alice']!,
+      resources: [{ name: '箭矢', current, max: 20, resetOn: 'none' }],
+    };
+    return base;
+  };
+
+  it('不掷骰 → 队列内落板 → 回注含前后余量；效果执行触发一次续写', async () => {
+    const h = harness(
+      [
+        {
+          chunks: [
+            fence(
+              JSON.stringify({
+                op: 'resource',
+                target: 'pc:alice',
+                name: '箭矢',
+                delta: -2,
+                label: '齐射',
+              }),
+            ),
+            '你连珠般放出两箭。',
+          ],
+        },
+        { chunks: ['箭囊轻了几分。'] },
+      ],
+      {},
+      { board: board5eWithArrows(5) },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.calls).toHaveLength(2); // 与 damage/heal 同构：效果执行触发一次续写
+    expect(h.dice).toHaveLength(0); // 资源变动是确定的「几个」，无随机结构
+    expect(h.resourceEffects).toEqual([
+      { key: 'alice', name: '箭矢', delta: -2, before: 5, after: 3 },
+    ]);
+    expect(h.results).toEqual(['【资源】爱丽丝（齐射）：箭矢 消耗 2，5 → 3']);
+    expect(h.alerts).toHaveLength(0);
+    expect(h.tracker.successRate).toBe(1);
+  });
+
+  it('余量不足 → E-AI-01：不落板、不回注、计 R-01 失败（不静默 clamp 成 0）', async () => {
+    const h = harness(
+      [
+        {
+          chunks: [
+            fence(JSON.stringify({ op: 'resource', target: 'pc:alice', name: '箭矢', delta: -3 })),
+          ],
+        },
+        { chunks: ['叙事继续。'] },
+      ],
+      {},
+      { board: board5eWithArrows(1) },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.dice).toHaveLength(0);
+    expect(h.resourceEffects).toHaveLength(0);
+    expect(h.results).toHaveLength(0);
+    expect(h.alerts).toHaveLength(1);
+    expect(h.alerts[0]).toMatchObject({ code: 'E-AI-01' });
+    expect(h.alerts[0]!.message).toContain('余量不足');
+    expect(h.tracker.successRate).toBe(0);
+  });
+
+  it('恢复超上限 → E-AI-01 同样拒绝（不静默 clamp 成 max）', async () => {
+    const h = harness(
+      [
+        {
+          chunks: [
+            fence(JSON.stringify({ op: 'resource', target: 'pc:alice', name: '箭矢', delta: 99 })),
+          ],
+        },
+        { chunks: ['叙事继续。'] },
+      ],
+      {},
+      { board: board5eWithArrows(18) },
+    );
+    await runAiTurn(1, h.ports);
+
+    expect(h.resourceEffects).toHaveLength(0);
+    expect(h.alerts).toHaveLength(1);
+    expect(h.alerts[0]!.message).toContain('超过上限');
+  });
+});

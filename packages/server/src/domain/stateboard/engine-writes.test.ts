@@ -277,3 +277,26 @@ describe('resourcePatch（T-M12-02，FR-38）', () => {
     expect(hp.patch.pcs?.['m1']?.conditions).toEqual([{ label: '重伤', note: '左臂' }]);
   });
 });
+
+describe('资源写路径的乐观锁边界（T-M12-04，FR-38）', () => {
+  it('过期 expectedVersion → E-ST-01 拒绝：资源变动不落盘并返回当前板（供广播对齐）', () => {
+    const produced = resourcePatch(boardWithResources(), 'm1', '箭矢', -2);
+    expect(produced.ok).toBe(true);
+    if (!produced.ok) return;
+    const rejected = applyStatePatch(boardWithResources(), produced.patch, 3);
+    expect(rejected).toEqual({ ok: false, code: 'E-ST-01', current: boardWithResources() });
+  });
+
+  it('同一条 patch 不能重复落板：首落版本已 +1，按旧 expectedVersion 重放被拒', () => {
+    const produced = resourcePatch(boardWithResources(), 'm1', '箭矢', -2);
+    expect(produced.ok).toBe(true);
+    if (!produced.ok) return;
+    const first = applyStatePatch(boardWithResources(), produced.patch, 4);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.next.version).toBe(5);
+    // 对已推进的板按旧版本号重放 = 过期写入（网关队列内每次现读当前板，天然防重放入账）
+    const replay = applyStatePatch(first.next, produced.patch, 4);
+    expect(replay).toMatchObject({ ok: false, code: 'E-ST-01' });
+  });
+});
