@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { GenericRuleSchema } from '@behindveil/shared';
 import {
   executeCheck,
   executeResource,
@@ -7,6 +8,7 @@ import {
 } from './executor.js';
 import type { CheckDirective } from './schema.js';
 import type { RandomSource } from '../dice/random.js';
+import { createRuleBook } from '../rulebook/index.js';
 import { createStateBoardRoster } from '../stateboard/roster.js';
 import type { StateBoard } from '@behindveil/shared';
 
@@ -121,6 +123,73 @@ describe('名册查询失败 → E-AI-01（不计入 R-01 成功）', () => {
       deps({ roster: { skillValue: () => ({ found: false, reason: 'pc-not-found' }) } }),
     );
     expect('roll' in result).toBe(false);
+  });
+});
+
+describe('generic 规则书检定（v3 FR-40：骰型/方向全配置化）', () => {
+  const genericBook = createRuleBook('generic', {
+    genericRule: GenericRuleSchema.parse({
+      dice: '2d6',
+      op: '>=',
+      kinds: ['check', 'save'],
+      grades: [{ name: 'critical', when: 'total>=10' }],
+    }),
+  });
+
+  it('骰式 = 主骰+名册修正+配置方向+指令 dc；修正为 0 省略、为负带减号', () => {
+    const result = executeCheck(
+      directive({ dc: 7 }),
+      deps({ roster: rosterOf(2), rulebook: genericBook }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.roll.expr).toBe('2d6+2>=7');
+    expect(result.roll.check).toMatchObject({
+      rulebook: 'generic',
+      kind: 'check',
+      target: 7,
+      op: '>=',
+    });
+
+    const zero = executeCheck(
+      directive({ dc: 7 }),
+      deps({ roster: rosterOf(0), rulebook: genericBook }),
+    );
+    expect(zero.ok && zero.roll.expr).toBe('2d6>=7');
+    const negative = executeCheck(
+      directive({ dc: 7 }),
+      deps({ roster: rosterOf(-1), rulebook: genericBook }),
+    );
+    expect(negative.ok && negative.roll.expr).toBe('2d6-1>=7');
+  });
+
+  it('档表快照随判定记录落流水（audit-replay 复现凭据）', () => {
+    const result = executeCheck(
+      directive({ dc: 7 }),
+      deps({ roster: rosterOf(2), rulebook: genericBook }),
+    );
+    expect(result.ok && result.roll.check?.genericGrades).toEqual([
+      { name: 'critical', when: 'total>=10' },
+    ]);
+  });
+
+  it('不带 dc → E-AI-01（generic 无官方缺省目标值，不发明数值）', () => {
+    const result = executeCheck(directive(), deps({ roster: rosterOf(2), rulebook: genericBook }));
+    expect(result).toMatchObject({ ok: false, code: 'E-AI-01' });
+    if (!result.ok) expect(result.reason).toContain('dc');
+  });
+
+  it('kind 取指令值（须在配置 kinds 内），否则缺省 kinds[0]', () => {
+    const asSave = executeCheck(
+      directive({ dc: 7, kind: 'save' }),
+      deps({ roster: rosterOf(2), rulebook: genericBook }),
+    );
+    expect(asSave.ok && asSave.roll.check?.kind).toBe('save');
+    const outOfSet = executeCheck(
+      directive({ dc: 7, kind: 'attack' }),
+      deps({ roster: rosterOf(2), rulebook: genericBook }),
+    );
+    expect(outOfSet.ok && outOfSet.roll.check?.kind).toBe('check');
   });
 });
 

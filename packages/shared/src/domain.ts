@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { NAT20_RULES, RULEBOOK_IDS } from './dice.js';
+import { GenericRuleSchema, NAT20_RULES, RULEBOOK_IDS } from './dice.js';
 
 /**
  * 领域模型骨架（TDD §3.1 Room/Session、§3.3 角色卡、§3.4 世界书、§3.7 状态板）。
@@ -110,6 +110,12 @@ export const SessionSchema = z.object({
    * 可选而非 default：v1 存量 session.json 无此字段，按 coc7 处理（消费侧归一）。
    */
   rulebook: z.enum(RULEBOOK_IDS).optional(),
+  /**
+   * generic 规则书配置快照（v3 FR-40 / ADR-3-08）：开团时自 KP 卡冻结——会话必须
+   * 自足（重启后无卡也能掷骰判定），且 KP 卡中途换配置不影响进行中的会话。
+   * 可选：仅 rulebook='generic' 的会话携带；旧存档无此字段照常解析。
+   */
+  genericRule: GenericRuleSchema.optional(),
   /** 状态板乐观锁版本号（§3.7 / E-ST-01） */
   stateBoardVersion: z.number().int().nonnegative(),
   settings: SessionSettingsSchema,
@@ -325,7 +331,9 @@ export type WorldBook = z.infer<typeof WorldBookSchema>;
 // ---- CharacterCardV3（§3.3，ccv3 兼容映射，ADR-06）----
 
 export const AidleCardExtensionsSchema = z.object({
-  rulebook: z.enum(['coc7', 'dnd5e']),
+  rulebook: z.enum(RULEBOOK_IDS),
+  /** rulebook='generic' 时的判定配置（FR-40）；其他规则书不携带 */
+  genericRule: GenericRuleSchema.optional(),
   /** 玩家卡时携带 */
   pcSheet: PCSheetSchema.optional(),
 });

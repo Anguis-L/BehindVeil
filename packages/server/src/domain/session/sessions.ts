@@ -2,6 +2,7 @@ import {
   SessionSchema,
   SessionSettingsSchema,
   StateBoardSchema,
+  type GenericRule,
   type InitState,
   type RuleBookId,
   type Session,
@@ -27,6 +28,8 @@ export interface CreateSessionInput {
   initState?: InitState;
   /** 规则书（v2 FR-20）：开团时由模组 KP 卡/manifest 定，缺省 coc7 */
   rulebook?: RuleBookId;
+  /** generic 判定配置快照（v3 FR-40）：开团时自 KP 卡冻结；仅 rulebook='generic' 携带 */
+  genericRule?: GenericRule;
 }
 
 async function saveSession(layout: DataLayout, roomId: string, session: Session): Promise<void> {
@@ -62,6 +65,7 @@ export async function createSession(
     startedAt: now,
     endedAt: null,
     rulebook: input.rulebook ?? 'coc7',
+    ...(input.genericRule ? { genericRule: input.genericRule } : {}),
     stateBoardVersion: 0,
     settings: input.settings,
   });

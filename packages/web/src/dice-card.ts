@@ -7,7 +7,7 @@ import type { Message } from '@behindveil/shared';
  * 数值一律来自服务端判定记录（check），前端不产生任何判定。
  */
 
-/** 判定种类中文名：COC 四种 + 5e 四种 */
+/** 判定种类中文名：COC 四种 + 5e 四种；映射表外的种类（generic 自定义）按原值直显（v3 FR-40） */
 const DICE_KIND_LABELS: Record<string, string> = {
   skill: '技能检定',
   sanity: '理智检定',
@@ -19,12 +19,12 @@ const DICE_KIND_LABELS: Record<string, string> = {
   initiative: '先攻',
 };
 
-/** 判定种类中文名；无判定记录（纯骰值，如先攻）时为 null */
+/** 判定种类名；映射表外按原值直显，无判定记录（纯骰值，如先攻）时为 null */
 export function diceKindLabel(msg: Message): string | null {
   if (msg.type !== 'dice') return null;
   const check = msg.roll.check;
   if (!check) return null;
-  return DICE_KIND_LABELS[check.kind] ?? null;
+  return DICE_KIND_LABELS[check.kind] ?? check.kind;
 }
 
 /**

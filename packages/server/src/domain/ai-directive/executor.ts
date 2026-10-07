@@ -1,4 +1,4 @@
-import type { StateBoard } from '@behindveil/shared';
+import type { CheckOp, DiceKind, StateBoard } from '@behindveil/shared';
 import type { ParsedRoll } from '../dice/evaluator.js';
 import { rollDice } from '../dice/evaluator.js';
 import { createCsprngRandom, type RandomSource } from '../dice/random.js';
@@ -71,13 +71,34 @@ export function executeCheck(directive: CheckDirective, deps: CheckExecutorDeps)
   }
 
   const rulebook = deps.rulebook ?? DEFAULT_RULEBOOK;
-  // 骰式随规则书分流（v2 FR-24）：COC7 是「d100 与技能值比小」，5e 是「d20+修正 够不够 DC」。
-  // 两种情况的数值都来自名册（5e 的修正值由服务端现算），AI 一律不传数值。
-  const expr =
-    rulebook.id === 'dnd5e'
-      ? d20CheckExpr(lookup.value, directive.dc ?? DND5E_DEFAULT_DC[directive.difficulty])
-      : `1d100<=${lookup.value}`;
-  const kind = rulebook.id === 'dnd5e' ? (directive.kind ?? 'ability') : 'skill';
+  // 骰式随规则书分流（v2 FR-24 / v3 FR-40）：COC7 是「d100 与技能值比小」，
+  // 5e 是「d20+修正 够不够 DC」，generic 按 KP 配置的骰型与方向。三种情况的数值
+  // 都来自名册（5e/generic 的修正值由服务端从卡面现取），AI 一律不传数值。
+  let expr: string;
+  let kind: DiceKind;
+  if (rulebook.id === 'generic') {
+    const config = rulebook.genericConfig;
+    // 工厂契约：id='generic' 必带配置（createRuleBook 已把关），断言仅供类型收窄
+    if (!config) throw new RangeError('generic 规则书缺少 genericRule 配置');
+    if (directive.dc === undefined) {
+      return {
+        ok: false,
+        code: 'E-AI-01',
+        reason: 'generic 规则书检定必须带 dc（自定义判定表无官方缺省目标值，KP 未给）',
+      };
+    }
+    expr = modCheckExpr(config.dice, lookup.value, config.op, directive.dc);
+    kind =
+      directive.kind && config.kinds.includes(directive.kind)
+        ? directive.kind
+        : (config.kinds[0] ?? 'check');
+  } else if (rulebook.id === 'dnd5e') {
+    expr = d20CheckExpr(lookup.value, directive.dc ?? DND5E_DEFAULT_DC[directive.difficulty]);
+    kind = directive.kind ?? 'ability';
+  } else {
+    expr = `1d100<=${lookup.value}`;
+    kind = 'skill';
+  }
 
   const roll = rollDice(expr, {
     random: deps.random ?? createCsprngRandom(),
@@ -92,6 +113,12 @@ export function executeCheck(directive: CheckDirective, deps: CheckExecutorDeps)
 function d20CheckExpr(modifier: number, dc: number): string {
   if (modifier === 0) return `1d20>=${dc}`;
   return modifier > 0 ? `1d20+${modifier}>=${dc}` : `1d20${modifier}>=${dc}`;
+}
+
+/** generic 检定骰式：`<主骰>+修正<op>目标`；修正口径与 d20CheckExpr 相同 */
+function modCheckExpr(dice: string, modifier: number, op: CheckOp, target: number): string {
+  const mod = modifier === 0 ? '' : modifier > 0 ? `+${modifier}` : `${modifier}`;
+  return `${dice}${mod}${op}${target}`;
 }
 
 // ---- 数值效果执行器（T-M8-03/04，FR-25/27，设计 §5.4）----

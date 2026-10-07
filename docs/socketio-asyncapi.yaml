@@ -112,6 +112,8 @@ channels:
       - 规则书由模组决定（KP 卡 `extensions.aidle.rulebook` 优先，回退 manifest.rulebook，
         缺省 coc7）并写入 `Session.rulebook`；**一房一规则书**：本房已有活跃会话且规则书
         不同 → 拒绝开团（活跃会话不变）
+      - rulebook=generic 时（v3 FR-40）：KP 卡 `genericRule` 必带且装载编译（骰式可解析 /
+        when 文法校验），配置快照写入 `Session.genericRule`——坏配置开团即拒 `E-MOD-01`
 
       **ack**：成功 `{ ok: true, session }`；非 Host `{ ok: false, code: 'E-ROOM-01', message: '仅 Host 可开团' }`；
       规则书冲突 `{ ok: false, code: 'E-MOD-01' }`。
@@ -1311,8 +1313,12 @@ components:
     RollCheck:
       type: object
       properties:
-        rulebook: { type: string, enum: [coc7, dnd5e] }
-        kind: { type: string, enum: [skill, sanity, opposed, luck] }
+        rulebook: { type: string, enum: [coc7, dnd5e, generic] }
+        kind:
+          {
+            type: string,
+            enum: [skill, sanity, opposed, luck, ability, save, attack, initiative, check],
+          }
         target: { type: number }
         difficulty: { type: string, enum: [normal, hard, extreme] }
         outcome: { type: string, enum: [critical, success, fail, fumble] }
@@ -1326,6 +1332,18 @@ components:
           description: >
             判定运算符（缺省 '<='，M4 落地）。'<=' 走规则书判定表（六档，带 grade）；
             '>=' / '=' 走通用布尔比较，outcome 仅 success/fail 且不带 grade。
+        nat20Rule:
+          type: string
+          enum: [attack_only, all_d20]
+          description: 判定时的 nat20 适用面快照（5e；复现凭据，缺省时不带）
+        genericGrades:
+          type: array
+          description: 判定时的 generic 档表快照（v3 FR-40；复现凭据，仅 generic 且配置了 grades 时带）
+          items:
+            type: object
+            properties:
+              name: { type: string, enum: [critical, success, fail, fumble] }
+              when: { type: string, description: 受限文法（只比 raw/total），如 "total>=10" }
       required: [rulebook, kind, target, difficulty, outcome]
 
     RollAudit:

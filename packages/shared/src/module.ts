@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { RULEBOOK_IDS } from './dice.js';
 import { StateBoardSceneSchema } from './domain.js';
 
 /**
@@ -17,7 +18,7 @@ export const ModuleManifestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   version: z.string().min(1),
-  rulebook: z.enum(['coc7', 'dnd5e']),
+  rulebook: z.enum(RULEBOOK_IDS),
   apiVersion: z.literal(MODULE_API_VERSION),
   /** 三件套文件名（相对模组目录），默认约定 kp-card.json / worldbook.json / init-state.json */
   entry: z.object({
@@ -42,7 +43,7 @@ export const ModuleInfoSchema = z.object({
   id: z.string(),
   name: z.string(),
   version: z.string(),
-  rulebook: z.enum(['coc7', 'dnd5e']),
+  rulebook: z.enum(RULEBOOK_IDS),
   apiVersion: z.string(),
   /** 引用该模组的活跃会话数（D-09 卸载判据的可视化） */
   activeSessions: z.number().int().nonnegative(),

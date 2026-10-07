@@ -142,6 +142,10 @@ export function rollDice(rawExpr: string, opts: RollOptions): ParsedRoll {
       ...(op === '<=' ? { grade: outcome.grade } : {}),
       // 房规快照随判定记录落流水：audit-replay 用同一开关才能重算出同一结果
       ...(rulebook.nat20Rule ? { nat20Rule: rulebook.nat20Rule } : {}),
+      // generic 档表快照（同上理由：档表是判定的直接输入，缺了复现不出同一 outcome）
+      ...(rulebook.genericConfig?.grades?.length
+        ? { genericGrades: rulebook.genericConfig.grades }
+        : {}),
     };
   }
 

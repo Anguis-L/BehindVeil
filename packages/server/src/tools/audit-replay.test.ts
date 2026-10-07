@@ -268,6 +268,34 @@ describe('篡改必被检出（防「算错也看不出来」）', () => {
     };
     expect(replayEntry(stripped)?.reason).toContain('check 不一致');
   });
+
+  it('generic 判定记录可复现（v3：档表快照随记录还原，FR-40）', () => {
+    const entry = makeEntries(1)[0] as DiceAuditEntry;
+    const generic: DiceAuditEntry = {
+      ...entry,
+      expr: '2d6+2>=7',
+      rolls: [[5, 4]],
+      kept: [5, 4],
+      total: 11,
+      check: {
+        rulebook: 'generic',
+        kind: 'check',
+        target: 7,
+        difficulty: 'normal',
+        op: '>=',
+        outcome: 'critical',
+        genericGrades: [{ name: 'critical', when: 'total>=10' }],
+      },
+    };
+    expect(replayEntry(generic)).toBeNull();
+
+    // 抹掉档表快照 → 按布尔比较重算得 success，与记录的 critical 不符
+    const stripped: DiceAuditEntry = {
+      ...generic,
+      check: { ...generic.check, genericGrades: undefined } as DiceAuditEntry['check'],
+    };
+    expect(replayEntry(stripped)?.reason).toContain('check 不一致');
+  });
 });
 
 describe('报告渲染（CLI 出口）', () => {

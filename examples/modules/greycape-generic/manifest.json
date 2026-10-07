@@ -1,0 +1,12 @@
+{
+  "id": "greycape-generic",
+  "name": "灰岬灯塔夜班",
+  "version": "1.0.0",
+  "rulebook": "generic",
+  "apiVersion": "1",
+  "entry": {
+    "kpCard": "kp-card.json",
+    "worldBook": "worldbook.json",
+    "initState": "init-state.json"
+  }
+}

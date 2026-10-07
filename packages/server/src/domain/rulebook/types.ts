@@ -4,6 +4,7 @@ import type {
   CheckOp,
   CheckOutcome,
   DiceKind,
+  GenericRule,
   Nat20Rule,
   RuleBookId,
 } from '@behindveil/shared';
@@ -90,6 +91,11 @@ export interface RuleBook {
    * 当前仅 5e 的 nat20 适用面；COC7 房规恒默认（未接线到会话），故可选。
    */
   readonly nat20Rule?: Nat20Rule;
+  /**
+   * generic 的判定配置快照（v3 FR-40）：执行器拼骰式、evaluator 落审计快照消费。
+   * 仅 generic 实现（工厂保证 id='generic' 必带），其余规则书不设置。
+   */
+  readonly genericConfig?: GenericRule;
   /** 从骰式解析判定规格（TDD §5.3）；表达式无判定后缀时返回 null */
   parseCheck(expr: string, ctx: RollContext): ParsedCheck | null;
   /** 判定表（TDD §5.3）：按 total 比对目标值；raw 供 nat20/nat1 类面值规则使用 */

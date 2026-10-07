@@ -1,0 +1,63 @@
+{
+  "entries": [
+    {
+      "uid": 1,
+      "key": ["灯塔", "灰岬", "灯室", "小满", "老盐"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【场景锚】灰岬灯塔：礁石岬角上的老石塔，塔下是断桨滩，滩外暗礁环列。看塔人老盐（六十多，少言，左手缺两指）连着三晚没露面；学徒小满顶了他的夜班。灯塔的油库在塔基，灯室在顶，旋梯一百零八级。雾里有一艘不肯点灯的船在等灯号。",
+      "position": "before_char",
+      "order": 10,
+      "constant": true,
+      "disabled": false
+    },
+    {
+      "uid": 2,
+      "key": ["油路", "灯芯", "点灯", "信号灯", "修灯"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【机制提示：大成档触发点】灯池油路被人用盐粒堵了半截，灯芯也被人剪短。让玩家清理油路属「智力」检定：```aidle {\"op\":\"check\",\"target\":\"pc:<标识>\",\"skill\":\"智力\",\"dc\":7,\"label\":\"通开油路\"}``` 6 以下（失手）：油泼在袖子上，还碰翻了灯池托架——下一手检定 dc 提到 9；7-9（成功）：灯亮了，但灯芯烧得歪，光距短了一截；10 以上（大成）：顺手发现堵油路的盐粒捏法很眼熟——是老盐腌鱼的手法。多档命中都有去处，别让检定空转。",
+      "position": "before_char",
+      "order": 20,
+      "constant": false,
+      "disabled": false,
+      "extensions": { "kpOnly": true }
+    },
+    {
+      "uid": 3,
+      "key": ["旋梯", "爬", "上塔", "下塔", "风大", "石阶"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【机制提示：代价档触发点】一百零八级旋梯夜爬湿滑。抢时间上下塔属「力量」检定：```aidle {\"op\":\"check\",\"target\":\"pc:<标识>\",\"skill\":\"力量\",\"dc\":7,\"label\":\"夜爬旋梯\"}``` 7-9：准时到，但喘得说不出整句话/油灯泼掉了大半（Host 可让灯油计数器 -1）；6 以下：在半平台滑一跤，惊动了塔里不知什么东西的窸窣声。",
+      "position": "before_char",
+      "order": 21,
+      "constant": false,
+      "disabled": false,
+      "extensions": { "kpOnly": true }
+    },
+    {
+      "uid": 4,
+      "key": ["雾中人", "黑影", "来客", "船笛", "等灯号"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【机制提示：失手档与伤害】雾里那艘船派了接驳艇，艇上有东西不想被发现。玩家隔雾辨认或躲藏属「感知」检定：```aidle {\"op\":\"check\",\"target\":\"pc:<标识>\",\"skill\":\"感知\",\"dc\":9,\"label\":\"雾里辨形\"}``` 6 以下：对方先看见了 ta。雾中之物扑击用伤害指令掷骰：```aidle {\"op\":\"damage\",\"target\":\"pc:<标识>\",\"expr\":\"2d6\",\"label\":\"雾中之物的撞击\"}```；玩家用扳手或鱼叉还手同样走 damage（expr 1d6+1）。被逼到灯池边时，推翻灯池属「敏捷」检定 dc 11（绝境）：大成把雾中之物烫退并烧出它的轮廓，成功烫伤它但灯也毁了。",
+      "position": "before_char",
+      "order": 22,
+      "constant": false,
+      "disabled": false,
+      "extensions": { "kpOnly": true }
+    },
+    {
+      "uid": 5,
+      "key": ["老盐", "腌鱼", "盐粒", "手艺", "失踪"],
+      "keysecondary": [],
+      "selectiveLogic": 0,
+      "content": "【机制提示：线索链】老盐的失踪与盐有关：塔基油库的腌鱼桶里藏着他的笔记。翻找桶底属「体质」检定（发酵的腥气呛人）：```aidle {\"op\":\"check\",\"target\":\"pc:<标识>\",\"skill\":\"体质\",\"dc\":7,\"label\":\"翻腌鱼桶\"}``` 笔记内容（找到才揭示）：老盐不是失踪——他是发现有人用灯塔的灯号给走私船递信，主动熄了三晚灯，把船困在了礁外。笔记最后一页被撕走了。",
+      "position": "before_char",
+      "order": 23,
+      "constant": false,
+      "disabled": false,
+      "extensions": { "kpOnly": true }
+    }
+  ]
+}

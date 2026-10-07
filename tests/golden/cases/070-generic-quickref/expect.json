@@ -1,0 +1,14 @@
+{
+  "contains": [
+    "检定速查（generic：KP 自定义判定表）：掷 2d6，结果>=目标值则成功。",
+    "判定种类：check。",
+    "档表（按序首个命中即改判）：total>=10 → critical。",
+    "平局进攻方胜。",
+    "检定指令必须带 dc（目标值，主持难度）。"
+  ],
+  "traceDetails": {
+    "S1-skeleton": {
+      "sections": ["kp-persona", "rulebook-quickref:generic", "meta-instruction"]
+    }
+  }
+}

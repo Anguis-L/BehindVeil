@@ -8,8 +8,11 @@ import { createRuleBook } from '../domain/rulebook/index.js';
 import type { RuleBook } from '../domain/rulebook/types.js';
 import type { ParsedRoll } from '../domain/dice/evaluator.js';
 import {
+  GenericRuleSchema,
   NAT20_RULES,
   RULEBOOK_IDS,
+  type GenericGrade,
+  type GenericRule,
   type Nat20Rule,
   type RollCheck,
   type RuleBookId,
@@ -46,18 +49,39 @@ const isNat20Rule = (value: string | undefined): value is Nat20Rule =>
   value !== undefined && (NAT20_RULES as readonly string[]).includes(value);
 
 /**
- * 规则书按判定记录装配（v2 起支持 5e）；未知规则书无法复现，直接判不一致。
- * nat20 适用面取判定记录里的快照——同一骰值在不同开关下结果不同，不还原就复现不出。
+ * 规则书按判定记录装配（v2 起 5e、v3 起 generic）；未知规则书无法复现，直接判不一致。
+ * nat20 适用面与 generic 档表取判定记录里的快照——同一骰值在不同开关/档表下结果不同，
+ * 不还原就复现不出。
  */
-export function rulebookFor(id: string, nat20Rule?: string): RuleBook | null {
+export function rulebookFor(
+  id: string,
+  nat20Rule?: string,
+  genericGrades?: GenericGrade[],
+): RuleBook | null {
   if (!isRuleBookId(id)) return null;
-  return createRuleBook(id, { nat20Rule: isNat20Rule(nat20Rule) ? nat20Rule : undefined });
+  return createRuleBook(id, {
+    nat20Rule: isNat20Rule(nat20Rule) ? nat20Rule : undefined,
+    genericRule: id === 'generic' ? genericConfigForReplay(genericGrades) : undefined,
+  });
+}
+
+/**
+ * generic 复现配置：骰型/种类对复现无关（判定只吃 op/target/档表），
+ * 骰式给合法占位即可；档表用记录里的快照原样还原。
+ */
+function genericConfigForReplay(grades?: GenericGrade[]): GenericRule {
+  return GenericRuleSchema.parse({
+    dice: '1d20',
+    op: '>=',
+    kinds: ['check'],
+    ...(grades?.length ? { grades } : {}),
+  });
 }
 
 /** 复现单条审计记录：一致返回 null，不一致返回原因 */
 export function replayEntry(entry: DiceAuditEntry): ReplayMismatch | null {
   const check = entry.check;
-  const rulebook = rulebookFor(check?.rulebook ?? 'coc7', check?.nat20Rule);
+  const rulebook = rulebookFor(check?.rulebook ?? 'coc7', check?.nat20Rule, check?.genericGrades);
   if (!rulebook) {
     return { seq: entry.seq, reason: `未知规则书：${check?.rulebook ?? '(未记录)'}` };
   }

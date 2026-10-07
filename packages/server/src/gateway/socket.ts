@@ -14,6 +14,7 @@ import {
   type MemberRole,
   type Message,
   type OocVisibility,
+  type GenericRule,
   type RollResult,
   type ServerEventName,
   type Session,
@@ -30,6 +31,7 @@ import { DiceExpressionError } from '../domain/dice/parser.js';
 import { createCsprngRandom } from '../domain/dice/random.js';
 import { createDiceAuditor } from '../domain/dice/audit.js';
 import { createRuleBook, ruleBookIdOf } from '../domain/rulebook/index.js';
+import { createGenericRuleBook } from '../domain/rulebook/generic.js';
 import type { RuleBook } from '../domain/rulebook/types.js';
 import { DirectiveSuccessTracker } from '../domain/ai-directive/degrade.js';
 import type { DirectiveScanEvent } from '../domain/ai-directive/scan.js';
@@ -89,11 +91,13 @@ const SNAPSHOT_REMINDER_EVERY = 20;
 
 /**
  * 会话规则书（T-M7-04）：按会话落盘的规则书标识装配（缺省 coc7，v1 存量数据无该字段）。
- * 规则书无状态，随用随建；一房一规则书由 session:start 把关（设计文档 v2 §5.1）。
+ * coc7/dnd5e 无状态随用随建；generic 的编译闭包按配置缓存，配置快照来自会话记录
+ * （开团时自 KP 卡冻结，v3 FR-40）。
  */
 function sessionRuleBook(session: Session | null): RuleBook {
   return createRuleBook(ruleBookIdOf(session?.rulebook), {
     nat20Rule: session?.settings.nat20Rule,
+    genericRule: session?.genericRule,
   });
 }
 
@@ -662,9 +666,28 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       return;
     }
     // 规则书选择（T-M7-04，设计 v2 §5.1）：KP 卡 rulebook 优先，回退 manifest，缺省 coc7
-    const rulebook = ruleBookIdOf(
-      readCardExtensions(loaded.module.kpCard).rulebook ?? loaded.module.manifest.rulebook,
-    );
+    const extensions = readCardExtensions(loaded.module.kpCard);
+    const rulebook = ruleBookIdOf(extensions.rulebook ?? loaded.module.manifest.rulebook);
+    // generic 配置（v3 FR-40 / ADR-3-08）：自 KP 卡取，装载时编译校验——
+    // 坏配置（骰式不合法 / when 文法外）开团即拒 E-MOD-01，不带病进会话
+    let genericRule: GenericRule | undefined;
+    if (rulebook === 'generic') {
+      if (!extensions.genericRule) {
+        const message = 'KP 卡 rulebook 为 generic 但缺 genericRule 配置';
+        emitError(socket, 'E-MOD-01', `模组无法装载：${message}`);
+        ack?.({ ok: false, code: 'E-MOD-01', message: `模组无法装载：${message}` });
+        return;
+      }
+      try {
+        createGenericRuleBook(extensions.genericRule);
+      } catch (err) {
+        const message = err instanceof RangeError ? err.message : String(err);
+        emitError(socket, 'E-MOD-01', `模组无法装载：${message}`);
+        ack?.({ ok: false, code: 'E-MOD-01', message: `模组无法装载：${message}` });
+        return;
+      }
+      genericRule = extensions.genericRule;
+    }
     // 一房一规则书：本房已有活跃会话且规则书不同 → 拒绝开团（防混合态）
     const room = await readRoomFile(layout, me.roomId);
     const current = room?.activeSessionId
@@ -682,6 +705,7 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       settings: data.settings,
       initState: loaded.module.initState,
       rulebook,
+      genericRule,
     });
     seqCounters.set(session.id, 0);
     await enqueue(me.roomId, () =>

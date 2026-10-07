@@ -9,13 +9,17 @@ import { z } from 'zod';
  * 由 RuleBook.adjudicate 填充，二者分开建模。
  */
 
-/** 规则书标识。v1 首发仅 COC7；dnd5e 为二期（接口已按 ADR-04 预留） */
-export const RULEBOOK_IDS = ['coc7', 'dnd5e'] as const;
+/**
+ * 规则书标识。v1 首发仅 COC7；dnd5e 为二期（接口已按 ADR-04 预留）；
+ * generic 为 v3 第三实现（FR-40）：配置驱动的通用判定表，KP 卡 JSON 全权描述判定语义。
+ */
+export const RULEBOOK_IDS = ['coc7', 'dnd5e', 'generic'] as const;
 export type RuleBookId = (typeof RULEBOOK_IDS)[number];
 
 /**
  * 判定种类（TDD §3.5 check.kind）。
- * 前四种为 COC7；v2 追加 5e 四种（FR-21）：ability 属性检定 / save 豁免 / attack 攻击 / initiative 先攻。
+ * 前四种为 COC7；5e 四种（FR-21）：ability 属性检定 / save 豁免 / attack 攻击 / initiative 先攻；
+ * check 为 generic 的缺省种类（FR-40：前端 kind 映射无此名时按原值直显）。
  */
 export const DICE_KINDS = [
   'skill',
@@ -26,6 +30,7 @@ export const DICE_KINDS = [
   'save',
   'attack',
   'initiative',
+  'check',
 ] as const;
 export type DiceKind = (typeof DICE_KINDS)[number];
 
@@ -75,6 +80,42 @@ export const CheckSpecSuffixSchema = z.object({
 });
 export type CheckSpecSuffix = z.infer<typeof CheckSpecSuffixSchema>;
 
+// ---- generic 规则书配置（v3 FR-40 / ADR-3-08）----
+
+/** generic 档表条目：when 命中（按序首个生效）→ outcome 改判为 name */
+export const GenericGradeSchema = z.object({
+  /** 改判结果，取判定四分类（设计 §5.5 示例：critical/fumble 即 nat 面值规则的配置化） */
+  name: z.enum(CHECK_OUTCOMES),
+  /**
+   * 受限文法（只比 raw/total，设计 §7.5）：如 `raw>=20`、`total>=10 && raw>=8`。
+   * 支持 && / || 连接（&& 优先）与 < <= > >= = 比较；装载时编译，文法外一律拒。
+   */
+  when: z.string().trim().min(1).max(64),
+});
+export type GenericGrade = z.infer<typeof GenericGradeSchema>;
+
+/**
+ * generic 规则书配置（KP 卡 extensions.aidle.genericRule）：
+ * 骰型 / 比较方向 / 判定种类集 / 档表 / 对抗平局口径全配置化，不绑定任何商业规则。
+ * 结构校验在此（Schema 层）；dice 可解析、when 文法等语义校验在装载编译时进行
+ * （server domain/rulebook/generic.ts，违者开团即拒 E-MOD-01）。
+ */
+export const GenericRuleSchema = z.object({
+  /** 主骰式（如 "1d20"、"2d6"），不带判定后缀 */
+  dice: z.string().trim().min(1).max(32),
+  /** 比较方向（AI 检定缺省与玩家无后缀补齐口径）；骰式后缀里的 op 每骰透传、优先于它 */
+  op: z.enum(CHECK_OPS).default('>='),
+  /** 判定种类集合（DICE_KINDS 子集）；kinds[0] 为缺省种类 */
+  kinds: z.array(z.enum(DICE_KINDS)).min(1).max(8).default(['check']),
+  /** 可选档表，按序首个命中生效 */
+  grades: z.array(GenericGradeSchema).max(8).optional(),
+  /** 对抗平局口径：进攻方胜 / 防守方胜 / 僵持 */
+  opposedTie: z.enum(['attacker', 'defender', 'tie']).default('tie'),
+  /** generic 不绑定理智规则；显式 false 仅作配置自述，true 直接拒 */
+  sanityRule: z.literal(false).default(false),
+});
+export type GenericRule = z.infer<typeof GenericRuleSchema>;
+
 /** 规则书判定记录（RollResult.check，TDD §3.5） */
 export const RollCheckSchema = z.object({
   rulebook: z.enum(RULEBOOK_IDS),
@@ -97,6 +138,11 @@ export const RollCheckSchema = z.object({
    * 故随判定记录落审计流水——否则非默认房规的骰子复现会误报不一致。
    */
   nat20Rule: z.enum(NAT20_RULES).optional(),
+  /**
+   * 判定时的 generic 档表快照（v3 FR-40；仅 generic 且配置了 grades 时落）。
+   * 同 nat20Rule 的理由：档表是判定的直接输入，不带快照则审计复现算不出同一 outcome。
+   */
+  genericGrades: z.array(GenericGradeSchema).optional(),
 });
 export type RollCheck = z.infer<typeof RollCheckSchema>;
 

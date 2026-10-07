@@ -1,5 +1,6 @@
 import { conditionText, type Message, type WorldBookPosition } from '@behindveil/shared';
 import { scanWorldBook, type ScanHit } from '../domain/worldbook/scan.js';
+import { genericQuickRef } from '../domain/rulebook/generic.js';
 import type { LlmMessage } from '../domain/llm.js';
 import type { Tokenizer } from './tokenizer.js';
 import type { JsonValue, PipelineInput, StageName, StageTrace } from './types.js';
@@ -16,7 +17,7 @@ import type { JsonValue, PipelineInput, StageName, StageTrace } from './types.js
 export const META_INSTRUCTION =
   '数值与状态一律以状态板为准；需要检定时输出 aidle 指令块向引擎请求，不得自行产生数值或宣告判定结果。';
 
-/** 规则书速查（S1，随 KP 卡的 rulebook 扩展选择；v1 仅两套，TC-FR-03-003 依据） */
+/** 规则书速查（S1，随 KP 卡的 rulebook 扩展选择；coc7/5e 为固定文案，generic 按配置生成） */
 const RULEBOOK_QUICK_REFS: Record<'coc7' | 'dnd5e', string> = {
   coc7: '检定速查（COC7）：技能/属性检定掷 1d100，结果≤技能值为成功，≤1/2 为困难成功，≤1/5 为极难成功；≤1/5 技能值为大成功，≥96 或大于技能值为大失败。理智检定同法对照当前 SAN。',
   dnd5e: '检定速查（D&D 5e）：d20+调整值与 DC 比较；天然 20 为大成功，天然 1 为大失败。',
@@ -63,8 +64,15 @@ export const s1Skeleton: Stage = (ctx) => {
   const sections: string[] = [];
   const persona = ctx.input.kpCard.data.description;
   if (persona.trim().length > 0) sections.push(persona);
-  const rulebook = ctx.input.kpCard.data.extensions.aidle?.rulebook;
-  const quickRef = rulebook ? RULEBOOK_QUICK_REFS[rulebook] : undefined;
+  const aidle = ctx.input.kpCard.data.extensions.aidle;
+  const rulebook = aidle?.rulebook;
+  // 速查分流：coc7/5e 是固定文案；generic 的判定语义来自配置，速查随之生成（v3 FR-40）
+  const quickRef =
+    rulebook === 'generic' && aidle?.genericRule
+      ? genericQuickRef(aidle.genericRule)
+      : rulebook === 'coc7' || rulebook === 'dnd5e'
+        ? RULEBOOK_QUICK_REFS[rulebook]
+        : undefined;
   if (quickRef) sections.push(quickRef);
   sections.push(META_INSTRUCTION);
   ctx.bundle.skeleton = sections.join('\n\n');

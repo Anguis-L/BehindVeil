@@ -1,0 +1,59 @@
+{
+  "session": {
+    "provider": "openai-compat",
+    "model": "deepseek-chat",
+    "temperature": 0.8,
+    "maxHistoryMessages": 40,
+    "worldBookBudgetTokens": 2000,
+    "scanDepth": 4
+  },
+  "kpCard": {
+    "spec": "chara_card_v3",
+    "data": {
+      "name": "灯塔看守人",
+      "description": "你是守秘人：负责叙事、扮演 NPC，数值一律以状态板为准。",
+      "scenario": "雾夜的灯塔：信号灯连续三晚熄灭",
+      "first_mes": "你爬上旋梯，油灯的光圈外只有雾。",
+      "mes_example": "",
+      "extensions": {
+        "aidle": {
+          "rulebook": "generic",
+          "genericRule": {
+            "dice": "2d6",
+            "op": ">=",
+            "kinds": ["check"],
+            "grades": [{ "name": "critical", "when": "total>=10" }],
+            "opposedTie": "attacker",
+            "sanityRule": false
+          }
+        }
+      }
+    }
+  },
+  "messages": [
+    {
+      "seq": 1,
+      "ts": "2026-10-07T00:00:00.000Z",
+      "sessionId": "ses_1",
+      "type": "ic",
+      "senderId": "member_1",
+      "content": "我检查信号灯的油路。"
+    }
+  ],
+  "stateBoard": {
+    "version": 1,
+    "pcs": {},
+    "scene": {
+      "name": "灰岬灯塔",
+      "time": "无月的夜",
+      "publicDesc": "雾贴着玻璃流动"
+    },
+    "facts": [],
+    "updatedAt": "2026-10-07T00:00:00.000Z"
+  },
+  "worldBook": {
+    "entries": []
+  },
+  "pcRoster": "",
+  "synopsis": ""
+}

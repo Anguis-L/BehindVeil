@@ -2090,12 +2090,18 @@ components:
           description: 结束时间；活跃会话为 null
         rulebook:
           type: string
-          enum: [coc7, dnd5e]
+          enum: [coc7, dnd5e, generic]
           description: |
             本会话采用的规则书（v2 FR-20，一房一规则书）：开团时由模组决定
             （KP 卡 extensions.aidle.rulebook 优先，回退 manifest.rulebook），缺省 coc7。
-            v1 存量数据无此字段，按 coc7 处理。
+            v1 存量数据无此字段，按 coc7 处理。generic 为 v3 第三实现（FR-40）。
           default: coc7
+        genericRule:
+          type: object
+          description: |
+            generic 规则书配置快照（v3 FR-40 / ADR-3-08）：开团时自 KP 卡冻结——
+            会话自足（重启后无卡也能判定），KP 卡中途改配置不影响进行中的会话。
+            仅 rulebook=generic 的会话携带；结构见 shared/dice.ts GenericRuleSchema。
         stateBoardVersion:
           type: integer
           minimum: 0
@@ -2278,11 +2284,12 @@ components:
       properties:
         rulebook:
           type: string
-          enum: [coc7, dnd5e]
-          description: 规则书（v1 首发仅 COC7，dnd5e 二期）
+          enum: [coc7, dnd5e, generic]
+          description: 规则书（v1 首发仅 COC7，dnd5e 二期，generic 三期 FR-40）
         kind:
           type: string
-          enum: [skill, sanity, opposed, luck]
+          enum: [skill, sanity, opposed, luck, ability, save, attack, initiative, check]
+          description: 判定种类；check 为 generic 缺省种类（v3 FR-40）
         target:
           type: number
           description: 判定目标值（技能值 / SAN 值 / 幸运值，或骰式后缀里的 target）
@@ -2299,6 +2306,28 @@ components:
           description: |
             成功子等级。COC7 困难/极难成功时携带；critical / fail / fumble 恒为 normal。
             outcome 四分类不足以表达 COC7 六档判定表，故用 outcome + grade 组合承载。
+        op:
+          type: string
+          enum: ['<=', '>=', '=']
+          description: |
+            判定后缀运算符（2026-09-25 拍板方案 a，T-M4-02 落地）。缺省即 `<=`
+            （走规则书判定表）；`>=` / `=` 走通用布尔比较，outcome 仅 success/fail 且不带 grade。
+        nat20Rule:
+          type: string
+          enum: [attack_only, all_d20]
+          description: 判定时的 nat20 适用面快照（5e；同一骰值在不同开关下结果不同，复现凭据）
+        genericGrades:
+          type: array
+          description: 判定时的 generic 档表快照（v3 FR-40；仅 generic 且配置了 grades 时携带，复现凭据）
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                enum: [critical, success, fail, fumble]
+              when:
+                type: string
+                description: 受限文法（只比 raw/total），如 "total>=10"
       required: [rulebook, kind, target, difficulty, outcome]
       examples:
         - rulebook: coc7
@@ -2660,7 +2689,10 @@ components:
       properties:
         rulebook:
           type: string
-          enum: [coc7, dnd5e]
+          enum: [coc7, dnd5e, generic]
+        genericRule:
+          type: object
+          description: generic 规则书配置（v3 FR-40 / ADR-3-08），仅 rulebook=generic 时携带
         pcSheet:
           $ref: '#/components/schemas/PCSheet'
       required: [rulebook]
@@ -2711,7 +2743,7 @@ components:
           const: chara_card_v3
         rulebook:
           type: string
-          enum: [coc7, dnd5e]
+          enum: [coc7, dnd5e, generic]
           nullable: true
           description: |
             卡内 `extensions.aidle.rulebook`。社区卡常不带该扩展 → **null**（实现不编造规则书，
@@ -2773,7 +2805,7 @@ components:
           examples: [1.0.0]
         rulebook:
           type: string
-          enum: [coc7, dnd5e]
+          enum: [coc7, dnd5e, generic]
         apiVersion:
           type: string
           description: 模组格式版本，与服务端不匹配即拒绝加载

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { RULEBOOK_IDS, type GenericRule, type RuleBookId } from './dice.js';
 import { CharacterCardV3Schema, type CharacterCardV3, type PCSheet } from './domain.js';
 
 /**
@@ -67,7 +68,7 @@ export const CardEntrySchema = z.object({
   name: z.string(),
   spec: z.literal('chara_card_v3'),
   /** 无 aidle 扩展时为 null（社区卡常见）——不编造规则书，由 UI 提示用户补 */
-  rulebook: z.enum(['coc7', 'dnd5e']).nullable(),
+  rulebook: z.enum(RULEBOOK_IDS).nullable(),
   /** 带 pcSheet 即为玩家卡，否则是 KP 卡 */
   kind: z.enum(['kp', 'pc']),
   source: z.enum(CARD_FILE_SOURCES),
@@ -84,7 +85,9 @@ export type CardUpload = z.infer<typeof CardUploadSchema>;
 
 export interface CardExtensions {
   /** 无 aidle 扩展时为 null（社区卡常见） */
-  rulebook: 'coc7' | 'dnd5e' | null;
+  rulebook: RuleBookId | null;
+  /** rulebook='generic' 时的判定配置（FR-40）；其他情况 null */
+  genericRule: GenericRule | null;
   /** 玩家卡的 PC 数值；KP 卡为 null */
   pcSheet: PCSheet | null;
 }
@@ -92,5 +95,9 @@ export interface CardExtensions {
 /** 从 ccv3 卡取 aidle 扩展，供名册/状态板判定规则书与 PC 数值 */
 export function readCardExtensions(card: CharacterCardV3): CardExtensions {
   const aidle = card.data.extensions.aidle;
-  return { rulebook: aidle?.rulebook ?? null, pcSheet: aidle?.pcSheet ?? null };
+  return {
+    rulebook: aidle?.rulebook ?? null,
+    genericRule: aidle?.genericRule ?? null,
+    pcSheet: aidle?.pcSheet ?? null,
+  };
 }
