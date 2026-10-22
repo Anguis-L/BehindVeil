@@ -61,9 +61,12 @@ export function applyStatePatch(
   if (board.version !== expectedVersion) {
     return { ok: false, code: 'E-ST-01', current: board };
   }
+  // patch.pcs 是「按键合并」：引擎补丁（sanity/hp/resource）只携带目标 PC 一条，
+  // 整表替换会把同板其他 PC 静默抹掉（模拟实团回归 TC：board.test.ts 多 PC 用例）。
+  // 同键条目仍按整体覆盖语义替换（不深合并），patch 缺省 pcs 时保留原表。
   const next = StateBoardSchema.parse({
     version: board.version + 1,
-    pcs: patch.pcs ?? board.pcs,
+    pcs: patch.pcs ? { ...board.pcs, ...patch.pcs } : board.pcs,
     scene: patch.scene ?? board.scene,
     facts: patch.facts ?? board.facts,
     updatedAt: new Date().toISOString(),

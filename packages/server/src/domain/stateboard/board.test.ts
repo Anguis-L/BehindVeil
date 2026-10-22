@@ -107,6 +107,52 @@ describe('applyStatePatch（乐观锁，TC-FR-09-001 领域侧）', () => {
     expect(result.next.scene.name).toBe('书房');
   });
 
+  it('多 PC 板：单目标引擎补丁只覆盖目标条目，其余 PC 保留（模拟实团回归）', () => {
+    // 引擎补丁（sanityLossPatch/hpPatch/resourcePatch）只携带目标 PC 一条——
+    // 若 patch.pcs 整表替换 board.pcs，会把同板其他 PC 静默抹掉
+    // （2026-10-08 模拟实团实测：理智落板后沈青消失，后续指令全部 E-AI-01）。
+    const board = baseBoard({
+      pcs: {
+        m1: { sheet: sheetOf({ playerName: '沈青', san: 55 }), conditions: [], resources: [] },
+        m2: { sheet: sheetOf({ playerName: '顾晚', san: 65 }), conditions: [], resources: [] },
+      },
+    });
+    const patch: StatePatch = {
+      pcs: {
+        m2: { sheet: sheetOf({ playerName: '顾晚', san: 63 }), conditions: [], resources: [] },
+      },
+    };
+    const result = applyStatePatch(board, patch, 2);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.next.pcs.m2?.sheet).toMatchObject({ san: 63 });
+    // 关键断言：未被 patch 触及的 PC 原样保留
+    expect(result.next.pcs.m1?.sheet).toMatchObject({ playerName: '沈青', san: 55 });
+  });
+
+  it('同键条目按整体覆盖语义替换（patch.pcs[key] 整条替换，不深合并）', () => {
+    const board = baseBoard({
+      pcs: {
+        m1: {
+          sheet: sheetOf({ san: 55 }),
+          conditions: [{ label: '疯狂(临时)' }],
+          resources: [],
+        },
+      },
+    });
+    // patch 里 m1 不带 conditions → 替换后 conditions 丢（引擎补丁必须带全量字段，
+    // 见 engine-writes.ts 各 patch 构造处的约定）
+    const result = applyStatePatch(
+      board,
+      { pcs: { m1: { sheet: sheetOf({ san: 40 }), conditions: [], resources: [] } } },
+      2,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.next.pcs.m1?.sheet).toMatchObject({ san: 40 });
+    expect(result.next.pcs.m1?.conditions).toEqual([]);
+  });
+
   it('expectedVersion 过期 → E-ST-01 拒绝并返回当前板（供广播对齐）', () => {
     const board = baseBoard();
     const result = applyStatePatch(board, { facts: ['迟到的编辑'] }, 1);
