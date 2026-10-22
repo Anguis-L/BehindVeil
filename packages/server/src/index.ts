@@ -7,14 +7,15 @@ import { APP_NAME, PROTOCOL_VERSION } from '@behindveil/shared';
 import { recover } from './adapters/storage/recovery.js';
 import { createDataLayout } from './adapters/storage/layout.js';
 import { assertArchivesUpToDate } from './adapters/storage/version-gate.js';
-import { createEmbedAdapter, createLlmAdapter } from './adapters/llm/index.js';
+import { createEmbedAdapter } from './adapters/llm/index.js';
+import { LlmRuntime } from './adapters/llm/runtime.js';
 import type { RecallContext } from './observability/preview.js';
-import { createMockLlm } from './adapters/llm/mock.js';
 import type { LlmAdapter } from './domain/llm.js';
 import { loadConfig } from './config.js';
 import { registerCardRoutes } from './gateway/http/cards.js';
 import { registerExportRoutes } from './gateway/http/export.js';
 import { registerHostRoutes } from './gateway/http/host.js';
+import { registerLlmConfigRoutes } from './gateway/http/llm-config.js';
 import { registerMetricsRoutes } from './gateway/http/metrics.js';
 import { registerModuleRoutes } from './gateway/http/modules.js';
 import { registerPcRoutes } from './gateway/http/pcs.js';
@@ -123,23 +124,28 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
     protocol: PROTOCOL_VERSION,
   }));
 
-  // LLM 适配器（T-M3-06 装配）：provider=mock 走 MockLlm（无 key CI/回归）；
-  // 真实 provider 配置缺失或非法 → 告警并禁用 AI 触发（服务主体功能不受影响）
-  let llm: LlmAdapter | undefined = opts.llm;
-  if (llm) {
+  // LLM 运行时（2026-10-08 可用性改造）：配置从「启动快照」改为可热更状态——
+  // 页面 PATCH /llm 后重建适配器并把新引用推进网关，下一次 AI 调用即生效（免重启）。
+  // 装配优先级不变：opts.llm 注入（测试/E2E）> provider=mock > config.yaml + AIDLE_LLM_KEY。
+  const runtimeSettings = {
+    provider: cfg.llm.provider,
+    model: cfg.llm.model,
+    baseUrl: cfg.llm.baseUrl,
+    timeoutMs: cfg.llm.timeoutMs,
+    maxTokens: cfg.llm.maxTokens,
+    apiKey: cfg.llm.apiKey,
+  };
+  const runtime = opts.llm
+    ? new LlmRuntime(runtimeSettings, { injected: opts.llm })
+    : new LlmRuntime(runtimeSettings);
+  if (opts.llm) {
     app.log.info('LLM 适配器由装配参数注入（测试/E2E）');
   } else if (cfg.llm.provider === 'mock') {
-    llm = createMockLlm();
     app.log.info('LLM provider=mock：AI 触发以脚本回放运行');
-  } else {
-    try {
-      llm = createLlmAdapter(cfg.llm);
-    } catch (err) {
-      app.log.warn(
-        `LLM 适配器装配失败，AI 功能停用：${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+  } else if (!runtime.snapshot().ready) {
+    app.log.warn(`LLM 适配器装配失败，AI 功能停用：${runtime.snapshot().error ?? '未知原因'}`);
   }
+  const llm: LlmAdapter | undefined = runtime.current();
 
   // 嵌入适配器（v3 T-M11-01 / ADR-3-01，FR-33）：llm.embedding 配置段独立装配，
   // 与 chat provider 解耦。未配置或装配失败 = 向量召回关闭（行为 = v2.0，可关断红线）。
@@ -189,7 +195,9 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
   registerWorldBookRoutes(app, { layout, adminToken: cfg.adminToken });
   // 指标收集器（T-M6-03）：进程内单例，网关埋点与 GET /metrics 共用同一实例
   const metrics = new MetricsCollector();
-  const gateway = attachGateway(app, {
+  // deps 对象保持可变引用：网关闭包里是 `deps.llm` 实时取值（不解构成局部变量），
+  // 因此运行时换模型只需改这个对象的字段，无需重挂网关。
+  const gatewayDeps = {
     layout,
     initialSeqs,
     llm,
@@ -200,7 +208,8 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
     },
     metrics,
     ...(recall ? { recall } : {}),
-  });
+  };
+  const gateway = attachGateway(app, gatewayDeps);
   // 指令成功率取网关累计口径（R-01 唯一统计源），此处只做出口
   registerMetricsRoutes(app, {
     adminToken: cfg.adminToken,
@@ -209,6 +218,19 @@ export async function createServer(opts: CreateServerOptions = {}): Promise<Fast
   });
   // Host 转让/副 Host（T-M8-06）：REST 面经惰性句柄进网关（在线状态/presence 在网关内存态）
   registerHostRoutes(app, { gateway: () => gateway });
+  // LLM 运行时配置（页面换模型）：热更后把新适配器/参数推进已在运行的网关
+  registerLlmConfigRoutes(app, {
+    runtime,
+    adminToken: cfg.adminToken,
+    onChange: () => {
+      gatewayDeps.llm = runtime.current();
+      gatewayDeps.chat = {
+        model: runtime.model(),
+        temperature: DEFAULT_AI_TEMPERATURE,
+        maxTokens: runtime.maxTokens(),
+      };
+    },
+  });
 
   const webDistDir =
     opts.webDistDir ?? resolve(fileURLToPath(new URL('../../web/dist', import.meta.url)));
