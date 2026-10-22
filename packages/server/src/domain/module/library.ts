@@ -9,9 +9,11 @@ import {
   type ModuleManifest,
   type WorldBook,
 } from '@behindveil/shared';
-import { readdir, rm, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { cp, readdir, rm, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { JsonStore } from '../../adapters/storage/json-store.js';
 import type { DataLayout } from '../../adapters/storage/layout.js';
 import { listRoomFiles } from '../session/rooms.js';
@@ -161,6 +163,89 @@ export async function listModules(layout: DataLayout): Promise<ModuleInfo[]> {
     });
   }
   return infos.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+export interface SampleInstallResult {
+  /** 目录名 = manifest.id */
+  id: string;
+  name: string | undefined;
+  rulebook: string | undefined;
+  /** installed=本次装上；already=之前已装（不覆盖用户的改动）；skipped=校验不过已回滚 */
+  status: 'installed' | 'already' | 'skipped';
+  message: string | undefined;
+}
+
+/**
+ * 内置示例剧本的源目录定位（2026-10-08 可用性改造）。
+ *
+ * 发布包与源码树都带 `examples/modules`（release.yml 显式 cp）；从本文件出发逐级上溯
+ * 找到即止——dist（packages/server/dist/...）与 src 两种运行位置都能命中。
+ * 找不到返回 undefined（前端按钮不出现，功能静默缺席，不报错）。
+ */
+export function findSampleModulesDir(): string | undefined {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i += 1) {
+    const candidate = join(dir, 'examples', 'modules');
+    if (existsSync(candidate)) return candidate;
+    dir = dirname(dir);
+  }
+  return undefined;
+}
+
+/**
+ * 装载内置示例剧本（幂等）：复制进 `data/modules/<id>/` 后逐包校验，
+ * 校验不过**整目录回滚**（不留坏包污染列表）。已存在的同名目录不覆盖——
+ * 用户可能改过世界书，覆盖等于静默毁数据。
+ */
+export async function installSampleModules(
+  layout: DataLayout,
+): Promise<{ ok: true; modules: SampleInstallResult[] } | { ok: false; message: string }> {
+  const src = findSampleModulesDir();
+  if (src === undefined) {
+    return { ok: false, message: '未找到内置示例剧本（examples/modules），请手动放置模组目录' };
+  }
+  const names = (await readdir(src, { withFileTypes: true }))
+    .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+    .map((e) => e.name)
+    .sort();
+  if (names.length === 0) return { ok: false, message: '内置示例剧本目录为空' };
+
+  const results: SampleInstallResult[] = [];
+  for (const name of names) {
+    const dest = join(layout.modulesDir, name);
+    if (existsSync(dest)) {
+      const probe = await loadModule(layout, name);
+      results.push({
+        id: name,
+        name: probe.ok ? probe.module.manifest.name : undefined,
+        rulebook: probe.ok ? probe.module.manifest.rulebook : undefined,
+        status: 'already',
+        message: undefined,
+      });
+      continue;
+    }
+    await cp(join(src, name), dest, { recursive: true });
+    const probe = await loadModule(layout, name);
+    if (!probe.ok) {
+      await rm(dest, { recursive: true, force: true });
+      results.push({
+        id: name,
+        name: undefined,
+        rulebook: undefined,
+        status: 'skipped',
+        message: probe.message,
+      });
+      continue;
+    }
+    results.push({
+      id: name,
+      name: probe.module.manifest.name,
+      rulebook: probe.module.manifest.rulebook,
+      status: 'installed',
+      message: undefined,
+    });
+  }
+  return { ok: true, modules: results };
 }
 
 export type UnloadModuleResult =

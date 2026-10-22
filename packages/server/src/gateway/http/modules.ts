@@ -2,7 +2,13 @@ import { ModuleInfoSchema, type ModuleInfo } from '@behindveil/shared';
 import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import type { DataLayout } from '../../adapters/storage/layout.js';
-import { loadModule, listModules, unloadModule } from '../../domain/module/library.js';
+import {
+  findSampleModulesDir,
+  installSampleModules,
+  loadModule,
+  listModules,
+  unloadModule,
+} from '../../domain/module/library.js';
 
 /**
  * 模组管理 REST（T-M5-05，FR-10 / TDD §3.6，docs/openapi.yaml /modules 提案）。
@@ -49,6 +55,25 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleRouteDeps
   app.get('/modules', { preHandler: requireAdmin }, async () => {
     const modules: ModuleInfo[] = await listModules(layout);
     return modules;
+  });
+
+  /**
+   * 内置示例剧本（2026-10-08 可用性改造）：`GET /modules` 空态时页面给一键装载，
+   * 免得用户为「从哪弄一个剧本」去翻文档。幂等；示例源缺失时回 404 并给明话。
+   */
+  app.get('/modules/samples', { preHandler: requireAdmin }, async (_req, reply) => {
+    if (findSampleModulesDir() === undefined) {
+      return reply.code(404).send({ code: 'E-MOD-01', message: '本机没有内置示例剧本' });
+    }
+    return { available: true };
+  });
+
+  app.post('/modules/samples', { preHandler: requireAdmin }, async (_req, reply) => {
+    const result = await installSampleModules(layout);
+    if (!result.ok) {
+      return reply.code(404).send({ code: 'E-MOD-01', message: result.message });
+    }
+    return reply.code(201).send(result.modules);
   });
 
   app.post('/modules', { preHandler: requireAdmin }, async (req, reply) => {

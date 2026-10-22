@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDataLayout, type DataLayout } from '../../adapters/storage/layout.js';
 import { createRoom } from '../session/rooms.js';
 import { createSession, endSession } from '../session/sessions.js';
-import { loadModule, listModules, unloadModule } from './library.js';
+import { installSampleModules, loadModule, listModules, unloadModule } from './library.js';
 
 /**
  * T-M5-05：模组包仓库。加载 = 校验（TC-FR-10-001），卸载按 D-09（活跃引用拒绝），
@@ -161,5 +161,27 @@ describe('listModules / unloadModule（D-09）', () => {
 
   it('卸载不存在的模组 → not-found', async () => {
     expect(await unloadModule(layout, 'ghost')).toMatchObject({ ok: false, reason: 'not-found' });
+  });
+
+  // ---- 一键装载内置示例（2026-10-08 可用性改造）：新机器没剧本就开不了团 ----
+  describe('installSampleModules', () => {
+    it('装进 data/modules 且校验通过；再来一次是 already（不覆盖用户改动）', async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'bv-samples-'));
+      created.push(dir);
+      const target = createDataLayout(dir);
+
+      const first = await installSampleModules(target);
+      expect(first.ok).toBe(true);
+      if (!first.ok) return;
+      expect(first.modules.length).toBeGreaterThan(0);
+      expect(first.modules.every((m) => m.status === 'installed')).toBe(true);
+      // 装完即出现在列表里（开团下拉看得到）
+      expect((await listModules(target)).length).toBe(first.modules.length);
+
+      const second = await installSampleModules(target);
+      expect(second.ok).toBe(true);
+      if (!second.ok) return;
+      expect(second.modules.every((m) => m.status === 'already')).toBe(true);
+    });
   });
 });

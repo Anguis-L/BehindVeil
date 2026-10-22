@@ -11,6 +11,7 @@ import { scanTextOf } from '../pipeline/stages.js';
 import { readStateBoard } from '../domain/stateboard/board.js';
 import { readMessagesUpTo } from '../domain/session/messages.js';
 import { readSession } from '../domain/session/sessions.js';
+import { loadModule } from '../domain/module/library.js';
 import { buildPrompt } from '../pipeline/index.js';
 import { createHeuristicTokenizer } from '../pipeline/tokenizer.js';
 import type { PipelineInput, PipelineTrace } from '../pipeline/types.js';
@@ -20,8 +21,9 @@ import type { PipelineInput, PipelineTrace } from '../pipeline/types.js';
  * 完整管线，返回全阶段 trace（kp:promptPreview 事件承载，host only）。
  *
  * 输入源：session/messages 取自仓库，世界书取房间级手编文件（D-08，载入校验），
- * 状态板经状态板仓库读取（T-M5-06 board.ts，缺失/损坏空板兜底）；KP 卡为内置默认卡
- * （模组包 KP 卡解析随 T-M5-05 收尾接入）；pcRoster 桩空串（PC 名册块随 T-M5-10 评估）。
+ * 状态板经状态板仓库读取（T-M5-06 board.ts，缺失/损坏空板兜底）；KP 卡取会话所装
+ * 模组的 KP 卡（S1 人格与规则书速查的真实来源；模组装载失败才回退内置默认卡）；
+ * pcRoster 桩空串（PC 名册块随 T-M5-10 评估，PC 数值已由 S2 状态块承载）。
  */
 
 /** M2 内置默认 KP 卡：卡库/模组系统（M5）落地前的人格兜底，规则书默认 COC7 */
@@ -60,6 +62,11 @@ export async function buildPreviewTrace(
   const session = await readSession(layout, roomId, sessionId);
   if (!session) throw new Error(`会话不存在：${sessionId}`);
 
+  // KP 卡 = 会话所装模组的 KP 卡（S1 人格 + 规则书速查的真实来源）。
+  // D-09 保证活跃会话引用的模组不被卸载，装载失败属异常态，回退默认卡不让预览整体不可用。
+  const loaded = await loadModule(layout, session.moduleRef).catch(() => null);
+  const kpCard = loaded?.ok ? loaded.module.kpCard : DEFAULT_KP_CARD;
+
   const messages = await readMessagesUpTo(layout, roomId, sessionId, opts.seq);
   const stateBoard = await readStateBoard(layout, roomId, sessionId);
   const { book } = await loadWorldBook(layout, roomId);
@@ -88,7 +95,7 @@ export async function buildPreviewTrace(
   return buildPrompt(
     {
       session: session.settings,
-      kpCard: DEFAULT_KP_CARD,
+      kpCard,
       messages,
       stateBoard,
       worldBook: book,

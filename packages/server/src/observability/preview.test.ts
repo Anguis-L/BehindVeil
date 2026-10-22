@@ -34,8 +34,16 @@ beforeEach(async () => {
   layout = createDataLayout(dataDir);
 });
 
+/** 清理带超时竞速（沙箱 rm 会挂起，见 worldbook/store.test.ts 同款说明） */
+async function rmQuietly(dir: string): Promise<void> {
+  await Promise.race([
+    rm(dir, { recursive: true, force: true }).catch(() => undefined),
+    new Promise((r) => setTimeout(r, 2_000)),
+  ]);
+}
+
 afterEach(async () => {
-  await rm(dataDir, { recursive: true, force: true });
+  await rmQuietly(dataDir);
 });
 
 async function seedRoom(): Promise<{ roomId: string; sessionId: string }> {
@@ -61,7 +69,7 @@ async function appendIc(
 }
 
 describe('buildPreviewTrace（FR-13）', () => {
-  it('从落盘状态组装完整管线：默认 KP 卡 + COC7 速查 + 消息历史', async () => {
+  it('从落盘状态组装完整管线：模组缺失回退默认 KP 卡 + COC7 速查 + 消息历史', async () => {
     const { roomId, sessionId } = await seedRoom();
     await appendIc(roomId, sessionId, 1, '我进入宅邸。');
 
@@ -73,6 +81,74 @@ describe('buildPreviewTrace（FR-13）', () => {
     expect(system).toContain('COC7');
     const user = trace.messages[1]?.content ?? '';
     expect(user).toContain('我进入宅邸。');
+  });
+
+  it('KP 卡取会话所装模组：generic 模组的速查与人格进 S1（2026-10-07 修复）', async () => {
+    // 落一个 generic 示例模组（manifest + 三件套），会话 moduleRef 指向它
+    await mkdir(path.join(dataDir, 'modules', 'mod-generic'), { recursive: true });
+    await writeFile(
+      path.join(dataDir, 'modules', 'mod-generic', 'manifest.json'),
+      JSON.stringify({
+        id: 'mod-generic',
+        name: '测试generic模组',
+        version: '1.0.0',
+        rulebook: 'generic',
+        apiVersion: '1',
+        entry: {
+          kpCard: 'kp-card.json',
+          worldBook: 'worldbook.json',
+          initState: 'init-state.json',
+        },
+      }),
+      'utf8',
+    );
+    await writeFile(
+      path.join(dataDir, 'modules', 'mod-generic', 'kp-card.json'),
+      JSON.stringify({
+        spec: 'chara_card_v3',
+        data: {
+          name: '守塔学徒',
+          description: '你是「测试generic模组」的守秘人：三档判定，10 起大成。',
+          scenario: '雾夜灯塔',
+          first_mes: '你爬上旋梯。',
+          mes_example: '',
+          extensions: {
+            aidle: {
+              rulebook: 'generic',
+              genericRule: {
+                dice: '2d6',
+                op: '>=',
+                grades: [{ name: 'critical', when: 'total>=10' }],
+              },
+            },
+          },
+        },
+      }),
+      'utf8',
+    );
+    await writeFile(
+      path.join(dataDir, 'modules', 'mod-generic', 'worldbook.json'),
+      JSON.stringify({ entries: [] }),
+      'utf8',
+    );
+    await writeFile(
+      path.join(dataDir, 'modules', 'mod-generic', 'init-state.json'),
+      JSON.stringify({ scene: { name: '', time: '', publicDesc: '' }, facts: [], opening: '' }),
+      'utf8',
+    );
+    const room = await createRoom(layout, { name: '模组房' });
+    const session = await createSession(layout, room.id, { moduleId: 'mod-generic', settings });
+
+    const trace = await buildPreviewTrace(layout, room.id, session.id);
+
+    const system = trace.messages[0]?.content ?? '';
+    // 人格来自模组 KP 卡，而非内置默认卡
+    expect(system).toContain('三档判定，10 起大成');
+    expect(system).not.toContain('守秘人（KP）');
+    // 规则书速查按模组卡配置生成（generic），不再是 COC7 固定文案
+    expect(system).toContain('检定速查（generic');
+    expect(system).toContain('total>=10 → critical');
+    expect(system).not.toContain('检定速查（COC7）');
   });
 
   it('房间级手编世界书参与扫描（D-08 载入链路）', async () => {
