@@ -26,3 +26,6 @@ data/
 *.log
 .DS_Store
 Thumbs.db
+
+# 本地目检截图（浏览器实机走查产物，不入库）
+gui-test-screenshots/
