@@ -303,6 +303,19 @@ channels:
       state:
         $ref: '#/components/messages/StateBroadcast'
 
+  roomSync:
+    address: room:sync
+    title: 房间状态快照推送
+    description: |
+      服务端 → 客户端（2026-10-07 GUI 真人调试修复）。成员进离 / 开团 / Host 转让等
+      房间级变更后向全房推送，客户端整体覆盖成员栏与活跃会话——此前这些变更只以
+      system 消息入流，已连接客户端的成员列表与「尚未开团」态永远滞后（后进成员
+      不可见、玩家端开团后输入仍禁用）。
+    x-status: implemented
+    messages:
+      sync:
+        $ref: '#/components/messages/RoomSync'
+
   promptPreview:
     address: kp:promptPreview
     title: prompt 组装预览
@@ -462,6 +475,14 @@ operations:
     x-status: implemented
     messages:
       - $ref: '#/channels/stateBroadcast/messages/state'
+
+  roomSync.receive:
+    action: receive
+    channel: { $ref: '#/channels/roomSync' }
+    title: 接收房间状态快照
+    x-status: implemented
+    messages:
+      - $ref: '#/channels/roomSync/messages/sync'
 
   promptPreview.receive:
     action: receive
@@ -858,6 +879,27 @@ components:
           stateBoard:
             $ref: '#/components/schemas/StateBoard'
         required: [stateBoard]
+
+    RoomSync:
+      name: roomSync
+      title: 房间状态快照
+      payload:
+        type: object
+        properties:
+          members:
+            type: array
+            description: 全量成员名册（成员栏以此整体覆盖）
+            items:
+              type: object
+              properties:
+                id: { type: string }
+                name: { type: string }
+                role: { type: string, enum: [host, player, observer] }
+                joinedAt: { type: string, format: date-time }
+          activeSessionId:
+            type: [string, 'null']
+            description: 当前活跃会话 id；null = 未开团（输入与状态板随之失效/生效）
+        required: [members, activeSessionId]
 
     PromptPreview:
       name: promptPreview

@@ -207,8 +207,16 @@ async function startAiServer(
   };
 }
 
+/** 清理带超时竞速（沙箱 rm 慢，单次数百毫秒会撞 hook 超时；见 worldbook/store.test.ts 同款说明） */
+async function rmQuietly(dir: string): Promise<void> {
+  await Promise.race([
+    rm(dir, { recursive: true, force: true }).catch(() => undefined),
+    new Promise((r) => setTimeout(r, 2_000)),
+  ]);
+}
+
 afterAll(async () => {
-  await Promise.all(created.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(created.splice(0).map((dir) => rmQuietly(dir)));
 });
 
 interface Feed {
@@ -329,7 +337,10 @@ describe('循环上限端到端（TC-FR-05-007）', () => {
       { directive: { ...check, skill: '图书馆使用' } },
       { delta: '\n' },
       { directive: { ...check, skill: '撬锁' } },
-      { delta: '\n收工。' },
+      // 第 4 块被拦后本轮请求即结束；强制收尾是**下一次**请求，剧本要给它真内容
+      // （否则收尾回包为空，会被 2026-10-08 的空回包不落盘规则吞掉 done）。
+      { stop: true },
+      { delta: '收工。' },
       { stop: true },
     ]);
     const hostFeed = collect(srv.host);
@@ -347,6 +358,48 @@ describe('循环上限端到端（TC-FR-05-007）', () => {
       .map((m) => (m as { content: string }).content)
       .join('');
     expect(contents).toContain('收工。'); // 收尾段存在
+    await srv.cleanup();
+  });
+});
+
+describe('剧本耗尽：空内容不落盘（2026-10-08 模拟实团回归）', () => {
+  it('MockLlm 空脚本：空叙事既不落盘也不广播 done，界面不留空气泡', async () => {
+    const srv = await startAiServer([]); // 空剧本 = KP 无话可说
+    const hostFeed = collect(srv.host);
+
+    srv.player.emit('msg:send', { type: 'ic', content: '我屏住呼吸，等着。' });
+    // 剧本耗尽仍会走完一次 AI 回合（finishNarration 被调用），但内容为空 → 应被丢弃。
+    // 等玩家那条 ic 落盘即说明该回合已处理完（回合串行，ic 先于叙事落盘）。
+    await waitFor(() => hostFeed.msgs.some((m) => m.type === 'ic'), 4000, '玩家 ic 落盘');
+    await new Promise((r) => setTimeout(r, 200));
+
+    const narrations = hostFeed.msgs.filter((m) => m.type === 'narration');
+    expect(narrations).toHaveLength(0); // 空叙事不落盘
+    expect(hostFeed.dones).toHaveLength(0); // 也不广播 done（否则前端挂空占位）
+    expect(hostFeed.msgs.some((m) => m.type === 'ic')).toBe(true); // 玩家发言照常落盘
+    await srv.cleanup();
+  });
+
+  it('非空内容照常落盘（防空判回归）', async () => {
+    const srv = await startAiServer([{ delta: '潮声在雾里滚了一圈。' }, { stop: true }]);
+    const hostFeed = collect(srv.host);
+
+    srv.player.emit('msg:send', { type: 'ic', content: '我侧耳听。' });
+    await waitFor(() => hostFeed.dones.length >= 1, 4000, '非空叙事的 done');
+
+    expect(hostFeed.msgs.filter((m) => m.type === 'narration')).toHaveLength(1);
+    await srv.cleanup();
+  });
+
+  it('ai:invoke 显式触发：剧本耗尽空回包仍广播 done（调用方按 done 等回包）', async () => {
+    // 守卫过宽会让这里永久挂住：KP 主动要回应，等的是信号而不是正文。
+    const srv = await startAiServer([]); // 空剧本
+    const hostFeed = collect(srv.host);
+
+    srv.host.emit('ai:invoke', {});
+    await waitFor(() => hostFeed.dones.length >= 1, 4000, 'ai:invoke 的 done');
+
+    expect(hostFeed.dones).toHaveLength(1);
     await srv.cleanup();
   });
 });

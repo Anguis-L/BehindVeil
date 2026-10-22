@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { AppErrorSchema } from './errors.js';
 import { MessageSchema } from './message.js';
 import {
+  MemberSchema,
   SessionSettingsSchema,
   StateBoardPcSchema,
   StateBoardSceneSchema,
@@ -222,6 +223,18 @@ export const SynopsisProposedSchema = z.object({
 });
 export type SynopsisProposedPayload = z.infer<typeof SynopsisProposedSchema>;
 
+/**
+ * 房间状态快照推送（2026-10-07 GUI 真人调试修复）：成员进离/开团等房间级变更
+ * 此前只以 system 消息入流，已连接客户端的成员栏与「尚未开团」态不随之刷新。
+ * 服务端在 join / leave / session:start 三个生命周期点向全房推送本事件，
+ * 客户端以 payload 为准整体覆盖成员栏与活跃会话。
+ */
+export const RoomSyncSchema = z.object({
+  members: z.array(MemberSchema),
+  activeSessionId: z.string().nullable(),
+});
+export type RoomSyncPayload = z.infer<typeof RoomSyncSchema>;
+
 // ---- 事件白名单（TDD §8：非白名单事件即断连）----
 
 export const CLIENT_EVENTS = [
@@ -244,6 +257,7 @@ export const SERVER_EVENTS = [
   'narration:delta',
   'narration:done',
   'state:broadcast',
+  'room:sync',
   'kp:promptPreview',
   'kp:metricsResult',
   'synopsis:proposed',
@@ -272,6 +286,7 @@ export const SERVER_EVENT_SCHEMAS = {
   'narration:delta': NarrationDeltaSchema,
   'narration:done': NarrationDoneSchema,
   'state:broadcast': StateBroadcastSchema,
+  'room:sync': RoomSyncSchema,
   'kp:promptPreview': KpPromptPreviewSchema,
   'kp:metricsResult': KpMetricsResultSchema,
   'synopsis:proposed': SynopsisProposedSchema,

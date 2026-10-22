@@ -339,6 +339,23 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     emitChecked(emitter, 'error:app', { code, message });
   }
 
+  /**
+   * 房间状态快照推送（room:sync，2026-10-07 GUI 真人调试修复）：成员进离/开团等
+   * 房间级变更此前只以 system 消息入流，已连接客户端的成员栏与「尚未开团」态
+   * 不随之刷新。join / leave / session:start / Host 转让四个生命周期点调用，
+   * 客户端以 payload 为准整体覆盖成员栏与活跃会话。
+   */
+  async function emitRoomSync(roomId: string): Promise<void> {
+    const [room, members] = await Promise.all([
+      readRoomFile(layout, roomId),
+      readMembers(layout, roomId),
+    ]);
+    emitChecked(io.to(`room:${roomId}`), 'room:sync', {
+      members,
+      activeSessionId: room?.activeSessionId ?? null,
+    });
+  }
+
   function enqueue<T>(roomId: string, task: () => Promise<T>): Promise<T> {
     const previous = roomQueues.get(roomId) ?? Promise.resolve();
     const next = previous.then(task, task); // 前序失败不阻塞后续消息
@@ -542,6 +559,10 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
       members: await readMembers(layout, roomFile.id),
     });
 
+    // 房间状态推送（room:sync）：名册变更必须到达**已在线**的客户端——
+    // join ack 只覆盖新进者，此前后进成员对先在线者不可见（成员栏/声明 PC 下拉全滞留）
+    await emitRoomSync(roomFile.id);
+
     // 断线补发（T-M1-08）：seq > lastSeq 的消息按升序回放给本连接
     if (data.lastSeq !== undefined && activeSessionId) {
       // 补发按本连接身份过滤（FR-14 / D-10）：不给旁人补暗骰与密语
@@ -715,6 +736,9 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
         content: `会话已开始（${data.moduleId}）`,
       }),
     );
+    // room:sync：已在线客户端的「尚未开团」态与状态板有效性必须随开团刷新——
+    // system 消息不承载会话状态，玩家端此前只能刷新重进才能解锁输入
+    await emitRoomSync(me.roomId);
     ack?.({ ok: true, session });
   }
 
@@ -984,8 +1008,15 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   /**
    * 排程一个 AI 回合（T-M3-06，D-07）：进入房间级 AI 串行队列；回合完成后开启新「轮」。
    * 触发源：玩家 IC 消息（triggerSeq=该消息 seq）或 ai:invoke（triggerSeq=当前 lastSeq）。
+   * alwaysFinish：ai:invoke 是 KP 主动要回应，空回包也要给 narration:done 信号
+   * （2026-10-08 模拟实团回归：守卫过宽会让等 done 的调用方永久挂住）。
    */
-  function scheduleAiTurn(roomId: string, sessionId: string, triggerSeq: number): void {
+  function scheduleAiTurn(
+    roomId: string,
+    sessionId: string,
+    triggerSeq: number,
+    options: { alwaysFinish?: boolean } = {},
+  ): void {
     if (!deps.llm || !deps.chat) return;
     const llm = deps.llm;
     const baseChat = deps.chat;
@@ -1018,180 +1049,184 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
         const sessionRulebook = sessionRuleBook(session);
         // 梗概提案（T-M11-04）：捕获本轮管线 trace，回合结束后链外判断是否生成
         let turnTrace: import('../pipeline/types.js').PipelineTrace | undefined;
-        await runAiTurn(triggerSeq, {
-          llm: instrumentLlm(llm, sessionId),
-          chat,
-          // 真实名册（T-M5-04）：按本会话状态板取技能值（含 roster 声明装配的初始板）
-          roster: createStateBoardRoster(stateBoards.get(sessionId)),
-          // 数值效果（T-M8-03/04）：取值源与写板目标
-          getBoard: () => stateBoards.get(sessionId),
-          // 引擎写板在房间队列内对**当前板**现算（同一轮多条效果依次累加，不吃过期快照）；
-          // 乐观锁冲突（Host 编辑抢先）→ 广播最新版对齐 + KP 告警，效果丢弃
-          applyHpEffect: async (key, kind, roll) => {
-            let applied: { before: number; after: number } | null = null;
-            await enqueue(roomId, async () => {
-              const board = await boardFor(roomId, sessionId);
-              const produced = hpPatch(board, key, kind, roll);
-              if (!produced.ok) return;
-              const pc = board.pcs[key];
-              if (!pc || pc.sheet.rulebook !== 'dnd5e') return;
-              const lock = applyStatePatch(board, produced.patch, board.version);
-              if (!lock.ok) {
-                for (const socketId of alertTargets()) {
-                  emitError(io.to(socketId), 'E-ST-01', '引擎写状态板时版本冲突，本次效果未落盘');
+        await runAiTurn(
+          triggerSeq,
+          {
+            llm: instrumentLlm(llm, sessionId),
+            chat,
+            // 真实名册（T-M5-04）：按本会话状态板取技能值（含 roster 声明装配的初始板）
+            roster: createStateBoardRoster(stateBoards.get(sessionId)),
+            // 数值效果（T-M8-03/04）：取值源与写板目标
+            getBoard: () => stateBoards.get(sessionId),
+            // 引擎写板在房间队列内对**当前板**现算（同一轮多条效果依次累加，不吃过期快照）；
+            // 乐观锁冲突（Host 编辑抢先）→ 广播最新版对齐 + KP 告警，效果丢弃
+            applyHpEffect: async (key, kind, roll) => {
+              let applied: { before: number; after: number } | null = null;
+              await enqueue(roomId, async () => {
+                const board = await boardFor(roomId, sessionId);
+                const produced = hpPatch(board, key, kind, roll);
+                if (!produced.ok) return;
+                const pc = board.pcs[key];
+                if (!pc || pc.sheet.rulebook !== 'dnd5e') return;
+                const lock = applyStatePatch(board, produced.patch, board.version);
+                if (!lock.ok) {
+                  for (const socketId of alertTargets()) {
+                    emitError(io.to(socketId), 'E-ST-01', '引擎写状态板时版本冲突，本次效果未落盘');
+                  }
+                  emitChecked(io.to(`room:${roomId}`), 'state:broadcast', {
+                    stateBoard: lock.current,
+                  });
+                  return;
                 }
-                emitChecked(io.to(`room:${roomId}`), 'state:broadcast', {
-                  stateBoard: lock.current,
-                });
-                return;
-              }
-              const before = pc.sheet.hp.current;
-              const after = lock.next.pcs[key]?.sheet;
-              if (!after || after.rulebook !== 'dnd5e') return;
-              stateBoards.set(sessionId, lock.next);
-              await saveStateBoard(layout, roomId, sessionId, lock.next);
-              emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: lock.next });
-              applied = { before, after: after.hp.current };
-            });
-            return applied;
-          },
-          applySanityEffect: async (key, sanRoll, lossHint, random) => {
-            let applied: {
-              lossRoll: ParsedRoll;
-              loss: number;
-              before: number;
-              after: number;
-              desc: string;
-            } | null = null;
-            await enqueue(roomId, async () => {
-              const board = await boardFor(roomId, sessionId);
-              const pc = board.pcs[key];
-              if (!pc || pc.sheet.rulebook !== 'coc7' || !sessionRulebook.sanityRule) return;
-              // 损失表档位以**当前 SAN** 为判定目标（同一轮多次理智检定逐条基于最新值）
-              const tier = sessionRulebook.sanityRule(sanRoll, pc.sheet.san);
-              const lossExpr = lossHint ?? tier.loss;
-              const lossRoll = rollDice(lossExpr, {
-                random: random ?? createCsprngRandom(),
-                rulebook: sessionRulebook,
+                const before = pc.sheet.hp.current;
+                const after = lock.next.pcs[key]?.sheet;
+                if (!after || after.rulebook !== 'dnd5e') return;
+                stateBoards.set(sessionId, lock.next);
+                await saveStateBoard(layout, roomId, sessionId, lock.next);
+                emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: lock.next });
+                applied = { before, after: after.hp.current };
               });
-              const produced = sanityLossPatch(board, key, sanRoll, lossRoll, sessionRulebook);
-              if (!produced.ok) return;
-              // 损失骰 DiceMsg：审计先行（已在队列内，直接 recordDice，不再嵌套入队）
-              const diceRoll = await recordDice(roomId, sessionId, lossRoll, { hidden: false });
-              const lock = applyStatePatch(board, produced.patch, board.version);
-              if (!lock.ok) {
-                for (const socketId of alertTargets()) {
-                  emitError(io.to(socketId), 'E-ST-01', '引擎写状态板时版本冲突，本次效果未落盘');
+              return applied;
+            },
+            applySanityEffect: async (key, sanRoll, lossHint, random) => {
+              let applied: {
+                lossRoll: ParsedRoll;
+                loss: number;
+                before: number;
+                after: number;
+                desc: string;
+              } | null = null;
+              await enqueue(roomId, async () => {
+                const board = await boardFor(roomId, sessionId);
+                const pc = board.pcs[key];
+                if (!pc || pc.sheet.rulebook !== 'coc7' || !sessionRulebook.sanityRule) return;
+                // 损失表档位以**当前 SAN** 为判定目标（同一轮多次理智检定逐条基于最新值）
+                const tier = sessionRulebook.sanityRule(sanRoll, pc.sheet.san);
+                const lossExpr = lossHint ?? tier.loss;
+                const lossRoll = rollDice(lossExpr, {
+                  random: random ?? createCsprngRandom(),
+                  rulebook: sessionRulebook,
+                });
+                const produced = sanityLossPatch(board, key, sanRoll, lossRoll, sessionRulebook);
+                if (!produced.ok) return;
+                // 损失骰 DiceMsg：审计先行（已在队列内，直接 recordDice，不再嵌套入队）
+                const diceRoll = await recordDice(roomId, sessionId, lossRoll, { hidden: false });
+                const lock = applyStatePatch(board, produced.patch, board.version);
+                if (!lock.ok) {
+                  for (const socketId of alertTargets()) {
+                    emitError(io.to(socketId), 'E-ST-01', '引擎写状态板时版本冲突，本次效果未落盘');
+                  }
+                  emitChecked(io.to(`room:${roomId}`), 'state:broadcast', {
+                    stateBoard: lock.current,
+                  });
+                  return;
                 }
-                emitChecked(io.to(`room:${roomId}`), 'state:broadcast', {
-                  stateBoard: lock.current,
+                const before = pc.sheet.san;
+                stateBoards.set(sessionId, lock.next);
+                await saveStateBoard(layout, roomId, sessionId, lock.next);
+                await persistAndDeliver(roomId, sessionId, {
+                  type: 'dice',
+                  roll: diceRoll,
+                  hidden: false,
                 });
-                return;
-              }
-              const before = pc.sheet.san;
-              stateBoards.set(sessionId, lock.next);
-              await saveStateBoard(layout, roomId, sessionId, lock.next);
-              await persistAndDeliver(roomId, sessionId, {
-                type: 'dice',
-                roll: diceRoll,
-                hidden: false,
+                emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: lock.next });
+                const after = lock.next.pcs[key]?.sheet;
+                if (!after || after.rulebook !== 'coc7') return;
+                applied = {
+                  lossRoll,
+                  loss: produced.loss,
+                  before,
+                  after: after.san,
+                  desc: lossHint ? `KP 指定损失 ${lossExpr}` : tier.desc,
+                };
               });
-              emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: lock.next });
-              const after = lock.next.pcs[key]?.sheet;
-              if (!after || after.rulebook !== 'coc7') return;
-              applied = {
-                lossRoll,
-                loss: produced.loss,
-                before,
-                after: after.san,
-                desc: lossHint ? `KP 指定损失 ${lossExpr}` : tier.desc,
-              };
-            });
-            return applied;
-          },
-          // 资源计数器（T-M12-02，FR-38）：不掷骰，队列内 clamp 后乐观锁落盘广播
-          applyResourceEffect: async (key, name, delta) => {
-            let applied: { before: number; after: number } | null = null;
-            await enqueue(roomId, async () => {
-              const board = await boardFor(roomId, sessionId);
-              const produced = resourcePatch(board, key, name, delta);
-              if (!produced.ok) return;
-              const lock = applyStatePatch(board, produced.patch, board.version);
-              if (!lock.ok) {
-                for (const socketId of alertTargets()) {
-                  emitError(
-                    io.to(socketId),
-                    'E-ST-01',
-                    '引擎写状态板时版本冲突，本次资源变动未落盘',
-                  );
+              return applied;
+            },
+            // 资源计数器（T-M12-02，FR-38）：不掷骰，队列内 clamp 后乐观锁落盘广播
+            applyResourceEffect: async (key, name, delta) => {
+              let applied: { before: number; after: number } | null = null;
+              await enqueue(roomId, async () => {
+                const board = await boardFor(roomId, sessionId);
+                const produced = resourcePatch(board, key, name, delta);
+                if (!produced.ok) return;
+                const lock = applyStatePatch(board, produced.patch, board.version);
+                if (!lock.ok) {
+                  for (const socketId of alertTargets()) {
+                    emitError(
+                      io.to(socketId),
+                      'E-ST-01',
+                      '引擎写状态板时版本冲突，本次资源变动未落盘',
+                    );
+                  }
+                  emitChecked(io.to(`room:${roomId}`), 'state:broadcast', {
+                    stateBoard: lock.current,
+                  });
+                  return;
                 }
-                emitChecked(io.to(`room:${roomId}`), 'state:broadcast', {
-                  stateBoard: lock.current,
-                });
-                return;
-              }
-              stateBoards.set(sessionId, lock.next);
-              await saveStateBoard(layout, roomId, sessionId, lock.next);
-              emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: lock.next });
-              applied = { before: produced.before, after: produced.after };
-            });
-            return applied;
-          },
-          // 规则书随会话（T-M7-04）：AI 检定骰与玩家骰走同一套判定
-          rulebook: sessionRulebook,
-          tracker,
-          buildMessages: async () => {
-            const trace = await buildPreviewTrace(layout, roomId, sessionId, {}, deps.recall);
-            turnTrace = trace;
-            return trace.messages;
-          },
-          emitDice: async (roll) => {
-            await enqueue(roomId, async () => {
-              const diceRoll = await recordDice(roomId, sessionId, roll, { hidden: false });
-              await persistAndDeliver(roomId, sessionId, {
-                type: 'dice',
-                roll: diceRoll,
-                hidden: false,
+                stateBoards.set(sessionId, lock.next);
+                await saveStateBoard(layout, roomId, sessionId, lock.next);
+                emitChecked(io.to(`room:${roomId}`), 'state:broadcast', { stateBoard: lock.next });
+                applied = { before: produced.before, after: produced.after };
               });
-            });
+              return applied;
+            },
+            // 规则书随会话（T-M7-04）：AI 检定骰与玩家骰走同一套判定
+            rulebook: sessionRulebook,
+            tracker,
+            buildMessages: async () => {
+              const trace = await buildPreviewTrace(layout, roomId, sessionId, {}, deps.recall);
+              turnTrace = trace;
+              return trace.messages;
+            },
+            emitDice: async (roll) => {
+              await enqueue(roomId, async () => {
+                const diceRoll = await recordDice(roomId, sessionId, roll, { hidden: false });
+                await persistAndDeliver(roomId, sessionId, {
+                  type: 'dice',
+                  roll: diceRoll,
+                  hidden: false,
+                });
+              });
+            },
+            emitDirectiveResult: async (content) => {
+              await enqueue(roomId, () =>
+                persistAndDeliver(roomId, sessionId, {
+                  type: 'system',
+                  subtype: 'ai_directive_result',
+                  content,
+                }),
+              );
+            },
+            emitNarrationDelta: (seq, delta) => {
+              emitChecked(io.to(`room:${roomId}`), 'narration:delta', { seq, delta });
+            },
+            finishNarration: async (_triggerSeq, content) => {
+              const seq = await enqueue(roomId, () =>
+                persistAndDeliver(roomId, sessionId, { type: 'narration', content }),
+              );
+              emitChecked(io.to(`room:${roomId}`), 'narration:done', { seq });
+            },
+            alertKp: (code, message) => {
+              // E-AI-01 玩家无感：告警只定向 Host/副 Host（TDD §11；T-M8-06 副 Host 代行）
+              for (const socketId of alertTargets()) {
+                emitError(io.to(socketId), code, message);
+              }
+            },
+            recordDirective: (ev) => {
+              recordDirectiveFailure(roomId, sessionId, ev);
+            },
+            notifyFallback: async () => {
+              await enqueue(roomId, () =>
+                persistAndDeliver(roomId, sessionId, {
+                  type: 'system',
+                  subtype: 'notice',
+                  content: 'KP 指令协议本轮停用，请玩家使用 .r 手动掷骰',
+                }),
+              );
+            },
           },
-          emitDirectiveResult: async (content) => {
-            await enqueue(roomId, () =>
-              persistAndDeliver(roomId, sessionId, {
-                type: 'system',
-                subtype: 'ai_directive_result',
-                content,
-              }),
-            );
-          },
-          emitNarrationDelta: (seq, delta) => {
-            emitChecked(io.to(`room:${roomId}`), 'narration:delta', { seq, delta });
-          },
-          finishNarration: async (_triggerSeq, content) => {
-            const seq = await enqueue(roomId, () =>
-              persistAndDeliver(roomId, sessionId, { type: 'narration', content }),
-            );
-            emitChecked(io.to(`room:${roomId}`), 'narration:done', { seq });
-          },
-          alertKp: (code, message) => {
-            // E-AI-01 玩家无感：告警只定向 Host/副 Host（TDD §11；T-M8-06 副 Host 代行）
-            for (const socketId of alertTargets()) {
-              emitError(io.to(socketId), code, message);
-            }
-          },
-          recordDirective: (ev) => {
-            recordDirectiveFailure(roomId, sessionId, ev);
-          },
-          notifyFallback: async () => {
-            await enqueue(roomId, () =>
-              persistAndDeliver(roomId, sessionId, {
-                type: 'system',
-                subtype: 'notice',
-                content: 'KP 指令协议本轮停用，请玩家使用 .r 手动掷骰',
-              }),
-            );
-          },
-        });
+          options,
+        );
         // AI 梗概提案（T-M11-04，ADR-3-09 链外）：回合完成后判断，不占主叙事循环。
         // 开关 settings.aiSynopsis（默认关）；trim>0 才生成；失败静默回退无提案。
         if (session?.settings.aiSynopsis === true && turnTrace) {
@@ -1267,7 +1302,7 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     memberInvokeRound.set(me.roomId, invoked);
 
     const lastSeq = seqCounters.get(sessionId) ?? 0;
-    scheduleAiTurn(me.roomId, sessionId, lastSeq);
+    scheduleAiTurn(me.roomId, sessionId, lastSeq, { alwaysFinish: true });
   }
 
   /** KP prompt 预览（T-M2-05，FR-13）：host only，trace 定向回请求 socket；seq 语义见 PreviewOptions */
@@ -1376,6 +1411,8 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
         }),
       );
     }
+    // room:sync：离线者必须从其余成员的成员栏消失（成员名映射失效会退回 memberId 直显）
+    await emitRoomSync(me.roomId);
   }
 
   /**
@@ -1430,6 +1467,8 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
           content: `Host 已转让给 ${target.name}`,
         });
       }
+      // room:sync：角色换位必须到达全员成员栏（原 Host 降为玩家、新 Host 标记）
+      await emitRoomSync(roomId);
       return { ok: true, memberId: toMemberId };
     });
   }

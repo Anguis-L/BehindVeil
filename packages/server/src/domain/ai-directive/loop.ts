@@ -131,8 +131,17 @@ export interface AiTurnPorts {
 /**
  * 运行一次 AI 回合：处理完 prompt 链与检定闭环后返回。
  * 每段 LLM 请求产出独立一段 NarrationMsg（检定打断即分段）。
+ *
+ * @param alwaysFinish 显式触发源（ai:invoke：KP 主动要一段回应）传 true——即使 LLM
+ *   空回包也照常收尾并广播 done，否则调用方等 done 会永久挂住；玩家 IC 自动触发传
+ *   false（缺省），空回包整段丢弃，不往时间线落空气泡（2026-10-08 模拟实团回归）。
  */
-export async function runAiTurn(triggerSeq: number, ports: AiTurnPorts): Promise<void> {
+export async function runAiTurn(
+  triggerSeq: number,
+  ports: AiTurnPorts,
+  options: { alwaysFinish?: boolean } = {},
+): Promise<void> {
+  const alwaysFinish = options.alwaysFinish ?? false;
   let executed = 0;
   let wrapUpPending = false;
   let wrapUpDone = false;
@@ -350,11 +359,17 @@ export async function runAiTurn(triggerSeq: number, ports: AiTurnPorts): Promise
     // 流终：剩余叙事全部广播（truncated 已把 emitted 推到末尾时此处 no-op）
     emitTo(fullText.length);
     await Promise.all(effects);
-    await ports.finishNarration(
-      triggerSeq,
-      `${narrative.join('')}${aborted ? '\n（生成中断）' : ''}`,
-      aborted,
-    );
+    const body = narrative.join('');
+    // 空回包不收尾（2026-10-08 模拟实团回归）：剧本耗尽 / 网关截断 / 只产指令块时，
+    // 会往时间线落一串空气泡 + 空 done，界面看上去像"消息卡在缓存里"。
+    // 判据是**本次一个 delta 都没广播过**（emitted === 0）且触发源非显式：
+    // 广播过就必须收尾，否则前端流式占位等不到 done 会永久挂着；ai:invoke 是 KP
+    // 主动要回应，调用方按 done 等回包，空回包也得给信号。
+    if (!alwaysFinish && emitted === 0 && !aborted && !body.trim()) {
+      const needsEmptyWrapUp = wrapUpPending && !wrapUpDone;
+      if (executedHere === 0 && !needsEmptyWrapUp) return;
+    }
+    await ports.finishNarration(triggerSeq, `${body}${aborted ? '\n（生成中断）' : ''}`, aborted);
 
     const needsWrapUp = wrapUpPending && !wrapUpDone;
     if (executedHere === 0 && !needsWrapUp) return;
