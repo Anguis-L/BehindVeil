@@ -282,10 +282,21 @@ describe('parseSettingsDraft（LLM 参数校验）', () => {
     expect(parseSettingsDraft({ ...draft, temperature: '2.5' }, settings).errors).toEqual({
       temperature: 'temperature 需在 0–2 之间',
     });
-    expect(parseSettingsDraft({ ...draft, temperature: '' }, settings).errors).toEqual({
-      temperature: 'temperature 必须是数字',
-    });
     expect(parseSettingsDraft({ ...draft, temperature: 'abc' }, settings).ok).toBe(false);
+  });
+
+  it('留空 = 不修改该项（空草稿不该满屏报错）', () => {
+    const result = parseSettingsDraft(
+      {
+        temperature: '',
+        maxHistoryMessages: '',
+        worldBookBudgetTokens: '',
+        nat20Rule: 'attack_only',
+      },
+      settings,
+    );
+    expect(result.errors).toEqual({});
+    expect(result.patch).toEqual({});
   });
 
   it('temperature 边界 0 与 2 合法', () => {

@@ -8,24 +8,23 @@ import MessageCard from '../components/MessageCard.vue';
 import KpConsole from '../components/KpConsole.vue';
 import StateBoardPanel from '../components/StateBoardPanel.vue';
 import CardImportPanel from '../components/CardImportPanel.vue';
+import SetupPanel from '../components/SetupPanel.vue';
 import WorldBookEditor from '../components/WorldBookEditor.vue';
 
 const store = useSessionStore();
 const draft = ref('');
 const mode = ref<'ic' | 'ooc'>('ic');
-const moduleId = ref('');
 const listEl = ref<HTMLElement | null>(null);
 
-/** 右栏标签（tokens.css：--bv-rail-right 角色 / 手记 / KP 控制台 / 状态板 / 卡库 / 世界书） */
-type RailTab = 'roster' | 'notes' | 'kp' | 'board' | 'cards' | 'worldbook';
+/** 右栏标签（角色选择已移到主区开局准备，这里只留房内工具面板） */
+type RailTab = 'notes' | 'kp' | 'board' | 'cards' | 'worldbook';
 const railTab = ref<RailTab>('board');
 /** 世界书编辑器仅 Host 可见（读写房间世界书，与 KP 控制台同权限级别） */
 const railTabs = computed<Array<{ key: RailTab; label: string }>>(() => [
   { key: 'board', label: '状态板' },
-  { key: 'roster', label: '角色' },
   { key: 'notes', label: '手记' },
   { key: 'kp', label: 'KP 控制台' },
-  { key: 'cards', label: '卡库' },
+  { key: 'cards', label: '角色卡' },
   ...(store.role === 'host' ? [{ key: 'worldbook' as const, label: '世界书' }] : []),
 ]);
 
@@ -40,6 +39,23 @@ function toggleDrawer(side: 'left' | 'right'): void {
 }
 
 const canSend = computed(() => store.role !== 'observer' && store.activeSessionId !== null);
+
+/** 迭代 10：离开房间——清座席回首页，下次进来是干净的身份（不会静默顶掉旧座） */
+function leave(): void {
+  store.leaveRoom();
+}
+
+/** 邀请码常驻顶部可复制（建房后不再停留结果页，这一步不能丢） */
+const copied = ref(false);
+async function copyInvite(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(store.inviteCode);
+    copied.value = true;
+    setTimeout(() => (copied.value = false), 1600);
+  } catch {
+    copied.value = false;
+  }
+}
 
 const ordered = computed(() => store.messages);
 
@@ -96,44 +112,6 @@ function senderName(msg: Message): string {
   }
   return '';
 }
-
-// ---- KP prompt 预览（T-M2-09，FR-13）----
-
-interface ScanDetail {
-  hitUids: number[];
-  hits: Array<{ uid: number; matchedKeys: string[]; matchedSecondary: string[]; kpOnly: boolean }>;
-}
-interface BudgetDetail {
-  includedUids: number[];
-  droppedUids: number[];
-}
-interface ValidateDetail {
-  totalTokens: number;
-  hardCap: number | null;
-  overBudget: boolean;
-}
-
-/** trace.detail 是 unknown（线上形状 z.unknown），按已知阶段形状窄化（配防御式默认） */
-function stageDetail<T>(name: string, fallback: T): T {
-  const detail = store.preview?.stages.find((s) => s.name === name)?.detail;
-  return (detail as T | undefined) ?? fallback;
-}
-
-const scanDetail = computed<ScanDetail>(() =>
-  stageDetail('S3-worldbook-scan', { hitUids: [], hits: [] }),
-);
-const budgetDetail = computed<BudgetDetail>(() =>
-  stageDetail('S4-budget-cut', { includedUids: [], droppedUids: [] }),
-);
-const validateDetail = computed<ValidateDetail>(() =>
-  stageDetail('S7-validate', { totalTokens: 0, hardCap: null, overBudget: false }),
-);
-
-function hitLabel(h: ScanDetail['hits'][number]): string {
-  const keys = h.matchedKeys.length > 0 ? h.matchedKeys.join('、') : '常驻';
-  const sec = h.matchedSecondary.length > 0 ? `（二级：${h.matchedSecondary.join('、')}）` : '';
-  return `#${h.uid}${h.kpOnly ? ' · KP' : ''} — ${keys}${sec}`;
-}
 </script>
 
 <template>
@@ -147,7 +125,13 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
       >
         ☰
       </button>
-      <span class="bv-room__title">{{ store.inviteCode }} · {{ store.name }}</span>
+      <span class="bv-room__title">
+        邀请码 <code class="bv-room__code">{{ store.inviteCode }}</code>
+        <button class="bv-room__copy" type="button" @click="copyInvite">
+          {{ copied ? '已复制' : '复制' }}
+        </button>
+        <span class="bv-room__me">· {{ store.name }}</span>
+      </span>
       <span class="bv-room__session">
         {{ store.activeSessionId ? `会话 ${store.activeSessionId}` : '尚未开团' }}
       </span>
@@ -160,6 +144,7 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
       >
         ⋯
       </button>
+      <button class="bv-room__leave" type="button" @click="leave">离开</button>
     </header>
 
     <div class="bv-room__body">
@@ -178,7 +163,6 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
             ✕
           </button>
         </div>
-        <h2 class="bv-room__rail-title">成员（{{ store.members.length }}）</h2>
         <ul class="bv-room__members">
           <li v-for="m in store.members" :key="m.id" class="bv-room__member">
             <span>{{ m.name }}</span>
@@ -190,7 +174,10 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
       </aside>
 
       <section class="bv-room__main">
-        <div ref="listEl" class="bv-room__messages">
+        <!-- 未开团 → 开局准备一屏（剧本 + 角色 + 开始），一级可见，不再藏进右栏 -->
+        <SetupPanel v-if="!store.activeSessionId" />
+
+        <div v-else ref="listEl" class="bv-room__messages">
           <MessageCard
             v-for="msg in ordered"
             :key="msg.seq"
@@ -206,33 +193,22 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
           <blockquote v-if="store.streaming" class="bv-room__streaming">
             <p class="bv-room__streaming-text">{{ store.streaming.content }}<span>▍</span></p>
           </blockquote>
-          <p v-if="ordered.length === 0 && !store.streaming" class="bv-room__empty">
-            还没有消息——开团后开始冒险吧。
+          <p
+            v-if="!store.streaming && !ordered.some((m) => m.type !== 'system')"
+            class="bv-room__empty"
+          >
+            KP 正在酝酿开场——第一次 AI 回应可能要等几秒，别着急。
           </p>
         </div>
 
-        <p v-if="store.error" class="bv-room__error">{{ store.error }}</p>
+        <p v-if="store.activeSessionId && store.error" class="bv-room__error">{{ store.error }}</p>
 
-        <div v-if="store.role === 'host' && !store.activeSessionId" class="bv-room__start">
-          <input
-            v-model="moduleId"
-            class="bv-room__module"
-            placeholder="模组 ID（如 mountains-of-madness）"
-          />
-          <button
-            class="bv-room__send"
-            :disabled="!moduleId.trim()"
-            @click="store.startSession(moduleId.trim())"
-          >
-            开团
-          </button>
-        </div>
-
-        <p class="bv-room__dice-hint">
+        <p v-if="store.activeSessionId" class="bv-room__dice-hint">
           <code>.r 1d100&lt;=60</code> 掷骰 · <code>.rh</code> 暗骰（仅你与 KP 可见）
         </p>
 
-        <div class="bv-room__composer">
+        <!-- 迭代1：未开团时隐藏输入区——禁用状态的输入框只会让人困惑 -->
+        <div v-if="store.activeSessionId" class="bv-room__composer">
           <div class="bv-room__modes" role="tablist">
             <button
               class="bv-room__mode"
@@ -304,65 +280,9 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
         <StateBoardPanel v-if="railTab === 'board'" />
         <CardImportPanel v-else-if="railTab === 'cards'" />
         <WorldBookEditor v-else-if="railTab === 'worldbook'" />
-        <template v-else-if="railTab === 'kp'">
-          <template v-if="store.role === 'host'">
-            <button
-              class="bv-room__send bv-room__preview-btn"
-              :disabled="!store.activeSessionId || store.previewLoading"
-              @click="store.requestPreview()"
-            >
-              {{ store.previewLoading ? '生成中…' : '生成 Prompt 预览' }}
-            </button>
-
-            <p v-if="!store.preview && !store.previewLoading" class="bv-room__rail-hint">
-              开团后可预览每次 AI 请求的 prompt 组装（各阶段 token、世界书命中、最终 messages）。
-            </p>
-
-            <div v-if="store.preview" class="bv-room__preview">
-              <h3 class="bv-room__preview-title">各阶段 token</h3>
-              <ul class="bv-room__preview-list">
-                <li v-for="s in store.preview.stages" :key="s.name">
-                  <span>{{ s.name }}</span>
-                  <span>{{ s.tokenCount }}</span>
-                </li>
-              </ul>
-
-              <h3 class="bv-room__preview-title">世界书命中</h3>
-              <p v-if="scanDetail.hits.length === 0" class="bv-room__rail-hint">无命中条目</p>
-              <ul v-else class="bv-room__preview-list">
-                <li v-for="h in scanDetail.hits" :key="h.uid">{{ hitLabel(h) }}</li>
-              </ul>
-
-              <h3 class="bv-room__preview-title">预算裁剪</h3>
-              <p class="bv-room__rail-hint">
-                装入 {{ budgetDetail.includedUids.length }} 条 · 被裁
-                {{ budgetDetail.droppedUids.length }} 条（{{
-                  budgetDetail.droppedUids.map((u) => `#${u}`).join('、') || '无'
-                }}）
-              </p>
-
-              <h3 class="bv-room__preview-title">硬顶校验</h3>
-              <p class="bv-room__rail-hint">
-                总 {{ validateDetail.totalTokens }} token
-                <template v-if="validateDetail.hardCap !== null"
-                  >/ 硬顶 {{ validateDetail.hardCap }}</template
-                >
-                <span v-if="validateDetail.overBudget" class="bv-room__preview-over">· 超限</span>
-              </p>
-
-              <h3 class="bv-room__preview-title">最终 messages</h3>
-              <details
-                v-for="m in store.preview.messages"
-                :key="m.role"
-                class="bv-room__preview-msg"
-              >
-                <summary>{{ m.role }}（{{ m.content.length }} 字）</summary>
-                <pre>{{ m.content }}</pre>
-              </details>
-            </div>
-          </template>
-          <p v-else class="bv-room__rail-hint">KP 控制台仅 Host 可见。</p>
-        </template>
+        <!-- 2026-10-09 修复：这里曾是一段内联的「生成 Prompt 预览」简化版，
+             导致 KpConsole（管理令牌/开团/剧本选择/角色概览/AI 设置）整块没上屏 -->
+        <KpConsole v-else-if="railTab === 'kp'" />
         <p v-else class="bv-room__rail-hint">
           {{ railTabs.find((t) => t.key === railTab)?.label }}（建设中）
         </p>
@@ -567,6 +487,50 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
   color: var(--bv-text-primary);
   font: inherit;
 }
+.bv-room__load-samples {
+  margin-left: var(--bv-space-2);
+  padding: 2px 10px;
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: var(--bv-radius-control);
+  background: transparent;
+  color: var(--bv-accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.bv-room__code {
+  font-family: var(--bv-font-mono);
+  letter-spacing: 0.18em;
+  color: var(--bv-accent-lift);
+}
+.bv-room__copy {
+  margin: 0 var(--bv-space-2);
+  padding: 2px 8px;
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: var(--bv-radius-control);
+  background: transparent;
+  color: var(--bv-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.bv-room__me {
+  color: var(--bv-text-tertiary);
+}
+.bv-room__leave {
+  padding: 2px 10px;
+  border: 1px solid var(--bv-line-subtle);
+  border-radius: var(--bv-radius-control);
+  background: transparent;
+  color: var(--bv-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.bv-room__leave:hover {
+  color: var(--bv-judge-fail);
+  border-color: var(--bv-judge-fail);
+}
 .bv-room__dice-hint {
   margin: 0;
   padding: var(--bv-space-1) var(--bv-space-4);
@@ -722,6 +686,10 @@ function hitLabel(h: ScanDetail['hits'][number]): string {
     gap: var(--bv-space-2);
     padding: var(--bv-space-2) var(--bv-space-3);
     font-size: 12px;
+  }
+  /* 迭代 3：窄屏顶栏只留「邀请码 + 复制 + 会话状态」，自己的名字不占位 */
+  .bv-room__me {
+    display: none;
   }
   .bv-room__messages {
     padding: var(--bv-space-3) var(--bv-space-2);

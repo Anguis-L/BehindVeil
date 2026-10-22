@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session';
 import {
   buildSearchQuery,
@@ -17,6 +17,7 @@ import {
   type SettingsDraft,
 } from '../kp-console.js';
 import type { GlobalIndexEntry } from '@behindveil/shared';
+import LlmSettingsPanel from './LlmSettingsPanel.vue';
 
 /**
  * KP 控制台（T-M6-04/05，FR-13 / R-02）：房间页右栏的第三个标签，不是独立页面——
@@ -30,6 +31,58 @@ const store = useSessionStore();
 
 const moduleId = ref('');
 const tokenDraft = ref(store.adminToken);
+
+// ---- 剧本选择（2026-10-08 可用性改造）----
+// 原来是让 KP 手填「模组 ID」——没人知道 ID 从哪来。现在列已装载的剧本供选，
+// 一台新机器连剧本都没有时给「一键装载示例」，先跑起来再说。
+const RULEBOOK_LABEL: Record<string, string> = {
+  coc7: '克苏鲁 7 版',
+  dnd5e: '龙与地下城 5e',
+  generic: '通用规则',
+};
+
+const modulesReady = ref(false);
+const moduleNotice = ref('');
+
+function rulebookLabel(id: string): string {
+  return RULEBOOK_LABEL[id] ?? id;
+}
+
+async function refreshModules(force = false): Promise<void> {
+  if (modulesReady.value && !force) return;
+  await store.loadModules();
+  modulesReady.value = true;
+  // 空手进来的人不该面对一个空下拉：有剧本就默认选中第一个
+  if (!moduleId.value && store.modules.length > 0) moduleId.value = store.modules[0]!.id;
+}
+
+async function installSamples(): Promise<void> {
+  moduleNotice.value = '正在装载示例剧本…';
+  const message = await store.installSampleModules();
+  await refreshModules(true);
+  moduleNotice.value = message === '' ? store.error || '装载失败' : message;
+}
+
+// 令牌换了要重拉（管理面 401 时列表是空的），挂载时先拉一次
+onMounted(() => void refreshModules());
+
+// ---- 角色认领现状（只读概览；真正的认领动作在「角色卡」标签）----
+/** 成员已认领的角色名；未认领返回 undefined（时间线里 KP 也就没法点名） */
+function pcNameOf(memberId: string): string | undefined {
+  const pc = store.stateBoard?.pcs?.[memberId];
+  if (!pc) return undefined;
+  const name = (pc.sheet as { name?: unknown }).name;
+  return typeof name === 'string' && name !== '' ? name : undefined;
+}
+
+const showLlm = ref(false);
+watch(
+  () => store.adminToken,
+  () => {
+    modulesReady.value = false;
+    void refreshModules();
+  },
+);
 
 // ---- Host 转让 / 副 Host（T-M8-06，FR-26）----
 const hostTokenDraft = ref('');
@@ -223,8 +276,17 @@ async function doSearch(): Promise<void> {
           </button>
         </div>
         <p class="bv-kp__hint">
-          {{ store.adminToken ? '令牌已填入，会话管理可用' : '未填令牌，会话管理不可用' }}
+          {{
+            store.adminToken
+              ? '令牌已填入，会话管理可用'
+              : '这台服务器多半没设管理令牌（不用填，功能直接可用）；若点下面的按钮提示「需要管理令牌」，再回来填'
+          }}
         </p>
+        <div class="bv-kp__row">
+          <button class="bv-kp__btn bv-kp__btn--ghost" type="button" @click="showLlm = true">
+            ⚙ AI 模型设置（换模型 / 换密钥）
+          </button>
+        </div>
       </section>
 
       <!-- Host 转让 / 副 Host（T-M8-06，FR-26）：hostToken 授权的一次性管理操作 -->
@@ -287,21 +349,46 @@ async function doSearch(): Promise<void> {
 
       <!-- 会话管理：开团 / 结束 / 切换活跃（连载复播） -->
       <section class="bv-kp__block">
-        <h3 class="bv-kp__title">会话管理</h3>
+        <h3 class="bv-kp__title">开团 / 会话管理</h3>
+
+        <label class="bv-kp__field">
+          <span>剧本（这一场跑什么）</span>
+          <select v-model="moduleId" class="bv-kp__input">
+            <option v-if="store.modules.length === 0" value="">（还没有剧本）</option>
+            <option v-for="mod in store.modules" :key="mod.id" :value="mod.id">
+              {{ mod.name }} · {{ rulebookLabel(mod.rulebook) }}
+            </option>
+          </select>
+        </label>
+
+        <div v-if="store.modules.length === 0" class="bv-kp__empty">
+          <p class="bv-kp__hint">
+            还没有剧本。剧本 = 这一场的设定、KP 人设与开局状态，开团必须选一个。
+          </p>
+          <button
+            v-if="store.samplesAvailable"
+            class="bv-kp__btn"
+            type="button"
+            :disabled="store.modulesLoading"
+            @click="installSamples"
+          >
+            {{ store.modulesLoading ? '读取中…' : '装载内置示例剧本' }}
+          </button>
+          <p v-else class="bv-kp__hint">
+            这台机器没带内置示例。把模组文件夹放到服务端 <code>data/modules/</code> 下即可。
+          </p>
+        </div>
+
+        <p v-if="moduleNotice" class="bv-kp__hint">{{ moduleNotice }}</p>
+
         <div class="bv-kp__row">
-          <input
-            v-model="moduleId"
-            class="bv-kp__input"
-            placeholder="新场次模组 ID"
-            @keydown.enter="startSession"
-          />
           <button
             class="bv-kp__btn"
             type="button"
             :disabled="!moduleId.trim()"
             @click="startSession"
           >
-            开新场次
+            {{ store.activeSessionId ? '开新场次' : '用这个剧本开团' }}
           </button>
         </div>
         <div class="bv-kp__row">
@@ -351,6 +438,23 @@ async function doSearch(): Promise<void> {
             </div>
           </li>
         </ul>
+
+        <!-- 角色认领现状（2026-10-08 可用性改造）：只读概览，认领动作在「角色卡」标签 -->
+        <h4 class="bv-kp__sub">角色认领</h4>
+        <ul class="bv-kp__list">
+          <li v-for="member in store.members" :key="member.id" class="bv-kp__row">
+            <span class="bv-kp__hint">{{ member.name }}</span>
+            <span
+              class="bv-kp__badge"
+              :class="{ 'bv-kp__badge--live': pcNameOf(member.id) !== undefined }"
+            >
+              {{ pcNameOf(member.id) ?? '未认领' }}
+            </span>
+          </li>
+        </ul>
+        <p class="bv-kp__hint">
+          认领与改数值在右边的「角色卡」标签：导入角色卡 PNG，或填速建表，再绑到成员。
+        </p>
       </section>
 
       <!-- 跨房间检索（FR-34）：事后找「那句话发生在哪个团」，走管理面只读索引 -->
@@ -614,6 +718,8 @@ async function doSearch(): Promise<void> {
       </section>
     </template>
   </div>
+
+  <LlmSettingsPanel v-if="showLlm" @close="showLlm = false" />
 </template>
 
 <style scoped>
@@ -763,6 +869,22 @@ async function doSearch(): Promise<void> {
 .bv-kp__msg {
   font-size: 12px;
   color: var(--bv-text-secondary);
+}
+/* 剧本选择 / 角色概览（2026-10-08 可用性改造） */
+.bv-kp__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bv-space-2);
+  font-size: 12px;
+  color: var(--bv-text-secondary);
+}
+.bv-kp__empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bv-space-2);
+  padding: var(--bv-space-3);
+  border: 1px dashed var(--bv-line-subtle);
+  border-radius: var(--bv-radius-card);
 }
 .bv-kp__msg pre {
   margin: var(--bv-space-1) 0 0;

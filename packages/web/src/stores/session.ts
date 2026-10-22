@@ -5,9 +5,12 @@ import {
   type KpMetricsPayload,
   type KpMetricsResultPayload,
   type Member,
+  type CardEntry,
   type MemberRole,
   type Message,
+  type ModuleInfo,
   type MsgSendPayload,
+  type PCSheet,
   type PipelineTracePayload,
   type RoomJoinPayload,
   type Session,
@@ -15,6 +18,7 @@ import {
   type StatePatch,
 } from '@behindveil/shared';
 import { readAdminToken, writeAdminToken } from '../admin-token.js';
+import { clearSeat, readSeat, writeSeat } from '../seat.js';
 import type { SessionSettingsPatch } from '../kp-console.js';
 
 /**
@@ -44,10 +48,48 @@ interface ServerToClientEvents {
   'kp:metricsResult': (payload: KpMetricsResultPayload) => void;
   /** 状态板广播（T-M5-06/10，FR-09）：变更后全员一致 */
   'state:broadcast': (payload: { stateBoard: StateBoard }) => void;
+  /** 房间状态快照（2026-10-07）：成员进离/开团后全员对齐成员栏与活跃会话 */
+  'room:sync': (payload: { members: Member[]; activeSessionId: string | null }) => void;
 }
 
 /** kp:promptPreview 承载的管线 trace（T-M2-05/09，FR-13）：类型直接取 shared 契约 */
 export type PromptPreview = PipelineTracePayload;
+
+/**
+ * LLM 运行时配置快照（2026-10-08 可用性改造）：与服务端 LlmRuntimeSnapshot 对齐。
+ * 前端**永远拿不到明文密钥**——只有 hasApiKey 与打码串 apiKeyHint（NFR-03）。
+ */
+export interface LlmSnapshot {
+  provider: string;
+  model: string;
+  baseUrl: string;
+  timeoutMs: number;
+  maxTokens: number;
+  hasApiKey: boolean;
+  apiKeyHint: string;
+  ready: boolean;
+  adapterId: string | undefined;
+  error: string | undefined;
+  source: 'env' | 'runtime';
+  locked: boolean;
+}
+
+/** PATCH /llm 的局部字段：只传要改的；apiKey 空串 = 清除 */
+export interface LlmConfigPatch {
+  provider?: string;
+  model?: string;
+  baseUrl?: string;
+  timeoutMs?: number;
+  maxTokens?: number;
+  apiKey?: string;
+}
+
+export interface LlmTestResult {
+  ok: boolean;
+  latencyMs: number;
+  model: string;
+  message?: string;
+}
 
 interface SessionStartAck {
   ok: boolean;
@@ -103,6 +145,8 @@ export const useSessionStore = defineStore('session', {
     members: [] as Member[],
     messages: [] as Message[],
     maxSeq: 0,
+    /** 本轮进房是否已拉过 REST 历史（join 内部防重入；跨房间重进在 join 开头复位） */
+    historyLoaded: false,
     connected: false,
     connectionLost: false,
     error: '',
@@ -125,6 +169,37 @@ export const useSessionStore = defineStore('session', {
     streaming: null as { seq: number; content: string } | null,
     /** 状态板（T-M5-10，FR-09）：GET /rooms/:id/state 拉初始，state:broadcast 增量维护 */
     stateBoard: null as StateBoard | null,
+    /**
+     * 建房结果（2026-10-08 可用性改造）：邀请码与建房者令牌只在建房响应里回显一次，
+     * 存这里给结果页展示；进房后仍以 seat.ts 的座席为准。
+     */
+    createdRoom: null as {
+      roomId: string;
+      name: string;
+      inviteCode: string;
+      hostToken: string;
+    } | null,
+    /** 剧本/模组列表（管理面 REST GET /modules） */
+    modules: [] as ModuleInfo[],
+    modulesLoading: false,
+    /** 本机是否带内置示例剧本（GET /modules/samples） */
+    samplesAvailable: false,
+    /**
+     * 开局准备（2026-10-09）：卡库与名册。角色选择要能「点一下就选中」，
+     * 所以这两份数据必须常驻 store，而不是散在面板组件里各自拉一次。
+     */
+    cards: [] as CardEntry[],
+    roster: [] as Array<{
+      memberId: string;
+      source: string;
+      cardId?: string;
+      sheet: PCSheet;
+    }>,
+    rosterLoading: false,
+    /** LLM 运行时配置快照（GET /llm；**不含明文密钥**，只有 hasApiKey/apiKeyHint） */
+    llm: null as LlmSnapshot | null,
+    llmLoading: false,
+    llmTesting: false,
   }),
 
   getters: {
@@ -134,10 +209,11 @@ export const useSessionStore = defineStore('session', {
   },
 
   actions: {
-    async join(inviteCode: string, name: string, hostToken: string): Promise<void> {
+    async join(inviteCode: string, name: string, hostToken: string): Promise<boolean> {
       this.error = '';
       this.inviteCode = inviteCode;
       this.name = name;
+      this.historyLoaded = false; // 每次显式进房都重新拉一轮历史
 
       const payload: RoomJoinPayload = {
         inviteCode,
@@ -157,7 +233,9 @@ export const useSessionStore = defineStore('session', {
         this.error = ack.message ?? '加入失败';
         socket?.disconnect();
         socket = null;
-        return;
+        // 进房失败的旧座席已失效（房间删除/成员被清），不清会让恢复流程反复撞墙
+        clearSeat();
+        return false;
       }
 
       this.roomId = ack.roomId ?? '';
@@ -167,10 +245,46 @@ export const useSessionStore = defineStore('session', {
       this.members = ack.members ?? [];
       this.view = 'room';
 
-      // 首次进房：REST 拉最近 50 条（决议 ④）；重连缺口由服务端 lastSeq 补发
-      if (this.maxSeq === 0) await this.fetchHistory();
+      // 座席持久化（2026-10-07）：刷新后凭 memberId 原座重进，不再产生重复成员
+      writeSeat({
+        inviteCode,
+        memberId: this.memberId,
+        name: this.name,
+        hostToken,
+      });
+
+      // 首次进房：REST 拉最近 50 条（决议 ④）；重连缺口由服务端 lastSeq 补发。
+      // 不能用 maxSeq===0 当"首次"判据——重进房自身的 join 通知常抢先于 ack 到达，
+      // maxSeq 已非 0，历史会被整段跳过（2026-10-08 模拟实团回归）。
+      if (!this.historyLoaded) {
+        this.historyLoaded = true;
+        await this.fetchHistory();
+      }
       // 状态板初始拉取（T-M5-10）：之后靠 state:broadcast 增量维护
       await this.fetchState();
+      return true;
+    },
+
+    /**
+     * 座席恢复（2026-10-07）：页面刷新后凭 sessionStorage 里的座席原座重进——
+     * 服务端按 memberId 复用成员，不产生重复成员。恢复失败（房间已删/座席被清）
+     * 清残据并回填进房表单，不让用户从头猜邀请码。
+     */
+    async restoreSeat(): Promise<{
+      restored: boolean;
+      prefill?: { inviteCode: string; name: string };
+    }> {
+      const seat = readSeat();
+      if (!seat) return { restored: false };
+      if (this.view === 'room') return { restored: true };
+      this.memberId = seat.memberId;
+      const ok = await this.join(seat.inviteCode, seat.name, seat.hostToken);
+      if (!ok) {
+        this.memberId = '';
+        this.error = '';
+        return { restored: false, prefill: { inviteCode: seat.inviteCode, name: seat.name } };
+      }
+      return { restored: true };
     },
 
     /** 状态板当前值（T-M5-10）：进房/开团/刷新后调用；未开团为 null */
@@ -210,7 +324,14 @@ export const useSessionStore = defineStore('session', {
         const res = await fetch(`/rooms/${this.roomId}/messages?${params.toString()}`);
         if (!res.ok) return;
         const list = (await res.json()) as Message[];
-        this.ingest(list.slice().reverse()); // 接口降序 → 恢复为时间线正序
+        // 历史与实时流并发到达（重进房自身的 join 通知常常抢先），不能按
+        // `seq <= maxSeq` 丢弃——那会把整段历史判成"已收过"（2026-10-08 模拟实团
+        // 回归：刷新后时间线只剩新消息）。按 seq 去重合并后重排时间线。
+        const bySeq = new Map(this.messages.map((m) => [m.seq, m]));
+        for (const msg of list) if (!bySeq.has(msg.seq)) bySeq.set(msg.seq, msg);
+        this.messages = [...bySeq.values()].sort((a, b) => a.seq - b.seq);
+        const last = this.messages.at(-1);
+        if (last && last.seq > this.maxSeq) this.maxSeq = last.seq;
       } catch {
         // 历史拉取失败不打断进房，实时流仍可用
       }
@@ -282,6 +403,219 @@ export const useSessionStore = defineStore('session', {
     setAdminToken(token: string): void {
       this.adminToken = token.trim();
       writeAdminToken(this.adminToken);
+    },
+
+    // ---- 建房 / 剧本 / AI 模型（2026-10-08 可用性改造）----
+    // 三件事此前都只能靠命令行或手改 config.yaml，页面上是「找不到入口」；
+    // 这里统一收敛成管理面 REST 调用 + 一句人话错误。
+
+    /**
+     * 新建房间（POST /rooms）：建房者令牌只在响应里回一次，落到 createdRoom 给结果页。
+     * 建房后由调用方拿 inviteCode/hostToken 直接 join，用户不必手抄。
+     */
+    async createRoom(name: string, memberLimit: number): Promise<boolean> {
+      this.error = '';
+      try {
+        const room = await adminRequest<{
+          id: string;
+          name: string;
+          inviteCode: string;
+          hostToken: string;
+        }>(
+          '/rooms',
+          'POST',
+          { name, memberLimit },
+          '这台服务器设了管理令牌：请在下方「管理令牌」处填写后再建',
+        );
+        this.createdRoom = {
+          roomId: room.id,
+          name: room.name,
+          inviteCode: room.inviteCode,
+          hostToken: room.hostToken,
+        };
+        return true;
+      } catch (error) {
+        this.error = messageOf(error);
+        return false;
+      }
+    },
+
+    // ---- 开局准备：角色分配（2026-10-09 可用性改造）----
+    // 角色是开局前唯一必须「点选」的东西，所以走的是「选中即落库」，不设确认步骤。
+
+    /** 卡库 + 本房名册一起拉（都走管理面，零配置服务器免令牌） */
+    async loadSetupData(): Promise<void> {
+      if (!this.roomId) return;
+      this.rosterLoading = true;
+      try {
+        this.cards = await adminRequest<CardEntry[]>('/cards', 'GET');
+        this.roster = await adminRequest<typeof this.roster>(`/rooms/${this.roomId}/pcs`, 'GET');
+      } catch (error) {
+        this.error = messageOf(error);
+      } finally {
+        this.rosterLoading = false;
+      }
+    },
+
+    /** 把卡库里的一张玩家卡指派给成员（PUT /rooms/:id/pcs/:memberId） */
+    async assignPc(memberId: string, cardId: string): Promise<boolean> {
+      if (!this.roomId) return false;
+      this.error = '';
+      try {
+        await adminRequest(`/rooms/${this.roomId}/pcs/${memberId}`, 'PUT', { cardId });
+        await this.loadSetupData();
+        return true;
+      } catch (error) {
+        this.error = messageOf(error);
+        return false;
+      }
+    },
+
+    /** 无卡速建：直接给成员建一张空白角色表（名字必填，其余按规则书默认值） */
+    async assignBlankPc(
+      memberId: string,
+      playerName: string,
+      rulebook: 'coc7' | 'dnd5e',
+    ): Promise<boolean> {
+      if (!this.roomId || playerName.trim() === '') return false;
+      this.error = '';
+      const sheet =
+        rulebook === 'coc7'
+          ? {
+              rulebook: 'coc7' as const,
+              playerName: playerName.trim(),
+              occupation: '调查员',
+              str: 50,
+              con: 50,
+              siz: 50,
+              dex: 50,
+              app: 50,
+              int: 50,
+              pow: 50,
+              edu: 50,
+              luck: 50,
+              hp: 10,
+              mp: 10,
+              san: 50,
+              db: '0',
+              build: '0',
+              skills: {},
+            }
+          : {
+              rulebook: 'dnd5e' as const,
+              playerName: playerName.trim(),
+              occupation: '冒险者',
+              abilities: { str: 10, dex: 10, con: 10, int: 10, wis: 10, cha: 10 },
+              proficiencyBonus: 2,
+              ac: 10,
+              hp: { max: 10, current: 10 },
+              proficientSkills: [],
+              proficientSaves: [],
+            };
+      try {
+        await adminRequest(`/rooms/${this.roomId}/pcs/${memberId}`, 'PUT', { sheet });
+        await this.loadSetupData();
+        return true;
+      } catch (error) {
+        this.error = messageOf(error);
+        return false;
+      }
+    },
+
+    async undeclarePc(memberId: string): Promise<boolean> {
+      if (!this.roomId) return false;
+      this.error = '';
+      try {
+        await adminRequest(`/rooms/${this.roomId}/pcs/${memberId}`, 'DELETE');
+        await this.loadSetupData();
+        return true;
+      } catch (error) {
+        this.error = messageOf(error);
+        return false;
+      }
+    },
+
+    /** 剧本列表（GET /modules）；顺带探测有没有内置示例可一键装载 */
+    async loadModules(): Promise<void> {
+      this.modulesLoading = true;
+      try {
+        this.modules = await adminRequest<ModuleInfo[]>('/modules', 'GET');
+        const probe = await adminRequest<{ available: boolean }>(
+          '/modules/samples',
+          'GET',
+          undefined,
+          '需要管理令牌',
+        ).catch(() => null);
+        this.samplesAvailable = probe?.available === true;
+      } catch (error) {
+        this.error = messageOf(error);
+        this.modules = [];
+      } finally {
+        this.modulesLoading = false;
+      }
+    },
+
+    /** 一键装载内置示例剧本（POST /modules/samples，幂等）：返回给人看的总结 */
+    async installSampleModules(): Promise<string> {
+      this.error = '';
+      try {
+        const results = await adminRequest<
+          Array<{
+            id: string;
+            name?: string;
+            status: 'installed' | 'already' | 'skipped';
+            message?: string;
+          }>
+        >('/modules/samples', 'POST');
+        const installed = results.filter((r) => r.status === 'installed').length;
+        const already = results.filter((r) => r.status === 'already').length;
+        const skipped = results.filter((r) => r.status === 'skipped');
+        await this.loadModules();
+        if (skipped.length > 0) {
+          return `装好 ${installed} 个、已有 ${already} 个；${skipped.length} 个校验失败：${skipped[0]?.message ?? ''}`;
+        }
+        return `已装载 ${installed} 个剧本${already > 0 ? `（另有 ${already} 个之前已装）` : ''}`;
+      } catch (error) {
+        this.error = messageOf(error);
+        return '';
+      }
+    },
+
+    /** 当前 AI 配置（GET /llm） */
+    async loadLlmConfig(): Promise<void> {
+      this.llmLoading = true;
+      try {
+        this.llm = await adminRequest<LlmSnapshot>('/llm', 'GET');
+      } catch (error) {
+        this.error = messageOf(error);
+        this.llm = null;
+      } finally {
+        this.llmLoading = false;
+      }
+    },
+
+    /** 保存 AI 配置（PATCH /llm）：下一次 AI 调用即生效，无需重启服务 */
+    async saveLlmConfig(patch: LlmConfigPatch): Promise<boolean> {
+      this.error = '';
+      try {
+        this.llm = await adminRequest<LlmSnapshot>('/llm', 'PATCH', patch);
+        return true;
+      } catch (error) {
+        this.error = messageOf(error);
+        return false;
+      }
+    },
+
+    /** 连通性自检（POST /llm/test）：可带一份未保存的配置先试后存 */
+    async testLlmConnection(patch?: LlmConfigPatch): Promise<LlmTestResult> {
+      this.llmTesting = true;
+      try {
+        return await adminRequest<LlmTestResult>('/llm/test', 'POST', patch ?? {});
+      } catch (error) {
+        return { ok: false, latencyMs: 0, model: '', message: messageOf(error) };
+      } finally {
+        this.llmTesting = false;
+      }
     },
 
     /** 会话列表（GET /rooms/{id}/sessions）：管理面，需令牌 */
@@ -383,6 +717,12 @@ export const useSessionStore = defineStore('session', {
       socket = null;
       this.$reset();
     },
+
+    /** 迭代 10：离开房间——清座席回首页；不清会让刷新后静默顶回旧座 */
+    leaveRoom(): void {
+      clearSeat();
+      this.reset();
+    },
   },
 });
 
@@ -394,8 +734,10 @@ export const useSessionStore = defineStore('session', {
  */
 async function adminRequest<T>(
   path: string,
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   body?: unknown,
+  /** 401 的人话提示：不同场景的补救动作不同（KP 控制台填 vs 建房面板填） */
+  tokenHint: string = ADMIN_TOKEN_HINT,
 ): Promise<T> {
   const token = readAdminToken();
   const res = await fetch(path, {
@@ -406,7 +748,7 @@ async function adminRequest<T>(
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  if (res.status === 401) throw new Error(ADMIN_TOKEN_HINT);
+  if (res.status === 401) throw new Error(tokenHint);
   const payload: unknown = await res.json().catch(() => null);
   if (!res.ok) throw new Error(errorMessage(payload, res.status));
   return payload as T;
@@ -434,7 +776,12 @@ function getSocket(): Socket<ServerToClientEvents, ClientToServerEvents> {
     store.connected = true;
     store.streaming = null; // 重连后 lastSeq 补发带来完整叙事，流式占位作废
     if (store.view === 'room' && store.memberId) {
-      // 断线重连：重入房并让服务端补发缺口
+      // 断线重连：重入房并让服务端补发缺口。
+      // hostToken 必须回传（2026-10-08 模拟实团回归）：token-Host 房的重连缺它时，
+      // 服务端无法核验 Host 身份 → 原成员被置空并以玩家身份新建重复成员，
+      // 且 presence 降级为玩家（预览/状态编辑全部被拒）。座席凭据与首发一致。
+      const seat = readSeat();
+      const hostToken = seat?.memberId === store.memberId ? (seat?.hostToken ?? '') : '';
       socket?.emit(
         'room:join',
         {
@@ -442,6 +789,7 @@ function getSocket(): Socket<ServerToClientEvents, ClientToServerEvents> {
           name: store.name,
           wantRole: 'player',
           memberId: store.memberId,
+          ...(hostToken ? { hostToken } : {}),
           ...(store.maxSeq > 0 ? { lastSeq: store.maxSeq } : {}),
         },
         (resp: JoinAck) => {
@@ -449,6 +797,7 @@ function getSocket(): Socket<ServerToClientEvents, ClientToServerEvents> {
             store.connectionLost = false;
             store.activeSessionId = resp.activeSessionId ?? null;
             store.members = resp.members ?? [];
+            if (resp.role) store.role = resp.role; // 服务端权威角色回写（防降级漂移）
           }
         },
       );
@@ -490,6 +839,13 @@ function getSocket(): Socket<ServerToClientEvents, ClientToServerEvents> {
 
   socket.on('state:broadcast', (payload) => {
     store.stateBoard = payload.stateBoard;
+  });
+
+  // 房间状态快照（2026-10-07）：成员进离/开团后全员对齐——此前已连接客户端
+  // 只在自己 join ack 时拿过一次名册与活跃会话，之后永远滞后
+  socket.on('room:sync', (payload) => {
+    store.members = payload.members;
+    store.activeSessionId = payload.activeSessionId;
   });
 
   return socket;

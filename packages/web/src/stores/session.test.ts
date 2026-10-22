@@ -277,6 +277,35 @@ describe('send / startSession / fetchHistory', () => {
     await expect(store.fetchHistory()).resolves.toBeUndefined();
     expect(store.messages).toEqual([]);
   });
+
+  it('fetchHistory 与实时流并发：按 seq 去重合并不丢历史（模拟实团回归）', async () => {
+    // 重进房自身的 join 通知（seq 34）会抢先于 REST 历史到达——旧实现按
+    // `seq <= maxSeq` 丢弃，导致刷新后时间线只剩新消息、历史整段消失。
+    const store = useSessionStore();
+    store.roomId = 'room-1';
+    store.activeSessionId = 's_1';
+    store.ingest([icMsg(34)]); // 实时流先到，maxSeq 被顶到 34
+    fetchMock.mockResolvedValue(jsonResponse([icMsg(34), icMsg(33)])); // 接口降序
+
+    await store.fetchHistory();
+
+    expect(store.messages.map((m) => m.seq)).toEqual([33, 34]);
+    expect(store.maxSeq).toBe(34);
+  });
+
+  it('实时流抢先到达（maxSeq 已非 0）也照拉历史（模拟实团回归）', async () => {
+    // join 通知抢先于 ack：旧实现 `if (maxSeq === 0)` 判"非首次"，历史根本不拉。
+    ackOn('room:join', okAck);
+    fetchMock.mockResolvedValue(jsonResponse([icMsg(34), icMsg(2)])); // 接口降序
+    const store = useSessionStore();
+    store.ingest([icMsg(35)]);
+
+    await store.join('ABC234', '阿汀', '');
+
+    expect(fetchMock).toHaveBeenCalledWith('/rooms/room-1/messages?limit=50&sessionId=s_1');
+    expect(store.messages.map((m) => m.seq)).toEqual([2, 34, 35]);
+    expect(store.maxSeq).toBe(35);
+  });
 });
 
 describe('掷骰（T-M4-02，FR-06/14）', () => {

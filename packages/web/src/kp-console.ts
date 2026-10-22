@@ -310,6 +310,9 @@ function toNumber(raw: string): number | null {
  * 校验并对齐服务端口径（rooms.ts 的 SessionSettingsPatchSchema）：
  * temperature 0–2、maxHistoryMessages 正整数、worldBookBudgetTokens 非负整数。
  *
+ * 留空 = 不修改该项（2026-10-09 界面体检修复：此前初始空草稿就满屏
+ * 「必须是数字」，看起来像报错，真人是懵的）。
+ *
  * current 为 null（还没读到会话设置）时不做「是否改动」的比对，照发——
  * KP 在拿不到当前值时也要能把参数写进去。
  */
@@ -321,19 +324,25 @@ export function parseSettingsDraft(
   const patch: SessionSettingsPatch = {};
 
   const temperature = toNumber(draft.temperature);
-  if (temperature === null) errors.temperature = 'temperature 必须是数字';
+  if (draft.temperature.trim() === '') {
+    // 留空 = 不改
+  } else if (temperature === null) errors.temperature = 'temperature 必须是数字';
   else if (temperature < 0 || temperature > 2) errors.temperature = 'temperature 需在 0–2 之间';
   else if (current === null || current.temperature !== temperature) patch.temperature = temperature;
 
   const maxHistoryMessages = toNumber(draft.maxHistoryMessages);
-  if (maxHistoryMessages === null) errors.maxHistoryMessages = '裁剪窗必须是数字';
+  if (draft.maxHistoryMessages.trim() === '') {
+    // 留空 = 不改
+  } else if (maxHistoryMessages === null) errors.maxHistoryMessages = '裁剪窗必须是数字';
   else if (!Number.isInteger(maxHistoryMessages) || maxHistoryMessages <= 0)
     errors.maxHistoryMessages = '裁剪窗必须是正整数';
   else if (current === null || current.maxHistoryMessages !== maxHistoryMessages)
     patch.maxHistoryMessages = maxHistoryMessages;
 
   const worldBookBudgetTokens = toNumber(draft.worldBookBudgetTokens);
-  if (worldBookBudgetTokens === null) errors.worldBookBudgetTokens = '世界书预算必须是数字';
+  if (draft.worldBookBudgetTokens.trim() === '') {
+    // 留空 = 不改
+  } else if (worldBookBudgetTokens === null) errors.worldBookBudgetTokens = '世界书预算必须是数字';
   else if (!Number.isInteger(worldBookBudgetTokens) || worldBookBudgetTokens < 0)
     errors.worldBookBudgetTokens = '世界书预算必须是非负整数';
   else if (current === null || current.worldBookBudgetTokens !== worldBookBudgetTokens)

@@ -211,11 +211,18 @@ async function undeclare(memberId: string): Promise<void> {
 <template>
   <section class="bv-cards">
     <header class="bv-cards__head">
-      <h2 class="bv-cards__title">卡库</h2>
+      <h2 class="bv-cards__title">角色卡</h2>
       <label class="bv-cards__upload">
         <input type="file" accept=".png,.json" :disabled="busy" @change="upload" />
       </label>
     </header>
+
+    <!-- 2026-10-08 可用性改造：这一步在干什么、谁能操作、没卡怎么办，写在最上面 -->
+    <p class="bv-cards__notice">
+      这里是「谁演哪个角色」：① 上传玩家的角色卡（PNG/JSON）② 在下面把它绑到对应成员。
+      只有建房者能做（需要管理令牌）；玩家自己想改数值，找建房者在这儿改。
+      手上没有现成角色卡？用最下面的「速建表」直接填数值就行。
+    </p>
 
     <p v-if="notice" class="bv-cards__notice">{{ notice }}</p>
 
