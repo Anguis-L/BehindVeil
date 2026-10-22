@@ -170,7 +170,11 @@ describe('loadWorldBook', () => {
 
       await expect(loadWorldBook(layout, 'r1')).rejects.toThrow('JSON 解析失败');
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      // 沙箱 rm 慢（单次数百毫秒），带竞速免得清理本身撞用例超时
+      await Promise.race([
+        rm(dir, { recursive: true, force: true }).catch(() => undefined),
+        new Promise((r) => setTimeout(r, 2_000)),
+      ]);
     }
   });
 });

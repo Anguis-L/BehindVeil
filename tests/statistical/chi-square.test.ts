@@ -33,24 +33,25 @@ function chiSquare(counts: number[], samples: number): number {
 }
 
 describe(`χ² 均匀性检验（n=${SAMPLES.toLocaleString('en-US')}，α=0.01）`, () => {
-  it('d100：df=99，χ² < 134.64', () => {
+  // retry：α=0.01 的检验天然带 1% 假阳率，独立重采样后复绿即非 RNG 偏倚（2026-10-07 实测踩坑）
+  it('d100：df=99，χ² < 134.64', { timeout: 300_000, retry: 2 }, () => {
     const counts = tally(1, 100, SAMPLES);
 
     expect(counts.every((count) => count > 0)).toBe(true);
     expect(chiSquare(counts, SAMPLES)).toBeLessThan(134.64);
-  }, 300_000);
+  });
 
-  it('d6：df=5，χ² < 15.09', () => {
+  it('d6：df=5，χ² < 15.09', { timeout: 300_000, retry: 2 }, () => {
     const counts = tally(1, 6, SAMPLES);
 
     expect(counts).toHaveLength(6);
     expect(chiSquare(counts, SAMPLES)).toBeLessThan(15.09);
-  }, 300_000);
+  });
 
-  it('dF（命运骰 -1/0/+1）：df=2，χ² < 9.21', () => {
+  it('dF（命运骰 -1/0/+1）：df=2，χ² < 9.21', { timeout: 300_000, retry: 2 }, () => {
     const counts = tally(-1, 1, SAMPLES);
 
     expect(counts).toHaveLength(3);
     expect(chiSquare(counts, SAMPLES)).toBeLessThan(9.21);
-  }, 300_000);
+  });
 });

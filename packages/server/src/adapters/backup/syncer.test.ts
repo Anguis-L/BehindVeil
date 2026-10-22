@@ -42,8 +42,16 @@ async function expectMirrored(dataDir: string, backupDir: string, rel: string): 
   expect(bak.equals(src), `${rel} 备份与源不一致`).toBe(true);
 }
 
+/** 清理带超时竞速（沙箱 rm 慢，单次数百毫秒会撞 hook 超时；见 worldbook/store.test.ts 同款说明） */
+async function rmQuietly(dir: string): Promise<void> {
+  await Promise.race([
+    rm(dir, { recursive: true, force: true }).catch(() => undefined),
+    new Promise((r) => setTimeout(r, 2_000)),
+  ]);
+}
+
 afterAll(async () => {
-  await Promise.all(created.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  await Promise.all(created.splice(0).map((dir) => rmQuietly(dir)));
 });
 
 describe('BackupSyncer.syncOnce', () => {
