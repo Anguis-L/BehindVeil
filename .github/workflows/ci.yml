@@ -52,6 +52,13 @@ jobs:
       - name: 单元测试与覆盖率门禁（NFR-09 ≥ 85%）
         run: pnpm test:coverage
 
+      # 基准预算（观测项，不设硬门禁）：绝对耗时预算随机器而异——CI 跑 ubuntu 共享机，
+      # 而基线记的是某台桌面机（tests/perf 同款处置：指纹不符即跳过对比只告警）。
+      # 硬门禁在本地 pnpm verify（安静进程单跑）里。
+      - name: 基准预算（观测）
+        run: pnpm bench
+        continue-on-error: true
+
       - name: 许可证门禁（NFR-08 拒收 AGPL/GPL）
         run: pnpm check:licenses
 
