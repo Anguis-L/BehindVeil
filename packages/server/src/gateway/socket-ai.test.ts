@@ -43,6 +43,8 @@ const created: string[] = [];
 interface AiServer {
   port: number;
   inviteCode: string;
+  roomId: string;
+  sessionId: string;
   layout: DataLayout;
   host: Socket;
   player: Socket;
@@ -53,20 +55,27 @@ interface AiServer {
 
 async function startAiServer(
   script: MockScriptStep[],
-  opts: { llm?: LlmAdapter; rulebook?: 'coc7' | 'dnd5e' } = {},
+  opts: { llm?: LlmAdapter; rulebook?: 'coc7' | 'dnd5e'; ai?: boolean } = {},
 ): Promise<AiServer> {
   const rulebook = opts.rulebook ?? 'coc7';
+  const aiEnabled = opts.ai ?? true;
   const dataDir = await mkdtemp(path.join(tmpdir(), 'bv-socket-ai-'));
   created.push(dataDir);
   const layout = createDataLayout(dataDir);
   const app: FastifyInstance = Fastify({ logger: false });
   const mock = createMockLlm({ script });
-  const gateway = attachGateway(app, {
-    layout,
-    initialSeqs: new Map(),
-    llm: opts.llm ?? mock,
-    chat: { model: 'mock-model', temperature: 0.7, maxTokens: 2048 },
-  });
+  // ai:false → 装配侧没接上 LLM（路径 3：AI 未接入/未配置）
+  const gateway = attachGateway(
+    app,
+    aiEnabled
+      ? {
+          layout,
+          initialSeqs: new Map(),
+          llm: opts.llm ?? mock,
+          chat: { model: 'mock-model', temperature: 0.7, maxTokens: 2048 },
+        }
+      : { layout, initialSeqs: new Map() },
+  );
   await app.listen({ port: 0, host: '127.0.0.1' });
   const port = (app.server.address() as AddressInfo).port;
 
@@ -193,6 +202,8 @@ async function startAiServer(
   return {
     port,
     inviteCode: room.inviteCode,
+    roomId: room.id,
+    sessionId: sessionAck.session.id,
     layout,
     host,
     player,
@@ -362,20 +373,24 @@ describe('循环上限端到端（TC-FR-05-007）', () => {
   });
 });
 
-describe('剧本耗尽：空内容不落盘（2026-10-08 模拟实团回归）', () => {
-  it('MockLlm 空脚本：空叙事既不落盘也不广播 done，界面不留空气泡', async () => {
+describe('剧本耗尽：空内容不落空气泡，但必须给收尾信号（2026-10-08 + 2026-10-22 P0）', () => {
+  it('MockLlm 空脚本：空叙事不落盘，但广播 done + 落一条玩家可见提示', async () => {
     const srv = await startAiServer([]); // 空剧本 = KP 无话可说
     const hostFeed = collect(srv.host);
+    const playerFeed = collect(srv.player);
 
     srv.player.emit('msg:send', { type: 'ic', content: '我屏住呼吸，等着。' });
-    // 剧本耗尽仍会走完一次 AI 回合（finishNarration 被调用），但内容为空 → 应被丢弃。
-    // 等玩家那条 ic 落盘即说明该回合已处理完（回合串行，ic 先于叙事落盘）。
-    await waitFor(() => hostFeed.msgs.some((m) => m.type === 'ic'), 4000, '玩家 ic 落盘');
+    await waitFor(() => hostFeed.dones.length >= 1, 4000, '回合收尾的 narration:done');
     await new Promise((r) => setTimeout(r, 200));
 
     const narrations = hostFeed.msgs.filter((m) => m.type === 'narration');
-    expect(narrations).toHaveLength(0); // 空叙事不落盘
-    expect(hostFeed.dones).toHaveLength(0); // 也不广播 done（否则前端挂空占位）
+    expect(narrations).toHaveLength(0); // 空叙事不落空气泡（2026-10-08 口径）
+    // 但必须给信号：前端流式占位要收掉，否则界面一直挂着（2026-10-22 P0）
+    expect(hostFeed.dones.length).toBeGreaterThanOrEqual(1);
+    expect(playerFeed.dones).toEqual(hostFeed.dones); // 玩家侧同样收到收尾信号
+    const notices = hostFeed.msgs.filter((m) => m.type === 'system' && m.subtype === 'notice');
+    expect(notices.length).toBeGreaterThanOrEqual(1);
+    expect((notices[0] as { content: string }).content).toContain('KP 暂未回应');
     expect(hostFeed.msgs.some((m) => m.type === 'ic')).toBe(true); // 玩家发言照常落盘
     await srv.cleanup();
   });
@@ -400,6 +415,83 @@ describe('剧本耗尽：空内容不落盘（2026-10-08 模拟实团回归）',
     await waitFor(() => hostFeed.dones.length >= 1, 4000, 'ai:invoke 的 done');
 
     expect(hostFeed.dones).toHaveLength(1);
+    await srv.cleanup();
+  });
+});
+
+describe('玩家触发的 AI 回合必须收尾（2026-10-22 P0：绝不允许消息石沉大海）', () => {
+  it('路径 1：整轮只有被白名单拒绝的指令块 → 玩家收到 done + 可见提示，无空气泡', async () => {
+    // 真团现场同型：AI 只吐了指令块（被拒）→ 块内容被剥离 → 整轮零可见叙事
+    const srv = await startAiServer([
+      { directive: { op: 'roll', target: 'pc:alice', skill: '侦查' } },
+    ]);
+    const hostFeed = collect(srv.host);
+    const playerFeed = collect(srv.player);
+
+    srv.player.emit('msg:send', { type: 'ic', content: '我宣称侦查成功。' });
+    await waitFor(() => playerFeed.dones.length >= 1, 4000, '玩家侧的 narration:done');
+
+    // 玩家侧收到收尾信号（界面不会一直挂着）
+    expect(playerFeed.dones.length).toBeGreaterThanOrEqual(1);
+    expect(playerFeed.dones).toEqual(hostFeed.dones);
+    // 玩家侧收到一条可见提示
+    const notices = playerFeed.msgs.filter((m) => m.type === 'system' && m.subtype === 'notice');
+    expect(notices.length).toBeGreaterThanOrEqual(1);
+    const content = (notices[0] as { content: string }).content;
+    expect(content).toContain('KP 暂未回应');
+    // 不落空气泡（2026-10-08 口径）
+    expect(playerFeed.msgs.filter((m) => m.type === 'narration')).toHaveLength(0);
+    // 玩家无感：提示不带内部失败原因/指令块原文（细节只走 KP 端）
+    expect(content).not.toContain('未知 op');
+    expect(content).not.toContain('aidle');
+    expect(content).not.toContain('roll');
+    expect(hostFeed.errors.some((e) => e.code === 'E-AI-01')).toBe(true);
+    expect(playerFeed.errors).toHaveLength(0);
+    await srv.cleanup();
+  });
+
+  it('路径 2：回合内部错误 → 房间全员收到 done + 可见失败提示，细节只给 Host', async () => {
+    const srv = await startAiServer([{ delta: '回应。' }]);
+    const hostFeed = collect(srv.host);
+    const playerFeed = collect(srv.player);
+
+    // 破坏会话存档（schemaVersion 超前 → 读盘抛错）→ 触发回合内部错误分支
+    await writeFile(
+      srv.layout.sessionFile(srv.roomId, srv.sessionId),
+      JSON.stringify({ schemaVersion: 999 }),
+      'utf8',
+    );
+
+    srv.player.emit('msg:send', { type: 'ic', content: '我继续往前走。' });
+    await waitFor(() => playerFeed.dones.length >= 1, 4000, '玩家侧的 narration:done');
+
+    // 玩家侧：收尾信号 + 一条可见失败提示
+    expect(playerFeed.dones.length).toBeGreaterThanOrEqual(1);
+    expect(playerFeed.dones).toEqual(hostFeed.dones);
+    const notices = playerFeed.msgs.filter((m) => m.type === 'system' && m.subtype === 'notice');
+    expect(notices.length).toBeGreaterThanOrEqual(1);
+    const content = (notices[0] as { content: string }).content;
+    expect(content).toContain('KP 回应失败');
+    // 内部错误细节只给 Host（玩家无感）
+    expect(hostFeed.errors.some((e) => e.code === 'E-SRV-01')).toBe(true);
+    expect(playerFeed.errors).toHaveLength(0);
+    await srv.cleanup();
+  });
+
+  it('路径 3：AI 未接入 → 玩家发言后有明确反馈（可见提示 + 收尾信号）', async () => {
+    const srv = await startAiServer([], { ai: false }); // 装配侧没接上 LLM
+    const hostFeed = collect(srv.host);
+    const playerFeed = collect(srv.player);
+
+    srv.player.emit('msg:send', { type: 'ic', content: '我举手。' });
+    await waitFor(() => playerFeed.dones.length >= 1, 4000, '玩家侧的 narration:done');
+
+    expect(playerFeed.dones.length).toBeGreaterThanOrEqual(1);
+    expect(playerFeed.dones).toEqual(hostFeed.dones);
+    const notices = playerFeed.msgs.filter((m) => m.type === 'system' && m.subtype === 'notice');
+    expect(notices.length).toBeGreaterThanOrEqual(1);
+    expect((notices[0] as { content: string }).content).toContain('AI 未接入');
+    expect(playerFeed.msgs.filter((m) => m.type === 'narration')).toHaveLength(0);
     await srv.cleanup();
   });
 });

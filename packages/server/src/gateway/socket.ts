@@ -71,6 +71,9 @@ import type {
  * - KP prompt 预览（T-M2-05，FR-13）：kp:previewPrompt → host only → kp:promptPreview 定向回包。
  * - AI 触发（T-M3-06，D-07）：玩家 IC 自动触发 + ai:invoke 显式触发（每人每轮 1 次，
  *   「轮」= 相邻两次 AI 回合之间的窗口）；AI 回合独立串行队列，不阻塞消息主链路。
+ * - AI 回合兜底（2026-10-22 P0）：玩家触发的回合**必以 narration:done 收尾**——整轮零
+ *   可见叙事、回合内部错误、AI 未接入三种情形都落一条玩家可见的系统提示（不落空气泡），
+ *   绝不出现「发出去的消息石沉大海、界面一直挂着」。
  * - 玩家骰（T-M4-02/03，FR-06/14）：dice:roll → 解析 → 掷骰 → 落审计 → 广播；
  *   暗骰按决议 D-10 仅投递 Host 与掷骰者；非法骰式回 E-DICE-01（行内提示，不广播）。
  * - 状态板写路径（T-M5-06，FR-09）：state:update → 仅 Host → 房间队列内乐观锁校验
@@ -656,8 +659,10 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     const seq = await enqueue(me.roomId, () =>
       persistAndDeliver(me.roomId, sessionId, appendable, routing),
     );
-    // AI 自动触发（D-07）：仅 IC 消息触发，OOC 不触发；LLM 未装配时为 no-op
-    if (data.type === 'ic' && deps.llm && deps.chat) {
+    // AI 自动触发（D-07）：仅 IC 消息触发，OOC 不触发。
+    // LLM 未装配时同样走 scheduleAiTurn——由它回一条玩家可见的「AI 未接入」提示，
+    // 不能沉默（2026-10-22 P0：发出去的消息不许石沉大海）。
+    if (data.type === 'ic') {
       scheduleAiTurn(me.roomId, sessionId, seq);
     }
   }
@@ -981,6 +986,39 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
   }
 
   /**
+   * 回合收尾兜底（2026-10-22 P0）：落一条玩家可见的系统提示 + 广播 narration:done。
+   *
+   * 用于「玩家触发的 AI 回合没有可见输出」的三种情形：整轮零可见叙事（空回包 /
+   * 指令块被拒）、回合内部错误、AI 未接入。两条口径同时满足：
+   * - **不落叙事气泡**（2026-10-08 模拟实团回归：空气泡 + 空 done 看着像消息卡在缓存里）；
+   * - **必须给信号**（narration:done）——前端流式占位要收掉，否则界面一直挂着。
+   *
+   * 提示只说人话，不带内部失败原因/指令块原文（E-AI-01 玩家无感，细节只走 KP 端）。
+   * 落盘失败也不能抛：catch 分支里抛会把 AI 队列的 promise 变成 unhandled rejection。
+   */
+  async function finishTurnWithNotice(
+    roomId: string,
+    sessionId: string,
+    content: string,
+  ): Promise<void> {
+    let seq: number;
+    try {
+      seq = await enqueue(roomId, () =>
+        persistAndDeliver(roomId, sessionId, {
+          type: 'system',
+          subtype: 'notice',
+          content,
+        }),
+      );
+    } catch (err) {
+      console.error('[gateway] 回合收尾提示落盘失败：', err);
+      // 落盘失败也要给收尾信号（前端占位不能一直挂着）：用会话当前 seq 兜底
+      seq = seqCounters.get(sessionId) ?? 0;
+    }
+    emitChecked(io.to(`room:${roomId}`), 'narration:done', { seq });
+  }
+
+  /**
    * LLM 埋点包装（T-M6-03，R-02 / TDD §9）：在原适配器外套一层，按会话记录
    * 调用耗时、usage 的输入输出 token 与失败次数。失败同样记耗时——用户体感到的
    * 等待真实发生了；失败不记 token（provider 没回 usage）。
@@ -1010,6 +1048,8 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
    * 触发源：玩家 IC 消息（triggerSeq=该消息 seq）或 ai:invoke（triggerSeq=当前 lastSeq）。
    * alwaysFinish：ai:invoke 是 KP 主动要回应，空回包也要给 narration:done 信号
    * （2026-10-08 模拟实团回归：守卫过宽会让等 done 的调用方永久挂住）。
+   * AI 未接入/未配置：玩家触发的回合不能沉默——回一条玩家可见提示 + 收尾信号
+   * （2026-10-22 P0）。
    */
   function scheduleAiTurn(
     roomId: string,
@@ -1017,7 +1057,16 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
     triggerSeq: number,
     options: { alwaysFinish?: boolean } = {},
   ): void {
-    if (!deps.llm || !deps.chat) return;
+    if (!deps.llm || !deps.chat) {
+      // AI 未接入/未配置（2026-10-22 P0）：玩家发言不能石沉大海——
+      // 给一条玩家可见的提示 + 收尾信号（不落叙事气泡）。
+      void finishTurnWithNotice(
+        roomId,
+        sessionId,
+        'AI 未接入，KP 暂时无法回应（尚未配置模型密钥）',
+      );
+      return;
+    }
     const llm = deps.llm;
     const baseChat = deps.chat;
     void enqueueAi(roomId, async () => {
@@ -1224,6 +1273,11 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
                 }),
               );
             },
+            // 整轮零可见叙事（2026-10-22 P0）：落玩家可见提示 + 收尾信号，不落空气泡。
+            // 提示只说人话，不带内部失败原因/指令块原文（E-AI-01 玩家无感）。
+            notifyEmptyTurn: async () => {
+              await finishTurnWithNotice(roomId, sessionId, 'KP 暂未回应，请稍后再试');
+            },
           },
           options,
         );
@@ -1260,11 +1314,15 @@ export function attachGateway(app: FastifyInstance, deps: GatewayDeps): GatewayH
           }
         }
       } catch (err) {
-        // buildMessages/持久化侧未预期失败：对 Host 告警，回合终止（消息主链路不受影响）
+        // buildMessages/持久化侧未预期失败：回合终止（消息主链路不受影响）
         console.error('[gateway] AI 回合失败：', err);
+        // 内部错误细节只给 Host/副 Host（玩家无感）
         for (const socketId of alertTargets()) {
           emitError(io.to(socketId), 'E-SRV-01', 'AI 回合内部错误');
         }
+        // 房间内所有人：收尾信号 + 一条玩家可见的失败提示（2026-10-22 P0：
+        // 玩家触发的回合绝不允许「发出去的消息石沉大海」）
+        await finishTurnWithNotice(roomId, sessionId, 'KP 回应失败，请稍后再试');
       } finally {
         aiRounds.set(roomId, (aiRounds.get(roomId) ?? 0) + 1);
       }

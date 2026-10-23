@@ -72,6 +72,8 @@ interface Harness {
   deltas: string[];
   narrations: { triggerSeq: number; content: string; aborted: boolean }[];
   fallbacks: number;
+  /** 整轮零可见叙事时的玩家提示次数（2026-10-22 P0：不得静默返回） */
+  emptyTurns: number;
   tracker: DirectiveSuccessTracker;
   /** 留档端口收到的失败块（T-M3-07，测试文档 §12.4） */
   records: DirectiveScanEvent[];
@@ -140,6 +142,7 @@ function harness(
   const narrations: { triggerSeq: number; content: string; aborted: boolean }[] = [];
   const records: DirectiveScanEvent[] = [];
   let fallbacks = 0;
+  let emptyTurns = 0;
 
   const llm: LlmAdapter = {
     id: 'scripted',
@@ -239,6 +242,9 @@ function harness(
     notifyFallback: async () => {
       fallbacks += 1;
     },
+    notifyEmptyTurn: async () => {
+      emptyTurns += 1;
+    },
     ...over,
   };
 
@@ -252,6 +258,9 @@ function harness(
     narrations,
     get fallbacks() {
       return fallbacks;
+    },
+    get emptyTurns() {
+      return emptyTurns;
     },
     tracker,
     records,
@@ -345,10 +354,13 @@ describe('检定循环上限（TC-FR-05-006/007）', () => {
     expect(h.alerts).toHaveLength(1);
     expect(h.alerts[0]).toMatchObject({ code: 'E-AI-01' });
     expect(h.alerts[0]!.message).toContain('上限');
-    // 收尾元指令注入在下一请求，请求数仍有界
+    // 请求数仍有界
     expect(h.calls).toHaveLength(2);
     expect(h.calls[1]!.messages.some((m) => m.content === NO_MORE_CHECKS_META)).toBe(true);
-    expect(h.narrations).toHaveLength(2);
+    // 第一段只有指令块、没有可见叙事 → 不落空气泡（2026-10-08 口径），只落收尾段
+    expect(h.narrations).toHaveLength(1);
+    expect(h.narrations[0]!.content).toBe('你收起工具，离开书房。');
+    expect(h.emptyTurns).toBe(0); // 收尾段有可见叙事 → 不提示玩家
   });
 
   it('上限跨请求累计：三次续写后第四次请求仍出指令 → 拦下并收尾', async () => {
@@ -467,6 +479,61 @@ describe('失败事件 → E-AI-01 只达 KP（玩家无感）', () => {
     expect(h.dice).toHaveLength(0);
     expect(h.alerts).toHaveLength(0);
     expect(h.tracker.attempts).toBe(0); // 分母不含截断块
+  });
+});
+
+describe('整轮零可见叙事（2026-10-22 P0：玩家触发的回合不得无声消失）', () => {
+  it('上游空回包：不静默返回 → 落玩家提示端口，且不落空气泡', async () => {
+    const h = harness([{ chunks: [] }]);
+    await runAiTurn(7, h.ports);
+
+    expect(h.emptyTurns).toBe(1); // 必须给收尾信号 + 玩家可见提示
+    expect(h.narrations).toHaveLength(0); // 不落空气泡（2026-10-08 口径）
+    expect(h.deltas).toHaveLength(0);
+    expect(h.alerts).toHaveLength(0); // 空回包不是指令协议错误，不必惊动 KP
+  });
+
+  it('指令块被白名单拒绝：落玩家提示端口，失败原因只走 KP 端告警', async () => {
+    const h = harness([
+      { chunks: [fence('{"op": "roll", "target": "pc:alice", "skill": "侦查"}')] },
+    ]);
+    await runAiTurn(7, h.ports);
+
+    expect(h.emptyTurns).toBe(1);
+    expect(h.narrations).toHaveLength(0);
+    // 失败细节（未知 op）只达 KP 端：玩家提示端口不带载荷，结构上泄露不了细节
+    expect(h.alerts).toHaveLength(1);
+    expect(h.alerts[0]).toMatchObject({ code: 'E-AI-01' });
+    expect(h.alerts[0]!.message).toContain('未知 op');
+  });
+
+  it('指令执行失败（名册查无 PC）：同样落玩家提示端口，不静默返回', async () => {
+    const h = harness([{ chunks: [fence(checkJson())] }], {
+      roster: { skillValue: () => ({ found: false, reason: 'pc-not-found' }) },
+    });
+    await runAiTurn(7, h.ports);
+
+    expect(h.emptyTurns).toBe(1);
+    expect(h.narrations).toHaveLength(0);
+    expect(h.alerts[0]!.message).toContain('查无 PC');
+  });
+
+  it('中途某段为空、后续段有可见叙事 → 不落提示（不打扰玩家）', async () => {
+    const h = harness([{ chunks: [fence(checkJson())] }, { chunks: ['你继续。'] }]);
+    await runAiTurn(7, h.ports);
+
+    expect(h.emptyTurns).toBe(0);
+    expect(h.narrations).toHaveLength(1);
+    expect(h.narrations[0]!.content).toBe('你继续。');
+  });
+
+  it('整轮零可见叙事（指令块独占 + 续写也空）：收尾只落一次提示', async () => {
+    const h = harness([{ chunks: [fence(checkJson())] }, { chunks: [] }]);
+    await runAiTurn(7, h.ports);
+
+    expect(h.emptyTurns).toBe(1);
+    expect(h.narrations).toHaveLength(0);
+    expect(h.dice).toHaveLength(1); // 检定照常执行并落账
   });
 });
 

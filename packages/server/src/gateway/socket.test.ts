@@ -511,8 +511,16 @@ describe('msg:send 主链路（T-M1-05/06）', () => {
     expect(got.msg.type === 'ic' ? got.msg.content : '').toBe('恢复后的消息');
     expect(got.msg.seq).toBe(2); // notice=1；失败的那条没落盘也没占 seq
 
+    // 2026-10-22 P0：IC 消息会触发 AI 回合；本夹具未装配 LLM，回合也必须给玩家
+    // 可见提示与收尾信号（不能石沉大海）。先等该提示落盘再读，避免读取竞态。
+    const aiNotice = await waitBroadcast(host);
+    expect(aiNotice.msg).toMatchObject({ type: 'system', subtype: 'notice' });
+    if (aiNotice.msg.type === 'system') expect(aiNotice.msg.content).toContain('AI 未接入');
+
     const { records } = await new JsonlStore(layout.messagesFile(room.id, sessionId)).readAll();
-    expect(records.map((r) => (r as { seq: number }).seq)).toEqual([1, 2]);
+    // seq 仍连续无空洞：失败的那次写没占号（1=开团提示，2=恢复后的消息，
+    // 3=P0 修复新增的「AI 未接入」玩家提示）
+    expect(records.map((r) => (r as { seq: number }).seq)).toEqual([1, 2, 3]);
     host.close();
   });
 });

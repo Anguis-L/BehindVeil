@@ -126,6 +126,14 @@ export interface AiTurnPorts {
   recordDirective?(ev: DirectiveScanEvent): void;
   /** 二级降级的玩家提示（TDD §5.4：提示玩家 .r 手动骰） */
   notifyFallback(): Promise<void>;
+  /**
+   * 整轮零可见叙事的玩家提示（2026-10-22 P0：玩家触发的回合绝不能无声消失）。
+   *
+   * 回合内没有任何可见叙事时调用：调用方落一条玩家可见的系统提示并广播
+   * narration:done（收尾信号），**不落叙事气泡**（2026-10-08 口径）。
+   * 内部失败原因只走 alertKp（E-AI-01 玩家无感），本提示不得携带任何细节。
+   */
+  notifyEmptyTurn(): Promise<void>;
 }
 
 /**
@@ -135,6 +143,8 @@ export interface AiTurnPorts {
  * @param alwaysFinish 显式触发源（ai:invoke：KP 主动要一段回应）传 true——即使 LLM
  *   空回包也照常收尾并广播 done，否则调用方等 done 会永久挂住；玩家 IC 自动触发传
  *   false（缺省），空回包整段丢弃，不往时间线落空气泡（2026-10-08 模拟实团回归）。
+ *   但「不落空气泡」≠「不给信号」（2026-10-22 P0）：玩家触发的回合即使整轮零可见
+ *   叙事，也必须以 narration:done 收尾，并落一条玩家可见的系统提示——绝不沉默。
  */
 export async function runAiTurn(
   triggerSeq: number,
@@ -146,6 +156,11 @@ export async function runAiTurn(
   let wrapUpPending = false;
   let wrapUpDone = false;
   let protocolDisabled = false;
+  /**
+   * 本回合是否已产生可见叙事（跨请求/续写累计）：整轮零可见才落「KP 暂未回应」提示，
+   * 中途某段为空（指令块独占）不提前打扰玩家（2026-10-22 P0）。
+   */
+  let turnVisible = false;
 
   // 请求次数有确定性上界：续写仅由「执行了检定」（≤3 次）或「强制收尾」（≤1 次）触发
   for (;;) {
@@ -360,19 +375,27 @@ export async function runAiTurn(
     emitTo(fullText.length);
     await Promise.all(effects);
     const body = narrative.join('');
-    // 空回包不收尾（2026-10-08 模拟实团回归）：剧本耗尽 / 网关截断 / 只产指令块时，
-    // 会往时间线落一串空气泡 + 空 done，界面看上去像"消息卡在缓存里"。
-    // 判据是**本次一个 delta 都没广播过**（emitted === 0）且触发源非显式：
-    // 广播过就必须收尾，否则前端流式占位等不到 done 会永久挂着；ai:invoke 是 KP
-    // 主动要回应，调用方按 done 等回包，空回包也得给信号。
-    if (!alwaysFinish && emitted === 0 && !aborted && !body.trim()) {
-      const needsEmptyWrapUp = wrapUpPending && !wrapUpDone;
-      if (executedHere === 0 && !needsEmptyWrapUp) return;
+    // 本段是否有可见叙事（纯空白不算可见）
+    const segmentVisible = body.trim().length > 0;
+    // 段收尾：有可见叙事或生成被中断 → 落叙事气泡 + narration:done。
+    // 空段（既无叙事也无中断）**不落空气泡**（2026-10-08 模拟实团回归口径：
+    // 空气泡 + 空 done 看着像"消息卡在缓存里"）。
+    if (alwaysFinish || segmentVisible || aborted) {
+      await ports.finishNarration(triggerSeq, `${body}${aborted ? '\n（生成中断）' : ''}`, aborted);
+      turnVisible = true;
     }
-    await ports.finishNarration(triggerSeq, `${body}${aborted ? '\n（生成中断）' : ''}`, aborted);
 
     const needsWrapUp = wrapUpPending && !wrapUpDone;
-    if (executedHere === 0 && !needsWrapUp) return;
+    if (executedHere === 0 && !needsWrapUp) {
+      // 回合结束（2026-10-22 P0 修复）：玩家触发的回合必须以 narration:done 收尾。
+      // 整轮零可见叙事时（上游空回包 / 指令块被白名单拒绝 / 指令执行失败）**不得静默
+      // 返回**——前端流式占位等不到 done，界面就一直挂着。改为落一条玩家可见的系统
+      // 提示 + 收尾信号（不落空气泡）；失败细节仍只走 KP 端告警（玩家无感）。
+      if (!alwaysFinish && !turnVisible) {
+        await ports.notifyEmptyTurn();
+      }
+      return;
+    }
     // 续写：重建 prompt（回注已落盘）再来一轮；强制收尾请求在下一迭代注入元指令
   }
 }
