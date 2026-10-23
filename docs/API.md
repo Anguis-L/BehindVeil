@@ -65,8 +65,13 @@
 | GET | `/cards/{cardId}` | 取角色卡全文 |
 | DELETE | `/cards/{cardId}` | 删除角色卡 |
 | GET | `/modules` | 列出已装载模组（坏包跳过，M5） |
+| GET | `/modules/samples` | 探测本机是否带内置示例剧本（`{ available: true }`；没有则 404 + E-MOD-01） |
+| POST | `/modules/samples` | **一键装载内置示例剧本**（幂等：已存在的同名目录不覆盖；校验不过整目录回滚） |
 | POST | `/modules` | 装载模组：`{ moduleId }`（data/modules 下目录名），校验 manifest+三件套（M5） |
 | DELETE | `/modules/{moduleId}` | 卸载模组；活跃会话引用中回 409 + E-MOD-01（D-09，M5） |
+| GET | `/llm` | 看当前接的是哪个模型（**只给「有没有密钥」，永不给明文**） |
+| PATCH | `/llm` | **热更换模型 / 换密钥**：下一次 AI 调用即生效，不用重启；新配置不可用即回滚 |
+| POST | `/llm/test` | 连通性自检：地址错 / 密钥错 / 网络不通，用人话告诉你 |
 | POST | `/rooms/{id}/host-transfer` | Host 转让：`{ hostToken, toMemberId }`，旧 token 轮换失效（M8；鉴权用 hostToken，不用 X-Admin-Token） |
 | PUT | `/rooms/{id}/co-host` | 设/撤副 Host：`{ hostToken, memberId \| null }`（M8；同上，hostToken 鉴权） |
 | GET | `/rooms/{id}/worldbook` | 读房间世界书条目（M11 编辑器） |
@@ -75,6 +80,15 @@
 | GET | `/search` | 跨房间消息检索：`?q=&roomId=&limit=`（M11；走 `data/index/global.jsonl`，结果含暗骰行） |
 
 模组以目录形态放置（`data/modules/<id>/` + manifest + 三件套），zip 上传不在此列。
+
+### 换模型这组端点（`/llm`）要说清楚的三件事
+
+这三条不是实现细节，是安全口径，改代码时别退化：
+
+1. **密钥永不出这台机器**：`GET /llm` 与 `PATCH /llm` 的响应里**没有明文 key**，只有 `hasApiKey`（有没有填）和 `apiKeyHint`（打码串，比如 `sk-a••••7f2c`，用来确认「我填的是不是这一把」）。页面改的 key **只活在服务进程内存里**：不写 `config.yaml`、不写日志、不进任何响应体（NFR-03）。
+2. **重启就回落**：运行时改的配置只在内存里，重启后回落到 `data/config.yaml` + 环境变量 `AIDLE_LLM_KEY`。所以「网页里改完能用」不代表「重启后还在」——要长期生效请改配置文件。
+3. **改坏了不会把 AI 弄瘫**：`PATCH /llm` 先拿新配置试装配，装不起来就**回滚并返回原因**，原来的适配器继续工作（宁可拒绝这次修改，也不静默降级）。另外 `POST /llm/test` 可以带一份**临时配置**先试通再保存——不通也回 200，因为「连不上」是配置问题不是请求错误，前端要显示原因而不是抛异常。
+4. **这组端点是管理面**：设了 `AIDLE_ADMIN_TOKEN` 就得带 `X-Admin-Token` 头（和建房、改配置同一口径）。
 
 ### 玩家端点（免令牌，网页端在用）
 
@@ -154,6 +168,9 @@ curl -X POST http://127.0.0.1:8787/rooms/V1StGXR8_Z5j/sessions/s_01J9Z8Y7X6/end
 - **发送限速** 10 条 / 30 秒 / 人，超了回"发送太频繁"。
 - **非法 payload 会被直接断连**，而不是回个错误码——这是防伪造事件的设计，调试时别以为是 bug。
 - **结束会话后房内不能发言**，得重新开团或把活跃会话切回旧场次。
+- **网页里改的模型配置重启即失效**：`PATCH /llm` 改的 key 只活内存（这是有意的安全设计）。要长期生效就改 `data/config.yaml` + 环境变量 `AIDLE_LLM_KEY`，再重启。
+- **示例剧本装载是幂等的**：`POST /modules/samples` 不会覆盖 `data/modules/` 下已存在的同名目录（你可能改过它的世界书，覆盖等于静默毁数据）。想重置就先删目录再装。
+- **AI 回合永远会给回音**：玩家发言后，AI 回合即使整轮没产生的可见叙事（模型空回包 / 指令块被拒 / AI 未接入 / 回合内部错误），服务端也会落一条提示并给 `narration:done` 收尾信号。前端不该出现「消息发出去、界面一直转圈」的死等状态——真出现就是 bug，不是设计如此。
 
 ## 掷骰这条线是怎么保证「不作弊」的
 

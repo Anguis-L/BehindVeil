@@ -18,6 +18,11 @@ openapi: 3.1.0
 # 见同目录 socketio-asyncapi.yaml。
 #
 # 最近一次回写：2026-09-25（M1 管理面落地 + 四项开放问题拍板）
+#
+# 2026-10-22 回写：补 2026-10-08 上线但此前没进文档的五个操作——
+#   GET /llm、PATCH /llm、POST /llm/test（LLM 运行时配置，packages/server/src/gateway/http/llm-config.ts）
+#   GET /modules/samples、POST /modules/samples（内置示例剧本一键装载，packages/server/src/gateway/http/modules.ts）
+#   这批端点不属 M0–M13 任一里程碑任务卡，只标 x-status + x-source，不标 x-milestone（不编里程碑号）。
 # =============================================================================
 
 info:
@@ -112,6 +117,8 @@ tags:
   - name: 模组
     description: 模组包加载 / 卸载（T-M5-05，FR-10，决议 D-09）
     x-milestone: M5
+  - name: LLM 配置
+    description: AI 模型热更与连通性自检（换模型不用重启；2026-10-08 可用性改造）
   - name: 可观测
     description: 进程内指标（T-M6-03，FR-13 / R-01 / R-02，TDD §9）
     x-milestone: M6
@@ -1574,6 +1581,146 @@ paths:
         '500':
           $ref: '#/components/responses/Internal'
 
+  /modules/samples:
+    get:
+      operationId: getSampleModulesAvailability
+      tags: [模组]
+      summary: 探测本机是否带内置示例剧本
+      description: |
+        内置示例剧本（`examples/modules/*`，随发布包一起带上）是一键装载的前提：
+        新机器上手没剧本就开不了团。
+
+        - 有 → `200 { available: true }`；
+        - 没有（`examples/modules` 目录找不到）→ `404` + `E-MOD-01`
+          「本机没有内置示例剧本」——**这不是请求错误，是「这台机器上没有这个功能」**，
+          前端据此不显示一键装载按钮即可。
+
+        口径边界（与 `POST /modules/samples` 不完全一致）：本端点只查**目录在不在**，
+        不查目录里有没有东西；目录存在但为空时本端点回 200，装载端点才会回 404。
+      x-status: implemented
+      x-source: packages/server/src/gateway/http/modules.ts
+      security:
+        - adminToken: []
+      responses:
+        '200':
+          description: 本机带内置示例剧本
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [available]
+                properties:
+                  available:
+                    type: boolean
+                    const: true
+                examples:
+                  ok:
+                    value:
+                      available: true
+        '401':
+          description: 管理面已开启门禁但请求未携带或携带错误的 X-Admin-Token（错误码 E-MOD-01）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                noToken:
+                  value:
+                    code: E-MOD-01
+                    message: 管理面需要 X-Admin-Token 令牌
+        '404':
+          description: 本机没有内置示例剧本（`examples/modules` 目录找不到）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                missing:
+                  value:
+                    code: E-MOD-01
+                    message: 本机没有内置示例剧本
+        '500':
+          $ref: '#/components/responses/Internal'
+
+    post:
+      operationId: installSampleModules
+      tags: [模组]
+      summary: 一键装载内置示例剧本（幂等）
+      description: |
+        把 `examples/modules/*` 复制进 `data/modules/`（一个示例一个目录），逐包校验
+        （manifest + KP 卡 + 世界书 + init-state），返回每个示例的处理结果。
+
+        `status` 三态：
+
+        | status | 含义 |
+        |---|---|
+        | `installed` | 本次装上了 |
+        | `already` | 之前已经装过（**不覆盖**） |
+        | `skipped` | 校验不过，**整目录回滚**（不留坏包），`message` 里是原因 |
+
+        两条语义要点（别理解反）：
+
+        - **已存在的同名目录不覆盖**：你可能改过世界书 / 初值，覆盖等于静默毁数据——
+          所以对同一个目录再点一次只会拿到 `already`，不会把你的改动冲掉。
+        - **校验不过的包整目录回滚**：复制进来发现不合格就把整个目录删掉，
+          不会在模组列表里留一个坏包。
+
+        本端点幂等：可以反复点，不会重复装、不会覆盖已有内容。
+      x-status: implemented
+      x-source: packages/server/src/gateway/http/modules.ts
+      security:
+        - adminToken: []
+      responses:
+        '201':
+          description: 每个内置示例的处理结果
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SampleModuleInstallResult'
+              examples:
+                one:
+                  value:
+                    - id: fogbridge-5e
+                      name: 雾桥驿站
+                      rulebook: dnd5e
+                      status: installed
+                    - id: greycape-generic
+                      name: 灰岬灯塔夜班
+                      rulebook: generic
+                      status: already
+        '401':
+          description: 管理面已开启门禁但请求未携带或携带错误的 X-Admin-Token（错误码 E-MOD-01）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                noToken:
+                  value:
+                    code: E-MOD-01
+                    message: 管理面需要 X-Admin-Token 令牌
+        '404':
+          description: |
+            本机没有可用的内置示例剧本：`examples/modules` 目录找不到，或目录存在但里面是空的。
+            错误码 `E-MOD-01`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                missing:
+                  value:
+                    code: E-MOD-01
+                    message: 未找到内置示例剧本（examples/modules），请手动放置模组目录
+                empty:
+                  value:
+                    code: E-MOD-01
+                    message: 内置示例剧本目录为空
+        '500':
+          $ref: '#/components/responses/Internal'
+
   /modules/{moduleId}:
     parameters:
       - name: moduleId
@@ -1613,6 +1760,211 @@ paths:
                   value:
                     code: E-MOD-01
                     message: 模组使用中，无法卸载
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /llm:
+    get:
+      operationId: getLlmRuntime
+      tags: [LLM 配置]
+      summary: 查看当前 LLM 运行时配置
+      description: |
+        返回**当前生效**的 AI 模型配置快照（2026-10-08 可用性改造）。
+
+        几条口径要先说清楚：
+
+        - **响应永不回传明文密钥**（NFR-03）：只给 `hasApiKey`（有没有填）与
+          `apiKeyHint`（打码串，如 `sk-a••••7f2c`），供页面确认「我填的是不是这一把」。
+        - `source`：`env` = 来自 `data/config.yaml` + 环境变量 `AIDLE_LLM_KEY`（启动时读的快照）；
+          `runtime` = 页面改过（`PATCH /llm` 生效过）。
+        - `locked`：`true` = 适配器由启动参数注入（测试 / E2E 场景），此时页面只读，
+          `PATCH /llm` 会回 400。
+        - `ready=false` = 适配器装配失败（AI 功能停用，服务本身照常跑），原因见 `error`。
+      x-status: implemented
+      x-source: packages/server/src/gateway/http/llm-config.ts
+      security:
+        - adminToken: []
+      responses:
+        '200':
+          description: LLM 运行时快照（不含明文密钥）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmRuntimeSnapshot'
+              examples:
+                fromEnv:
+                  value:
+                    provider: openai-compat
+                    model: deepseek-chat
+                    baseUrl: https://api.deepseek.com/v1
+                    timeoutMs: 60000
+                    maxTokens: 2048
+                    hasApiKey: true
+                    apiKeyHint: sk-a••••7f2c
+                    ready: true
+                    adapterId: openai-compat
+                    source: env
+                    locked: false
+                notReady:
+                  value:
+                    provider: openai-compat
+                    model: deepseek-chat
+                    baseUrl: ''
+                    timeoutMs: 60000
+                    maxTokens: 2048
+                    hasApiKey: false
+                    apiKeyHint: ''
+                    ready: false
+                    error: 'provider "openai-compat" 需要在配置中提供 llm.baseUrl（兼容端点根，如 https://api.deepseek.com/v1）'
+                    source: env
+                    locked: false
+        '401':
+          description: 管理面已开启门禁但请求未携带或携带错误的 X-Admin-Token（错误码 E-LLM-01）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                noToken:
+                  value:
+                    code: E-LLM-01
+                    message: 管理面需要 X-Admin-Token 令牌
+        '500':
+          $ref: '#/components/responses/Internal'
+
+    patch:
+      operationId: patchLlmRuntime
+      tags: [LLM 配置]
+      summary: 热更 LLM 配置（下次调用即生效，不用重启）
+      description: |
+        局部更新运行时配置：**改完下一次 AI 调用即生效，不需要重启进程**。
+
+        - 请求体**至少给一项**字段；没给的字段保持原值。
+        - `apiKey` 传空串 `""` = **清除已填的密钥**；不传 `apiKey` = 保持原样。
+        - **新配置不可用 → 回滚**：服务端先拿新设置试构造适配器，构造失败就保留原设置并回 400
+          （`message` 里带原因），旧适配器继续服务——不能把 AI 弄瘫。
+        - `locked=true`（适配器由启动参数注入）→ 回 400，页面只读。
+        - 密钥**只活在本进程内存里**：不写 `data/config.yaml`、不写日志、不随任何响应回传；
+          **进程重启后回落到 `config.yaml` + `AIDLE_LLM_KEY`**（想长期固定就配好环境变量）。
+      x-status: implemented
+      x-source: packages/server/src/gateway/http/llm-config.ts
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LlmConfigPatch'
+      responses:
+        '200':
+          description: 更新后的运行时快照（结构同 `GET /llm`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmRuntimeSnapshot'
+        '400':
+          description: |
+            请求体不合法（Zod 校验失败）、`locked` 只读、或新配置不可用（**已回滚，原设置保留**）。
+            错误码 `E-LLM-01`。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                emptyPatch:
+                  value:
+                    code: E-LLM-01
+                    message: '(根): 至少提供一项要修改的配置'
+                unusable:
+                  value:
+                    code: E-LLM-01
+                    message: '新配置不可用，已保留原设置：provider "openai-compat" 需要在配置中提供 llm.baseUrl（兼容端点根，如 https://api.deepseek.com/v1）'
+                locked:
+                  value:
+                    code: E-LLM-01
+                    message: 当前 LLM 适配器由启动参数注入，页面不可修改
+        '401':
+          description: 管理面已开启门禁但请求未携带或携带错误的 X-Admin-Token（错误码 E-LLM-01）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                noToken:
+                  value:
+                    code: E-LLM-01
+                    message: 管理面需要 X-Admin-Token 令牌
+        '500':
+          $ref: '#/components/responses/Internal'
+
+  /llm/test:
+    post:
+      operationId: testLlmConnection
+      tags: [LLM 配置]
+      summary: LLM 连通性自检
+      description: |
+        发一条最小 chat 请求探活（内容 `ping`、`maxTokens=1`），返回是否连通与耗时。
+
+        - **请求体可省略**（不带 body，或带 `{}`）：用当前生效的配置去试。
+        - 可带一份**临时配置**一起试（provider / model / baseUrl / apiKey…）——**只用于这一次探活，
+          不落库**：运行时状态不变（前后两次 `GET /llm` 一致）。用法是「填完先试，通了再 `PATCH /llm` 存」。
+        - **不通也回 200**：探活失败是「配置问题」不是「请求错误」，所以 HTTP 状态仍是 200，
+          失败信息在 `ok=false` 与 `message` 里（人话：地址填错 / 网络不通 / 密钥被拒 / 超时）。
+          前端要读 `message` 展示，**别把它当异常抛**。
+        - 探活超时上限 15 秒（与叙事用的长超时分开：填错地址不会让页面转 60 秒）。
+        - 有效模型名为空（当前配置没模型名，请求体也没给）→ 400 `E-LLM-01`。
+      x-status: implemented
+      x-source: packages/server/src/gateway/http/llm-config.ts
+      security:
+        - adminToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LlmConfigPatch'
+      responses:
+        '200':
+          description: 自检结果（连通与否都在 200 里）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmTestResult'
+              examples:
+                ok:
+                  value:
+                    ok: true
+                    latencyMs: 842
+                    model: deepseek-chat
+                failed:
+                  value:
+                    ok: false
+                    latencyMs: 118
+                    model: deepseek-chat
+                    message: 密钥被拒绝（401）——检查密钥是否填对、是否过期
+        '400':
+          description: 请求体不合法，或有效模型名为空（错误码 E-LLM-01）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                noModel:
+                  value:
+                    code: E-LLM-01
+                    message: 请先填写模型名，再点测试连接
+        '401':
+          description: 管理面已开启门禁但请求未携带或携带错误的 X-Admin-Token（错误码 E-LLM-01）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppError'
+              examples:
+                noToken:
+                  value:
+                    code: E-LLM-01
+                    message: 管理面需要 X-Admin-Token 令牌
         '500':
           $ref: '#/components/responses/Internal'
 
@@ -2832,3 +3184,164 @@ components:
           type: string
           description: source=card 时的卡库文件名
       required: [memberId, sheet, source]
+
+    # ---- LLM 运行时配置（2026-10-08 可用性改造）----
+
+    LlmRuntimeSnapshot:
+      type: object
+      description: |
+        LLM 运行时快照（`GET /llm` 与 `PATCH /llm` 的响应）。
+        **不含明文密钥**（NFR-03）：只给 `hasApiKey` + 打码串 `apiKeyHint`。
+      properties:
+        provider:
+          type: string
+          description: |
+            provider 标识：`openai-compat` / `ollama` / `mock`；
+            凡兼容 `/v1/chat/completions` 的端点（DeepSeek / GLM / Qwen / Kimi / SenseNova…）
+            一律走 `openai-compat`，加新服务商不用改代码。
+          examples: [openai-compat]
+        model:
+          type: string
+          description: 模型名
+          examples: [deepseek-chat]
+        baseUrl:
+          type: string
+          description: 兼容端点根（如 `https://api.deepseek.com/v1`）；未配置时为空串
+        timeoutMs:
+          type: integer
+          minimum: 1
+          description: 单次请求超时（毫秒）
+        maxTokens:
+          type: integer
+          minimum: 1
+          description: 单次生成上限（token）
+        hasApiKey:
+          type: boolean
+          description: 是否已填密钥（**只给「有没有」，不给内容**）
+        apiKeyHint:
+          type: string
+          description: |
+            打码串（首 4 + `••••` + 末 4，如 `sk-a••••7f2c`）；没填密钥时为空串。
+            只用于「我填的是不是这一把」的确认。
+        ready:
+          type: boolean
+          description: |
+            适配器当前可用（AI 能真正跑起来）。`false` = 装配失败，AI 功能停用
+            （服务本身照常跑），原因见 `error`。
+        adapterId:
+          type: string
+          description: 适配器标识（如 `openai-compat` / `ollama` / `mock`）；适配器不可用时该字段不出现
+        error:
+          type: string
+          description: 适配器不可用的原因（装配失败信息）；可用时该字段不出现
+        source:
+          type: string
+          enum: [env, runtime]
+          description: |
+            `env` = 来自 `data/config.yaml` + 环境变量 `AIDLE_LLM_KEY`（启动时读的快照）；
+            `runtime` = 页面改过（`PATCH /llm` 生效过）。
+        locked:
+          type: boolean
+          description: |
+            `true` = 适配器由启动参数注入（测试 / E2E 场景），页面只读——此时 `PATCH /llm` 回 400。
+      required:
+        - provider
+        - model
+        - baseUrl
+        - timeoutMs
+        - maxTokens
+        - hasApiKey
+        - apiKeyHint
+        - ready
+        - source
+        - locked
+
+    LlmConfigPatch:
+      type: object
+      description: |
+        局部配置（`PATCH /llm` 的请求体；`POST /llm/test` 可带同一份做临时探活）。
+        **没给的字段保持原值**；`apiKey` 传空串 = 清除已填的密钥。
+        `PATCH /llm` 要求**至少给一项**字段（`POST /llm/test` 允许空）。
+      properties:
+        provider:
+          type: string
+          minLength: 1
+          maxLength: 60
+          description: provider 标识（`openai-compat` / `ollama` / `mock`）
+        model:
+          type: string
+          maxLength: 200
+          description: 模型名
+        baseUrl:
+          type: string
+          maxLength: 500
+          description: |
+            兼容端点根（如 `https://api.deepseek.com/v1`）。
+            空串表示「不填」（如 ollama 走默认端点）。
+        timeoutMs:
+          type: integer
+          minimum: 1
+          maximum: 600000
+          description: 单次请求超时（毫秒）
+        maxTokens:
+          type: integer
+          minimum: 1
+          maximum: 200000
+          description: 单次生成上限（token）
+        apiKey:
+          type: string
+          maxLength: 500
+          description: |
+            密钥。**空串 = 清除已填的密钥**；不传该字段 = 保持原样。
+            写入后只活在本进程内存里（不落盘、不回显、不写日志）。
+
+    LlmTestResult:
+      type: object
+      description: |
+        连通性自检结果（`POST /llm/test`；**不通也回 200**，失败信息在 `ok=false` 与 `message` 里）。
+      properties:
+        ok:
+          type: boolean
+          description: 是否连通
+        latencyMs:
+          type: integer
+          description: 探活耗时（毫秒）
+        model:
+          type: string
+          description: 实际探测的模型名
+        message:
+          type: string
+          description: |
+            失败原因（人话，直接给页面显示）。常见口径：
+            地址填错 / 网络不通 / 密钥被拒（401）/ 地址或模型不存在（404）/ 请求超时；
+            其余情况原样返回适配器报错文本。
+      required: [ok, latencyMs, model]
+
+    # ---- 内置示例剧本（2026-10-08 可用性改造）----
+
+    SampleModuleInstallResult:
+      type: object
+      description: 内置示例剧本的装载结果（`POST /modules/samples` 返回数组，一个示例一条）
+      properties:
+        id:
+          type: string
+          description: 示例目录名（= manifest.id）
+          examples: [fogbridge-5e]
+        name:
+          type: string
+          description: 模组显示名；坏包取不到时该字段不出现
+          examples: [雾桥驿站]
+        rulebook:
+          type: string
+          enum: [coc7, dnd5e, generic]
+          description: 规则书；坏包取不到时该字段不出现
+        status:
+          type: string
+          enum: [installed, already, skipped]
+          description: |
+            `installed` = 本次装上；`already` = 之前已装（**不覆盖**用户改动）；
+            `skipped` = 校验不过，**整目录已回滚**（不留坏包）。
+        message:
+          type: string
+          description: 失败原因（人话）；仅 `status=skipped` 时出现
+      required: [id, status]
